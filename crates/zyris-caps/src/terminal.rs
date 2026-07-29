@@ -26,7 +26,8 @@ pub struct ExecOutput {
 
 #[zyris::capability(name = "terminal", version = 1)]
 pub trait Terminal {
-    /// Open an interactive PTY; output chunks arrive on the returned stream.
+    /// Open an interactive PTY, starting in the capability's root; output chunks arrive on the
+    /// returned stream.
     #[zyris(uni_stream)]
     async fn open(
         &self,
@@ -45,6 +46,9 @@ pub trait Terminal {
     async fn close(&self, pty: PtyId) -> zyris::Result<()>;
 
     /// Run a command to completion and capture its output.
+    ///
+    /// `cwd` is absolute with a leading `/` (`/home/allen/projects`), otherwise relative to the
+    /// capability's root; omitting it runs in the root itself.
     async fn exec(
         &self,
         command: String,

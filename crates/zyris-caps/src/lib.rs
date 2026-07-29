@@ -4,6 +4,9 @@ pub mod input;
 pub mod screen;
 pub mod terminal;
 
+#[cfg(any(feature = "file-io-impl", feature = "terminal-impl"))]
+mod path;
+
 #[cfg(feature = "file-io-impl")]
 mod file_io_impl;
 #[cfg(feature = "file-io-impl")]

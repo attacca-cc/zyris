@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -8,6 +9,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem}
 use tokio::sync::mpsc;
 use zyris::{Blob, ErrorCode, Streaming, WireError};
 
+use crate::path::resolve_under;
 use crate::terminal::{ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal};
 
 struct PtySession {
@@ -17,8 +19,15 @@ struct PtySession {
 
 pub struct PtyTerminal {
     default_shell: String,
+    root: PathBuf,
     next_id: AtomicU64,
     sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+}
+
+impl PtyTerminal {
+    pub fn rooted(root: impl Into<PathBuf>) -> Self {
+        PtyTerminal { root: root.into(), ..PtyTerminal::default() }
+    }
 }
 
 impl Default for PtyTerminal {
@@ -30,6 +39,7 @@ impl Default for PtyTerminal {
         };
         PtyTerminal {
             default_shell,
+            root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             next_id: AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -52,7 +62,8 @@ impl Terminal for PtyTerminal {
         let pair = system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(pty_err)?;
-        let cmd = CommandBuilder::new(shell.unwrap_or_else(|| self.default_shell.clone()));
+        let mut cmd = CommandBuilder::new(shell.unwrap_or_else(|| self.default_shell.clone()));
+        cmd.cwd(&self.root);
         let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
         let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
         let writer = pair.master.take_writer().map_err(pty_err)?;
@@ -137,9 +148,10 @@ impl Terminal for PtyTerminal {
             c.arg("-c").arg(&command);
             c
         };
-        if let Some(cwd) = cwd {
-            cmd.current_dir(cwd);
-        }
+        cmd.current_dir(match cwd {
+            Some(cwd) => resolve_under(&self.root, &cwd),
+            None => self.root.clone(),
+        });
         let child = cmd.output();
         let output = match timeout_ms {
             Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), child)

@@ -1,10 +1,11 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use zyris::{Blob, Chunk, Datum, ErrorCode, Streaming, WireError};
 
 use crate::file_io::{DirEntry, FileIo, FileStat};
+use crate::path::resolve_under;
 
 const READ_CHUNK: usize = 128 * 1024;
 
@@ -18,28 +19,7 @@ impl LocalFileIo {
     }
 
     fn resolve(&self, path: &str) -> zyris::Result<PathBuf> {
-        let requested = Path::new(path);
-        let mut resolved = self.root.clone();
-        for component in requested.components() {
-            match component {
-                Component::Normal(part) => resolved.push(part),
-                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
-                Component::ParentDir => {
-                    return Err(WireError::new(
-                        ErrorCode::ForbiddenScope,
-                        "path escapes the file_io root",
-                    ));
-                }
-            }
-        }
-        Ok(resolved)
-    }
-
-    fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string()
+        Ok(resolve_under(&self.root, path))
     }
 }
 
@@ -157,7 +137,7 @@ impl FileIo for LocalFileIo {
             tokio::fs::create_dir_all(parent).await.map_err(io_err)?;
         }
         tokio::fs::write(&resolved, &bytes).await.map_err(io_err)?;
-        stat_path(self.relative(&resolved), &resolved).await
+        stat_path(path, &resolved).await
     }
 
     async fn remove(&self, path: String) -> zyris::Result<()> {
