@@ -181,6 +181,9 @@ pub struct ZNewAgent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ZSession {
     pub id: String,
+    /// A session created without a title reads back under Attacca's placeholder, not as absent —
+    /// the title agent replaces it once the session has a first message to name it from, so a
+    /// title seen here is only final for a session that has already taken a turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -189,6 +192,48 @@ pub struct ZSession {
     pub project_id: Option<String>,
     #[serde(default)]
     pub running: bool,
+    /// The session's own system instructions, appended to its agent's for every turn. See
+    /// [`ZNewSession::preamble`]. Absent on a deployment that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preamble: Option<String>,
+}
+
+/// What [`AttaccaApi::create_session_with`] takes: everything [`AttaccaApi::create_session`]'s three
+/// arguments carry, plus the options added since. A struct rather than more arguments because the
+/// generated request struct has no per-field default — a new *argument* on an existing tool is a
+/// decode error for every node built before it, while a new field on a struct whose fields are all
+/// `#[serde(default)]` is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewSession {
+    pub agent_id: String,
+    /// Prefer leaving this unset. Attacca titles a session from its first message, so an untitled
+    /// session gets a real name the moment it is used, in the language that message was written in.
+    /// Set it only for a session a human will go looking for under a name the node already knows —
+    /// a title given here is permanent, and opts the session out of that auto-titling for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Omit to file the session under the account's default project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// System instructions for this session alone, appended to the agent's own preamble on every
+    /// turn — the agent keeps its identity, tools and skills, and this narrows what it is doing
+    /// here. Fixed for the session's lifetime; a node wanting different instructions opens a
+    /// different session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preamble: Option<String>,
+}
+
+/// The window [`AttaccaApi::session_history`] reads. Every field defaults, so the whole timeline is
+/// `ZHistoryQuery::default()`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZHistoryQuery {
+    /// Return only entries past this cursor, exclusive — the `cursor` of the last entry already
+    /// seen, from either this tool or `turn_events`. Omit for the whole timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+    /// At most this many entries, taken oldest-first from `after`. Omit for everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -220,6 +265,9 @@ pub struct ZSessionEvent {
     pub cursor: i64,
     pub kind: String,
     pub payload: serde_json::Value,
+    /// RFC 3339. Absent on a deployment that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -249,13 +297,33 @@ pub trait AttaccaApi {
     /// List the caller's sessions.
     async fn list_sessions(&self, filter: ZSessionFilter) -> zyris::Result<Vec<ZSession>>;
 
-    /// Create a session.
+    /// Create a session. Kept for nodes built before `create_session_with`, which is the same call
+    /// with room for the options added since.
+    ///
+    /// Pass `title` as null unless a human will go looking for this session under a name the node
+    /// already knows: Attacca titles a session from its first message, and a title given here is
+    /// permanent and suppresses that.
     async fn create_session(
         &self,
         agent_id: String,
         title: Option<String>,
         project_id: Option<String>,
     ) -> zyris::Result<ZSession>;
+
+    /// Create a session, with options — most usefully a `preamble`, which gives this session its own
+    /// system instructions on top of its agent's. Leave `title` unset unless the node has a name
+    /// worth pinning; Attacca titles the session from its first message otherwise.
+    async fn create_session_with(&self, session: ZNewSession) -> zyris::Result<ZSession>;
+
+    /// A session's durable timeline, oldest-first: the same events `turn_events` streams, read back
+    /// as a list, so a node that was not connected when they happened can still see them. Mind the
+    /// one difference in `after`: omitting it here means the whole history, where in `turn_events`
+    /// it means live frames only.
+    async fn session_history(
+        &self,
+        session_id: String,
+        query: ZHistoryQuery,
+    ) -> zyris::Result<Vec<ZSessionEvent>>;
 
     /// Post a message, starting a turn. Stream results via `turn_events`.
     async fn send_message(

@@ -8,8 +8,8 @@ use futures_util::StreamExt;
 use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
-    ZMe, ZNewAgent, ZProject, ZScope, ZSession, ZSessionEvent, ZSessionFilter, ZTurnFrame,
-    ZTurnStatus, ATTACCA_API_CAPABILITY,
+    ZHistoryQuery, ZMe, ZNewAgent, ZNewSession, ZProject, ZScope, ZSession, ZSessionEvent,
+    ZSessionFilter, ZTurnFrame, ZTurnStatus, ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
@@ -73,6 +73,7 @@ impl AttaccaApi for StubApi {
             agent_id: Some("agent-1".into()),
             project_id: filter.project_id,
             running: false,
+            preamble: None,
         }])
     }
 
@@ -82,13 +83,48 @@ impl AttaccaApi for StubApi {
         title: Option<String>,
         project_id: Option<String>,
     ) -> zyris::Result<ZSession> {
+        self.create_session_with(ZNewSession { agent_id, title, project_id, preamble: None })
+            .await
+    }
+
+    async fn create_session_with(&self, session: ZNewSession) -> zyris::Result<ZSession> {
         Ok(ZSession {
             id: "session-2".into(),
-            title,
-            agent_id: Some(agent_id),
-            project_id,
+            title: session.title,
+            agent_id: Some(session.agent_id),
+            project_id: session.project_id,
             running: false,
+            preamble: session.preamble,
         })
+    }
+
+    async fn session_history(
+        &self,
+        _session_id: String,
+        query: ZHistoryQuery,
+    ) -> zyris::Result<Vec<ZSessionEvent>> {
+        let all = vec![
+            ZSessionEvent {
+                seq: 1,
+                cursor: 1,
+                kind: "chat_user".into(),
+                payload: serde_json::json!({ "kind": "chat_user", "content": "go" }),
+                created_at: Some("2026-07-29T00:00:00Z".into()),
+            },
+            ZSessionEvent {
+                seq: 2,
+                cursor: 2,
+                kind: "chat_agent".into(),
+                payload: serde_json::json!({ "kind": "chat_agent", "content": "done" }),
+                created_at: Some("2026-07-29T00:00:01Z".into()),
+            },
+        ];
+        let after = query.after.unwrap_or(0);
+        let mut out: Vec<ZSessionEvent> = all.into_iter().filter(|e| e.cursor > after).collect();
+        if let Some(limit) = query.limit {
+            out.truncate(limit as usize);
+        }
+        Ok(out)
     }
 
     async fn send_message(
@@ -118,6 +154,7 @@ impl AttaccaApi for StubApi {
                     cursor: 7,
                     kind: "assistant_message".into(),
                     payload: serde_json::json!({ "text": "hi" }),
+                    created_at: None,
                 },
             }),
             Ok(ZTurnFrame::Delta { kind: ZDeltaKind::Assistant, text: "hi".into() }),
@@ -147,11 +184,43 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 9);
+    assert_eq!(descriptor.tools.len(), 11);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("turn_events").unwrap().transfer, Transfer::UniStream);
+
+    // Tools added within v1: a node discovers them here, and one built before them keeps calling
+    // `create_session` unaffected.
+    assert_eq!(descriptor.tool("create_session").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("create_session_with").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("session_history").unwrap().transfer, Transfer::Unary);
+}
+
+/// The steer toward an unset `title` — leave it off and Attacca's title agent names the session
+/// from its first message — reaches a caller only as prose, so nothing but this test notices if it
+/// is dropped. It travels by two different routes, hence two assertions: schemars carries a field
+/// doc comment into the request schema, while a tool's own doc comment becomes its description. The
+/// three-argument `create_session` has only the second route available, since the macro synthesizes
+/// its request struct from the signature and arguments cannot carry doc comments.
+#[test]
+fn the_title_guidance_reaches_both_session_tools() {
+    let descriptor = attacca_api_capability();
+
+    // The one struct argument comes back as a `$ref`, so the field docs are under `$defs`.
+    let schema = &descriptor.tool("create_session_with").unwrap().request_schema;
+    let title = &schema["$defs"]["ZNewSession"]["properties"]["title"];
+    let description = title["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("unset") && description.contains("first message"),
+        "ZNewSession::title lost its guidance: {description:?}",
+    );
+
+    let legacy = &descriptor.tool("create_session").unwrap().description;
+    assert!(
+        legacy.contains("null") && legacy.contains("first message"),
+        "create_session lost its guidance: {legacy:?}",
+    );
 }
 
 #[test]
@@ -205,6 +274,68 @@ async fn node_calls_the_unary_tools() {
 
     api.send_message("session-1".into(), "go".into(), vec![]).await.unwrap();
     api.cancel_turn("session-1".into()).await.unwrap();
+}
+
+#[tokio::test]
+async fn create_session_with_carries_a_preamble() {
+    let api = client().await;
+
+    let session = api
+        .create_session_with(ZNewSession {
+            agent_id: "agent-1".into(),
+            title: Some("Triage".into()),
+            project_id: None,
+            preamble: Some("Answer in exactly three words.".into()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(session.agent_id.as_deref(), Some("agent-1"));
+    assert_eq!(session.title.as_deref(), Some("Triage"));
+    assert_eq!(session.preamble.as_deref(), Some("Answer in exactly three words."));
+
+    // The shape a node should reach for by default: no title, so Attacca names the session itself.
+    let untitled = api
+        .create_session_with(ZNewSession {
+            agent_id: "agent-1".into(),
+            title: None,
+            project_id: None,
+            preamble: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(untitled.title, None);
+
+    // The older three-argument tool still works and leaves the preamble unset.
+    let plain = api.create_session("agent-1".into(), None, None).await.unwrap();
+    assert_eq!(plain.preamble, None);
+}
+
+#[tokio::test]
+async fn session_history_reads_the_timeline_back() {
+    let api = client().await;
+
+    let all = api.session_history("session-1".into(), ZHistoryQuery::default()).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].kind, "chat_user");
+    assert_eq!(all[0].payload["content"], "go");
+    assert_eq!(all[1].kind, "chat_agent");
+    assert!(all[1].created_at.is_some());
+
+    // `after` is exclusive, and `limit` caps what comes back.
+    let tail = api
+        .session_history("session-1".into(), ZHistoryQuery { after: Some(1), limit: None })
+        .await
+        .unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].cursor, 2);
+
+    let capped = api
+        .session_history("session-1".into(), ZHistoryQuery { after: None, limit: Some(1) })
+        .await
+        .unwrap();
+    assert_eq!(capped.len(), 1);
+    assert_eq!(capped[0].cursor, 1);
 }
 
 #[tokio::test]
