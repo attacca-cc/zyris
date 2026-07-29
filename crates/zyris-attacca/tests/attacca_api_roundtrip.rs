@@ -9,7 +9,7 @@ use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
     ZHistoryQuery, ZMe, ZNewAgent, ZNewSession, ZProject, ZScope, ZSession, ZSessionEvent,
-    ZSessionFilter, ZTurnFrame, ZTurnStatus, ATTACCA_API_CAPABILITY,
+    ZSessionFilter, ZTurnFrame, ZTurnStatus, ZUsage, ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
@@ -28,6 +28,8 @@ impl AttaccaApi for StubApi {
                 // take the whole call down with it.
                 "starships:read".into(),
             ],
+            plan: Some("pro".into()),
+            credits: Some("42.50".into()),
         })
     }
 
@@ -127,6 +129,19 @@ impl AttaccaApi for StubApi {
         Ok(out)
     }
 
+    /// Reports some of what it meters and not the rest, which is the shape a node has to cope
+    /// with: `credits_used` is left absent on purpose.
+    async fn session_usage(&self, _session_id: String) -> zyris::Result<ZUsage> {
+        Ok(ZUsage {
+            model: Some("claude-opus-5".into()),
+            context_tokens: Some(12_400),
+            input_tokens: Some(9_100),
+            output_tokens: Some(3_300),
+            total_tokens: Some(12_400),
+            credits_used: None,
+        })
+    }
+
     async fn send_message(
         &self,
         _session_id: String,
@@ -184,7 +199,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 11);
+    assert_eq!(descriptor.tools.len(), 12);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
@@ -195,6 +210,7 @@ fn descriptor_matches_the_reserved_name() {
     assert_eq!(descriptor.tool("create_session").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("create_session_with").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("session_history").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("session_usage").unwrap().transfer, Transfer::Unary);
 }
 
 /// The steer toward an unset `title` — leave it off and Attacca's title agent names the session
@@ -336,6 +352,41 @@ async fn session_history_reads_the_timeline_back() {
         .unwrap();
     assert_eq!(capped.len(), 1);
     assert_eq!(capped[0].cursor, 1);
+}
+
+/// Every field is optional, so what matters is that a partially-reporting deployment round-trips
+/// with the absences intact rather than defaulted into zeroes a node would then display.
+#[tokio::test]
+async fn session_usage_reports_what_the_deployment_meters() {
+    let api = client().await;
+
+    let usage = api.session_usage("session-1".into()).await.unwrap();
+    assert_eq!(usage.model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(usage.context_tokens, Some(12_400));
+    assert_eq!(usage.input_tokens, Some(9_100));
+    assert_eq!(usage.output_tokens, Some(3_300));
+    assert_eq!(usage.credits_used, None);
+
+    // A deployment that meters nothing is a legitimate answer, not an error.
+    assert_eq!(serde_json::from_str::<ZUsage>("{}").unwrap(), ZUsage::default());
+}
+
+/// The account-level half of the same surface, and for the same reason: a deployment that does not
+/// bill leaves both absent rather than sending an empty string a node would render as a blank row.
+#[tokio::test]
+async fn me_carries_the_accounts_plan_and_balance() {
+    let api = client().await;
+
+    let me = api.me().await.unwrap();
+    assert_eq!(me.plan.as_deref(), Some("pro"));
+    assert_eq!(me.credits.as_deref(), Some("42.50"));
+
+    let bare: ZMe = serde_json::from_str(
+        r#"{"user_id":"u","email":"e","display_name":"d"}"#,
+    )
+    .unwrap();
+    assert_eq!(bare.plan, None);
+    assert_eq!(bare.credits, None);
 }
 
 #[tokio::test]

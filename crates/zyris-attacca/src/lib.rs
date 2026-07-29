@@ -130,6 +130,14 @@ pub struct ZMe {
     /// answer than one naming a scope the caller does not recognize. See [`ZMe::known_scopes`].
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// The account's billing plan, as the deployment names it. Absent on a deployment that does not
+    /// meter, or one that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// Credit balance, formatted by the deployment rather than parsed here — the unit and the
+    /// precision are its business, and a node only ever displays this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<String>,
 }
 
 impl ZMe {
@@ -236,6 +244,31 @@ pub struct ZHistoryQuery {
     pub limit: Option<u32>,
 }
 
+/// What one session has cost so far: [`AttaccaApi::session_usage`]'s answer.
+///
+/// Every field is optional and defaults, so a deployment reports what it actually meters and a node
+/// displays what it is given. `Default` is a legitimate response — it means "metered nothing" —
+/// which is why absence is spelled per-field rather than by the call failing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZUsage {
+    /// The model the session's turns ran on, as the deployment names it. A session that has taken
+    /// no turn has none yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Tokens currently in context — what the next turn starts from, not a running total.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<i64>,
+    /// Credits this session has consumed. A string for the same reason as [`ZMe::credits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_used: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ZSessionFilter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +357,13 @@ pub trait AttaccaApi {
         session_id: String,
         query: ZHistoryQuery,
     ) -> zyris::Result<Vec<ZSessionEvent>>;
+
+    /// What a session has cost so far: model, token counts, credits. Requires `sessions:read`.
+    ///
+    /// Added within version 1, so a node built against this crate may find it absent from an older
+    /// deployment's announcement and get `capability_not_announced` back. Treat that as "this
+    /// deployment does not meter" and carry on — it is not a connection-level failure.
+    async fn session_usage(&self, session_id: String) -> zyris::Result<ZUsage>;
 
     /// Post a message, starting a turn. Stream results via `turn_events`.
     async fn send_message(
