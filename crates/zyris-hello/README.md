@@ -112,7 +112,7 @@ There are only two files, and one of them is a capability.
 
   Consuming a capability nobody has published a crate for works the same way, minus the import:
   declare a trait naming the methods you call. Matching is by `(name, version)` and the announced
-  tool list is never compared, so one method out of a server's seven, and two fields out of a
+  tool list is never compared, so one method out of a server's nine, and two fields out of a
   struct's four, still resolve against the real announcement. Declare the slice you call; serde
   ignores the rest.
 

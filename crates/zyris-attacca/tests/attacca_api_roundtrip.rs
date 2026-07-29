@@ -8,14 +8,46 @@ use futures_util::StreamExt;
 use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
-    ZNewAgent, ZSession, ZSessionEvent, ZSessionFilter, ZTurnFrame, ZTurnStatus,
-    ATTACCA_API_CAPABILITY,
+    ZMe, ZNewAgent, ZProject, ZScope, ZSession, ZSessionEvent, ZSessionFilter, ZTurnFrame,
+    ZTurnStatus, ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
 
 #[zyris::async_trait]
 impl AttaccaApi for StubApi {
+    async fn me(&self) -> zyris::Result<ZMe> {
+        Ok(ZMe {
+            user_id: "user-1".into(),
+            email: "ada@example.com".into(),
+            display_name: "Ada".into(),
+            scopes: vec![
+                ZScope::AgentsRead.as_str().into(),
+                ZScope::ProjectsRead.as_str().into(),
+                // A scope this crate does not know: a newer deployment's grant, which must not
+                // take the whole call down with it.
+                "starships:read".into(),
+            ],
+        })
+    }
+
+    async fn list_projects(&self) -> zyris::Result<Vec<ZProject>> {
+        Ok(vec![
+            ZProject {
+                id: "project-1".into(),
+                name: "Default".into(),
+                description: None,
+                is_default: true,
+            },
+            ZProject {
+                id: "project-2".into(),
+                name: "Rollout".into(),
+                description: Some("Q3".into()),
+                is_default: false,
+            },
+        ])
+    }
+
     async fn list_agents(&self) -> zyris::Result<Vec<ZAgent>> {
         Ok(vec![ZAgent {
             id: "agent-1".into(),
@@ -115,9 +147,49 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 7);
+    assert_eq!(descriptor.tools.len(), 9);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("turn_events").unwrap().transfer, Transfer::UniStream);
+}
+
+#[test]
+fn scope_spellings_survive_a_round_trip() {
+    for scope in ZScope::ALL {
+        assert_eq!(ZScope::from_str(scope.as_str()), Some(scope));
+        assert_eq!(scope.to_string(), scope.as_str());
+        let json = serde_json::to_string(&scope).unwrap();
+        assert_eq!(json, format!("\"{}\"", scope.as_str()), "serde and as_str disagree");
+        assert_eq!(serde_json::from_str::<ZScope>(&json).unwrap(), scope);
+    }
+    assert_eq!(ZScope::from_str("starships:read"), None);
+}
+
+#[tokio::test]
+async fn me_reports_identity_and_tolerates_an_unknown_scope() {
+    let api = client().await;
+
+    let me = api.me().await.unwrap();
+    assert_eq!(me.email, "ada@example.com");
+    assert_eq!(me.display_name, "Ada");
+    assert!(me.has(ZScope::AgentsRead));
+    assert!(!me.has(ZScope::SessionsWrite));
+
+    // The unknown scope rides through as a string and drops out of the typed view.
+    assert_eq!(me.scopes.len(), 3);
+    assert_eq!(me.known_scopes(), vec![ZScope::AgentsRead, ZScope::ProjectsRead]);
+}
+
+#[tokio::test]
+async fn list_projects_returns_the_default_and_the_rest() {
+    let api = client().await;
+
+    let projects = api.list_projects().await.unwrap();
+    assert_eq!(projects.len(), 2);
+    assert!(projects[0].is_default);
+    assert_eq!(projects[0].name, "Default");
+    assert_eq!(projects[1].description.as_deref(), Some("Q3"));
 }
 
 #[tokio::test]
