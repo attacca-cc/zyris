@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/zyris",
+    "crates/zyris-caps",
+    "crates/zyris-hello",
+    "crates/zyris-macros",
+    "crates/zyris-proto",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/attacca-cc/zyris"
+
+[workspace.dependencies]
+async-trait = "0.1.91"
+axum = "0.8.9"
+base64 = "0.23.0"
+bytes = "1.12.1"
+futures-util = "0.3.32"
+schemars = "1.2.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.24.0", features = ["v4"] }

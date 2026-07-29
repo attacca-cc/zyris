@@ -1,0 +1,31 @@
+name: Check
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Caches ~/.cargo/{registry,git} and target/, keyed on Cargo.lock + rustc version. Workspace
+      # crates' own artifacts are pruned before saving, so the archive stays dependency-only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          cache-on-failure: true
+
+      - name: cargo build
+        run: cargo build --workspace
+
+      # Includes zyris-macros' trybuild UI tests, which compare compiler diagnostics against
+      # checked-in .stderr files — they are the reason a toolchain bump can fail this job on its own.
+      - name: cargo test
+        run: cargo test --workspace

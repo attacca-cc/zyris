@@ -1,0 +1,21 @@
+[package]
+name = "zyris-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc-macros for the Zyris protocol"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.3", features = ["full"] }
+
+[dev-dependencies]
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+trybuild = "1.0.118"
+zyris = { path = "../zyris", default-features = false }

@@ -1,0 +1,5 @@
+error: capability methods must return zyris::Result<T>
+  --> tests/ui/fail_bad_return.rs:11:43
+   |
+11 |     async fn run(&self, input: String) -> Out;
+   |                                           ^^^

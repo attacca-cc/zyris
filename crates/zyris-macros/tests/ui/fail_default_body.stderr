@@ -1,0 +1,5 @@
+error: capability methods cannot have default bodies
+  --> tests/ui/fail_default_body.rs:11:5
+   |
+11 |     async fn run(&self, input: String) -> zyris::Result<Out> {
+   |     ^^^^^

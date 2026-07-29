@@ -1,0 +1,5 @@
+error: capability methods must be async
+  --> tests/ui/fail_not_async.rs:11:5
+   |
+11 |     fn run(&self, input: String) -> zyris::Result<Out>;
+   |     ^^

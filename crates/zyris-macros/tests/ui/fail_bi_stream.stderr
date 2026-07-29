@@ -1,0 +1,5 @@
+error: bi_stream is reserved in Zyris protocol v1
+  --> tests/ui/fail_bi_stream.rs:11:13
+   |
+11 |     #[zyris(bi_stream)]
+   |             ^^^^^^^^^

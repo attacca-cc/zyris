@@ -1,0 +1,23 @@
+[package]
+name = "zyris-hello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reference Zyris node: one capability, one tool, and a main that says nothing else"
+publish = false
+
+[[bin]]
+name = "zyris-hello"
+path = "src/main.rs"
+
+[dependencies]
+rand = "0.9"
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+# No `signal` or `time`: the reconnect loop and the Ctrl-C handling live in `zyris::runtime`, which
+# brings its own. A node only needs enough tokio to have a runtime to run on.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zyris = { version = "0.1.0", path = "../zyris", features = ["enroll"] }

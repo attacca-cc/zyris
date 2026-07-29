@@ -1,0 +1,5 @@
+error: capability methods cannot be generic
+  --> tests/ui/fail_generic_method.rs:11:17
+   |
+11 |     async fn run<T: Send>(&self, input: T) -> zyris::Result<Out>;
+   |                 ^
