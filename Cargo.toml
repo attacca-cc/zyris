@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/zyris",
+    "crates/zyris-attacca",
     "crates/zyris-caps",
     "crates/zyris-hello",
     "crates/zyris-macros",

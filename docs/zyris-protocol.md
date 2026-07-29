@@ -17,7 +17,7 @@ worked example.
 
 ## 0. Writing a node
 
-`crates/zyris-hello` is a complete, runnable node in three short files — one capability with one
+`crates/zyris-hello` is a complete, runnable node in two short files — one capability with one
 tool, plus the connect/reconnect loop and the consume side. Start there; this document is the
 normative wire reference, not a tutorial. See `crates/zyris-hello/README.md` for how to run it
 against a local server.
@@ -258,7 +258,9 @@ Announcement is a normal request, available to **either peer** after `hello_ack`
 - A deployment may **reserve** capability names to itself, rejecting them from nodes with
   `capability_rejected`, reason `reserved`. Attacca reserves exactly `attacca_api`: it rejects that
   name from any node and announces it itself immediately after `hello_ack`, filtered to the tools
-  the node's scopes permit, with every `attacca_api.*` call scope-checked.
+  the node's scopes permit, with every `attacca_api.*` call scope-checked. That capability is
+  declared in `crates/zyris-attacca` — the deployment's surface, not the wire's, which is why it is
+  its own crate and not part of `zyris-caps`.
 - A node may announce two versions of the same capability simultaneously (two entries).
   Additive tool changes within a version are permitted; consumers discover tools by
   descriptor.

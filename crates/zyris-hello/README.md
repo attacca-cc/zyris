@@ -4,8 +4,9 @@ The smallest complete Zyris node, and the reference to copy when writing your ow
 capability (`hello`) with one tool (`greet`, which returns a random greeting) and consumes the
 `attacca_api` capability Attacca announces back — both over the same websocket.
 
-It depends on no `attacca-*` crate. That is deliberate: a node needs only the Zyris stack. Even the
-`attacca_api` capability it consumes is declared locally, in `src/attacca_api.rs` — see below.
+It depends on no `attacca-*` crate. That is deliberate: a node needs only the Zyris stack. The
+`attacca_api` capability it consumes comes from `zyris-attacca`, which is part of that stack and
+carries the declaration alone — no server, no database, no deployment.
 
 ## Running it
 
@@ -79,7 +80,7 @@ gracefully and the card flips back to offline.
 
 ## What to copy
 
-There are only three files, and two of them are capabilities.
+There are only two files, and one of them is a capability.
 
 - `src/greeter.rs` — **the part that is actually yours.** `#[zyris::capability(name = .., version =
   ..)]` on a trait generates the descriptor, the `HelloServer<T>` you hand to the runner, and a
@@ -102,15 +103,18 @@ There are only three files, and two of them are capabilities.
   that lives in `zyris::runtime` (default feature `runtime`) precisely so it is not something every
   node reimplements slightly differently.
 
-- `src/attacca_api.rs` — the **consume** half. A node is not only a tool provider: the server
-  announces `attacca_api` on the same websocket, so this process can drive agents and sessions while
-  serving `greet`, and `on_connect` is where it picks that client up.
+  `report_server_capabilities` in the same file is the **consume** half. A node is not only a tool
+  provider: the server announces `attacca_api` on the same websocket, so this process can drive
+  agents and sessions while serving `greet`, and `on_connect` is where it picks that client up. The
+  client comes from [`zyris-attacca`](../zyris-attacca), which declares that capability with the
+  same `#[zyris::capability]` macro the provider side uses — a consumer's half of a capability is an
+  ordinary trait, and this one is already written.
 
-  Note what this file is *not*: an import. A consumer declares the capability it wants to use, with
-  the same `#[zyris::capability]` macro the provider side uses. Matching is by `(name, version)` —
-  the announced tool list is never compared — so declaring one method out of the server's dozen, and
-  two fields out of `ZAgent`'s several, resolves against the real announcement and keeps this crate
-  free of anything Attacca-specific. Declare the slice you call; serde ignores the rest.
+  Consuming a capability nobody has published a crate for works the same way, minus the import:
+  declare a trait naming the methods you call. Matching is by `(name, version)` and the announced
+  tool list is never compared, so one method out of a server's seven, and two fields out of a
+  struct's four, still resolve against the real announcement. Declare the slice you call; serde
+  ignores the rest.
 
 If you need something the runner does not do — your own supervision tree, a connection per tenant —
 `Node::connect` is still the primitive underneath and is not going anywhere. Swap credentials by

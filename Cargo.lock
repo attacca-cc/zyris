@@ -2556,6 +2556,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zyris-attacca"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zyris",
+]
+
+[[package]]
 name = "zyris-caps"
 version = "0.1.0"
 dependencies = [
@@ -2581,6 +2593,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zyris",
+ "zyris-attacca",
+ "zyris-caps",
 ]
 
 [[package]]

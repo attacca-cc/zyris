@@ -8,16 +8,16 @@
 //! refused token, exiting with a code a supervisor understands — is `zyris::runtime`. That is why
 //! this file is short: none of it was ever specific to *this* node.
 
-mod attacca_api;
 mod greeter;
 
 use std::process::ExitCode;
 use std::time::Duration;
 
-use attacca_api::{AttaccaApi, AttaccaApiClient};
 use greeter::{HelloServer, RandomGreeter};
 use zyris::runtime::Runner;
 use zyris::{Connection, ErrorCode, NodeKind};
+use zyris_attacca::{AttaccaApi, AttaccaApiClient};
+use zyris_caps::{PtyTerminal, TerminalServer};
 
 /// The server announces `attacca_api` immediately after the handshake; this is generous headroom.
 const CONSUME_WAIT: Duration = Duration::from_secs(5);
@@ -40,6 +40,7 @@ async fn main() -> ExitCode {
         .kind(NodeKind::Service)
         .request_scopes(["agents:read"])
         .capability(HelloServer(greeter))
+        .capability(TerminalServer(PtyTerminal::default()))
         .on_connect(|conn| async move { report_server_capabilities(&conn).await })
         .run()
         .await
@@ -49,8 +50,11 @@ async fn main() -> ExitCode {
 /// same connection, so this process can drive agents and sessions while serving `greet`. Failures
 /// here are logged and ignored — a node whose token lacks `agents:read` should still serve tools.
 ///
-/// The client comes from `src/attacca_api.rs`, this node's own one-method declaration of the
-/// capability. Nothing hands a consumer a ready-made client: you declare the slice you call.
+/// The client is `zyris-attacca`'s, the crate that declares `attacca_api` — the consumer side of a
+/// capability is a trait like any other, and importing one someone already wrote is the short path.
+/// When you consume a capability nobody has published, declare the slice you call yourself: one
+/// `#[zyris::capability]` trait naming the methods you use resolves against the real announcement,
+/// because matching is by `(name, version)` and the announced tool list is never compared.
 async fn report_server_capabilities(conn: &Connection) {
     match conn.wait_capability::<AttaccaApiClient>(CONSUME_WAIT).await {
         Ok(api) => {
@@ -62,7 +66,9 @@ async fn report_server_capabilities(conn: &Connection) {
                     "attacca_api.list_agents ok"
                 ),
                 Err(e) if e.code == ErrorCode::ForbiddenScope => {
-                    tracing::info!("this node's token has no agents:read scope; skipping the demo call")
+                    tracing::info!(
+                        "this node's token has no agents:read scope; skipping the demo call"
+                    )
                 }
                 Err(e) => tracing::warn!(error = %e, "attacca_api.list_agents failed"),
             }

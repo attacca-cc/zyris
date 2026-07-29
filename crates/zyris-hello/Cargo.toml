@@ -21,3 +21,5 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 zyris = { version = "0.1.0", path = "../zyris", features = ["enroll"] }
+zyris-attacca = { version = "0.1.0", path = "../zyris-attacca" }
+zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
