@@ -26,8 +26,8 @@ pub struct ExecOutput {
 
 #[zyris::capability(name = "terminal", version = 1)]
 pub trait Terminal {
-    /// Open an interactive PTY, starting in the capability's root; output chunks arrive on the
-    /// returned stream.
+    /// Open an interactive PTY; output chunks arrive on the returned stream. The shell starts in
+    /// the node's root directory, which is also what relative paths in `exec` resolve against.
     #[zyris(uni_stream)]
     async fn open(
         &self,
@@ -45,10 +45,13 @@ pub trait Terminal {
     /// Close an open PTY.
     async fn close(&self, pty: PtyId) -> zyris::Result<()>;
 
-    /// Run a command to completion and capture its output.
+    /// Run a shell command to completion and capture its stdout, stderr and exit code. `timeout_ms`
+    /// bounds the run; on expiry the result has `timed_out` set and an exit code of -1.
     ///
-    /// `cwd` is absolute with a leading `/` (`/home/allen/projects`), otherwise relative to the
-    /// capability's root; omitting it runs in the root itself.
+    /// `cwd` may be relative or absolute. A relative path (`crates/zyris-caps`) resolves against the
+    /// node's root directory. A path with a leading `/` is an absolute host path
+    /// (`/home/allen/projects`) and is used as given. `.` and `..` are normalized. Omit `cwd` to run
+    /// in the root itself.
     async fn exec(
         &self,
         command: String,
