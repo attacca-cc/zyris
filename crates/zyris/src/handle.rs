@@ -9,7 +9,7 @@ use crate::serve::Streaming;
 
 /// How much a generated client will collect into memory to make an attachment look inline. Sized
 /// for the datums a tool call plausibly returns — a screenshot, a document — rather than for bulk
-/// transfer, which has `file_io.read` and its chunked stream.
+/// transfer, which has `file_io.read_stream` and its chunked stream.
 pub const MAX_HYDRATE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
