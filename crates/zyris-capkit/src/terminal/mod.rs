@@ -5,17 +5,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use zyris::{Blob, ErrorCode, Streaming, WireError};
 
-use zyris_caps::{ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal};
+use zyris_caps::{ExecOutput, PtyChunk, PtyId, PtyOpened, PtyRead, PtyScreen, Settle, Terminal};
 
 use crate::path::resolve_under;
+use buffer::trim_incomplete_tail;
 use session::{gone, Sessions, POLL_INTERVAL};
 
 /// `open_stream` 구독자가 한 청크에 싣는 최대 바이트.
 const STREAM_CHUNK_MAX: usize = 64 * 1024;
+
+/// `read` 한 번이 돌려주는 최대 바이트. `file_io`의 `READ_UNARY_MAX`와 같은 값이다 —
+/// Attacca의 `ZYRIS_MAX_RESULT_BYTES`(기본 1,000,000) 예산 통과가 실측으로 확인된 값.
+const PTY_READ_MAX: usize = 128 * 1024;
 
 pub struct PtyTerminal {
     default_shell: String,
@@ -40,6 +46,70 @@ impl PtyTerminal {
             rows,
         )?;
         Ok(id)
+    }
+
+    /// `input`을 쓰고, 출력이 조용해질 때까지 기다린다.
+    ///
+    /// 반환 조건은 셋 중 먼저 오는 것이다: 조용함이 만족됐고 게이트가 열렸다 /
+    /// deadline에 닿았다 / 셸이 끝났고 조용하다.
+    ///
+    /// **게이트는 `input`이 있을 때만 건다.** 입력이 아무 출력도 유발하지 않는 경우
+    /// 조용함은 즉시 만족되는데, 그대로 빈 응답을 돌려주면 에이전트가 "명령이 끝났다"로
+    /// 오해한다. deadline까지 기다려 진짜 아무것도 없음을 확인하는 편이 정직하다.
+    /// 반대로 `input`이 없는 순수 관찰까지 붙잡으면 폴링 한 번이 timeout_ms를 먹는다.
+    ///
+    /// **게이트의 한계**: cooked 모드에서는 터미널이 타이핑된 바이트를 즉시 에코하므로
+    /// "읽을 게 생겼다"가 곧바로 참이 되어 게이트가 열린다. 명령이 늦게 출력을 시작하면
+    /// 에코만 담긴 응답이 먼저 나갈 수 있다 — 그때 `more`는 false고 `exited`는 `None`이라
+    /// 에이전트가 "아직 안 끝났다"를 읽어낼 수 있으니, 다시 부르면 이어진다.
+    /// 게이트가 값을 하는 곳은 에코가 없는 raw 모드(vim·htop에 키를 넣는 경우)다.
+    async fn settle(
+        &self,
+        pty: &PtyId,
+        input: Option<String>,
+        settle: Option<Settle>,
+    ) -> zyris::Result<()> {
+        let Settle { quiet_ms, timeout_ms } = settle.unwrap_or_default();
+        let gated = input.is_some();
+
+        let baseline = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let s = sessions.get_mut(&pty.0).ok_or_else(gone)?;
+            s.touch();
+            if let Some(text) = input {
+                s.write_input(text.as_bytes())?;
+            }
+            s.buf.total_written()
+        };
+
+        if quiet_ms == 0 {
+            return Ok(());
+        }
+
+        let quiet = Duration::from_millis(quiet_ms);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            {
+                let sessions = self.sessions.lock().unwrap();
+                let s = sessions.get(&pty.0).ok_or_else(gone)?;
+                let is_quiet = s.last_byte_at.elapsed() >= quiet;
+                // 셸이 끝났고 조용하면 더 올 것이 없다 — 게이트와 무관하게 나간다.
+                if is_quiet && s.exited.is_some() {
+                    return Ok(());
+                }
+                // 게이트는 **이 호출이 시작된 뒤 새로 온 바이트**를 본다. 이미 쌓여
+                // 있던 미독 바이트로 열어주면, 앞 호출이 남긴 프롬프트 한 조각 때문에
+                // 게이트가 늘 열린 채가 되어 아무것도 막지 못한다.
+                let gate_open = !gated || s.buf.total_written() > baseline;
+                if is_quiet && gate_open {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok(());
+            }
+        }
     }
 }
 
@@ -93,7 +163,11 @@ pub(crate) fn pty_err(msg: impl std::fmt::Display) -> WireError {
 
 #[zyris::async_trait]
 impl Terminal for PtyTerminal {
-    async fn open(
+    async fn open(&self, shell: Option<String>, cols: u16, rows: u16) -> zyris::Result<PtyOpened> {
+        Ok(PtyOpened { pty: PtyId(self.new_session(shell, cols, rows)?) })
+    }
+
+    async fn open_stream(
         &self,
         shell: Option<String>,
         cols: u16,
@@ -102,6 +176,55 @@ impl Terminal for PtyTerminal {
         let id = self.new_session(shell, cols, rows)?;
         let items = subscribe(self.sessions.clone(), id.clone());
         Ok(Streaming::new(PtyOpened { pty: PtyId(id) }, items))
+    }
+
+    async fn read(
+        &self,
+        pty: PtyId,
+        input: Option<String>,
+        settle: Option<Settle>,
+    ) -> zyris::Result<PtyRead> {
+        self.settle(&pty, input, settle).await?;
+
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.get_mut(&pty.0).ok_or_else(gone)?;
+        let mut cursor = s.read_cursor;
+        let (bytes, dropped) = s.buf.read_at(&mut cursor, PTY_READ_MAX);
+
+        // 잘린 멀티바이트 꼬리는 다음 호출로 넘긴다. 단 셸이 끝났고 이게 마지막
+        // 바이트라면 넘길 다음이 없으므로 그냥 태운다 — 아니면 `more`가 영영 선다.
+        let at_end = s.exited.is_some() && cursor == s.buf.total_written();
+        let keep = if at_end { bytes.len() } else { trim_incomplete_tail(&bytes) };
+        s.read_cursor = cursor - (bytes.len() - keep) as u64;
+
+        Ok(PtyRead {
+            content: String::from_utf8_lossy(&bytes[..keep]).into_owned(),
+            more: s.read_cursor < s.buf.total_written(),
+            dropped,
+            exited: s.exited,
+        })
+    }
+
+    async fn screen(
+        &self,
+        pty: PtyId,
+        input: Option<String>,
+        settle: Option<Settle>,
+    ) -> zyris::Result<PtyScreen> {
+        self.settle(&pty, input, settle).await?;
+
+        let sessions = self.sessions.lock().unwrap();
+        let s = sessions.get(&pty.0).ok_or_else(gone)?;
+        // **`read_cursor`를 건드리지 않는다.** 화면은 누적 상태의 렌더이지 소비가 아니다.
+        let screen = s.parser.screen();
+        let (_, cols) = screen.size();
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        Ok(PtyScreen {
+            lines: screen.rows(0, cols).collect(),
+            cursor_row,
+            cursor_col,
+            exited: s.exited,
+        })
     }
 
     async fn write(&self, pty: PtyId, data: Blob) -> zyris::Result<()> {
