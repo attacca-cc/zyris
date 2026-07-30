@@ -740,6 +740,7 @@ checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
 [[package]]
 name = "enigo"
 version = "0.6.1"
+source = "git+https://github.com/mincomk/enigo#cd5e4df33f95717fb7a3d3a9f937b9b72a4a72f7"
 dependencies = [
  "core-foundation",
  "core-graphics",

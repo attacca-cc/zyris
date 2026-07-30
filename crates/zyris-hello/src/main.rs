@@ -59,11 +59,18 @@ async fn main() -> ExitCode {
 
 /// Announce `screen_capture` and `input` — the two capabilities that need a display to exist.
 ///
-/// The `max_width` here is about the reader, not the wire: a model resizes anything wider than
-/// ~1568px before it looks at it, so pixels above that cap buy nothing. Staying under
-/// `zyris::proto::INLINE_BLOB_MAX` is already handled — `HostScreenCapture` re-encodes smaller
-/// until it fits, and says so in the image's description. JPEG because a screenshot that has to
-/// shrink to fit a budget would rather spend the budget on pixels than on exactness.
+/// This node sends screenshots at the display's own resolution: no default `max_width`, and
+/// [`HostScreenCapture::without_budget`] to switch off the pass that re-encodes smaller until the
+/// bytes fit inline. Neither cap was ever about what the wire can carry — a blob over
+/// `zyris::proto::INLINE_BLOB_MAX` is detached onto its own credit-limited stream by the connection
+/// itself, so the full-size image costs a stream rather than a refusal. What downscaling did cost
+/// was a coordinate conversion: a scaled capture makes image coordinates stop being display
+/// coordinates, and the model has to read the multiplier out of the image's description and apply
+/// it before `input.move_to` will land where it meant. At 1:1 there is nothing to apply.
+///
+/// A caller that wants a smaller image can still pass `max_width` per call. JPEG stays because a
+/// full-resolution PNG of a 4K display is several times the size for pixels nobody inspects that
+/// closely; pass [`ImageFormat::Png`] instead if exactness matters more than bytes.
 ///
 /// `input` is announced only if the display server actually accepts a connection. A node that
 /// cannot type should not offer to: announcing it and failing every call is worse than never
@@ -72,7 +79,7 @@ async fn main() -> ExitCode {
 fn with_desktop(runner: Runner) -> Runner {
     let screen = HostScreenCapture::default()
         .with_format(ImageFormat::Jpeg)
-        .with_max_width(1600);
+        .without_budget();
     let backend = screen.backend();
     tracing::info!(backend = ?backend, "announcing screen_capture");
     let runner = runner.capability(ScreenCaptureServer(screen));
