@@ -68,9 +68,17 @@ pub trait ScreenCapture {
     ///
     /// `format` and `max_width` exist because a full-resolution PNG of a 4K display is several
     /// megabytes, and a `Datum::Image` travels inline in the response — `zyris::proto::
-    /// INLINE_BLOB_MAX` puts the comfortable ceiling at 128 KiB. `format` defaults to PNG;
+    /// INLINE_BLOB_MAX` puts the comfortable ceiling at 512 KiB. `format` defaults to PNG;
     /// `max_width` downscales the capture before encoding, preserving aspect ratio, and is
     /// ignored when it is not smaller than the capture.
+    ///
+    /// An implementation is free to downscale further on its own to keep the response deliverable,
+    /// so the image returned may be smaller than either the display or `max_width`. When it is,
+    /// the returned `Datum::Image` describes what happened — its `description` names the display's
+    /// real size and the factor to multiply image coordinates by. Read it before feeding a
+    /// position from a screenshot into `input.move_to`: that call takes the same `display` and
+    /// display-local coordinates, so the scale factor and the `region` origin are the whole
+    /// conversion — the display's own position on the desktop is `move_to`'s to add, not yours.
     async fn screenshot(
         &self,
         display: Option<String>,

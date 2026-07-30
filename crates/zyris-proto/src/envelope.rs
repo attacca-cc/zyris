@@ -6,6 +6,13 @@ use crate::payload::Payload;
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 
+/// Advertised in `hello.features` / `hello_ack.features` by a peer that can move a large blob onto
+/// a stream instead of inlining it. Both sides must list it before either detaches anything: §3.2
+/// forbids sending frames gated behind a feature the other end did not advertise, and an older peer
+/// that received an attachment reference would hand its caller a datum whose bytes never arrive.
+pub const FEATURE_ATTACHMENTS: &str = "attachments";
+pub const FEATURE_CANCEL: &str = "cancel";
+
 pub const METHOD_ANNOUNCE: &str = "zyris.announce";
 pub const METHOD_CLOSING: &str = "zyris.closing";
 pub const METHOD_WEBRTC_SIGNAL: &str = "webrtc.signal";
@@ -90,6 +97,10 @@ pub struct HelloAck {
     pub limits: Limits,
     #[serde(default)]
     pub resumed: bool,
+    /// What the acceptor can do, answering `hello.features`. Defaulted rather than required so an
+    /// acceptor built before this field parses here as advertising nothing, which is the truth.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

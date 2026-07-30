@@ -18,11 +18,18 @@ xcap = { version = "0.9.7", optional = true }
 zyris = { version = "0.1.0", path = "../zyris", default-features = false }
 zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
 
+# `xcap` enumerates monitors over XRandR even in a Wayland session, then captures in Wayland's
+# coordinate space; the two disagree whenever Xwayland cannot express the compositor's layout. The
+# Wayland backend goes straight to `wl_output`. This is the fork `xcap` itself depends on, so it
+# costs no extra copy of the Wayland stack.
+[target.'cfg(target_os = "linux")'.dependencies]
+libwayshot = { package = "libwayshot-xcap", version = "0.3.3", optional = true }
+
 [features]
 default = ["file-io", "terminal"]
 file-io = ["dep:tokio", "dep:bytes", "dep:futures-util"]
 terminal = ["dep:portable-pty", "dep:tokio", "dep:bytes", "dep:futures-util"]
-screen = ["dep:xcap", "dep:image", "dep:tokio"]
+screen = ["dep:xcap", "dep:image", "dep:tokio", "dep:libwayshot"]
 input = ["dep:enigo", "dep:tokio"]
 input-wayland = ["input", "enigo/wayland"]
 desktop = ["screen", "input"]

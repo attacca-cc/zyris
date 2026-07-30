@@ -1,8 +1,8 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::capabilities::{Capabilities, CapabilitySet};
 use crate::connection::{establish, AcceptOptions, Connection, Role};
-use crate::error::{Result, WireError};
+use crate::error::Result;
 use crate::serve::ServeCapability;
 use crate::transport::Transport;
 
@@ -28,7 +28,7 @@ impl NodeKind {
 pub struct Node {
     name: String,
     kind: NodeKind,
-    capabilities: Vec<Arc<dyn ServeCapability>>,
+    capabilities: Arc<CapabilitySet>,
 }
 
 pub struct NodeBuilder {
@@ -52,6 +52,20 @@ impl Node {
 
     pub fn kind(&self) -> &NodeKind {
         &self.kind
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn with_capabilities(
+        name: String,
+        kind: NodeKind,
+        capabilities: Arc<CapabilitySet>,
+    ) -> Node {
+        Node { name, kind, capabilities }
+    }
+
+    /// What this node offers, changeable while it is connected. See [`Capabilities`].
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities::new(self.capabilities.clone())
     }
 
     fn agent(&self) -> String {
@@ -126,16 +140,10 @@ impl NodeBuilder {
     }
 
     pub fn build(self) -> Result<Node> {
-        let mut seen = HashSet::new();
-        for cap in &self.capabilities {
-            let descriptor = cap.descriptor();
-            if !seen.insert((descriptor.name.clone(), descriptor.version)) {
-                return Err(WireError::invalid_params(format!(
-                    "duplicate capability {} v{}",
-                    descriptor.name, descriptor.version
-                )));
-            }
+        let capabilities = CapabilitySet::new();
+        for cap in self.capabilities {
+            capabilities.push(cap)?;
         }
-        Ok(Node { name: self.name, kind: self.kind, capabilities: self.capabilities })
+        Ok(Node { name: self.name, kind: self.kind, capabilities })
     }
 }

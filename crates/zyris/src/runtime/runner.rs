@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
 
+use crate::capabilities::{Capabilities, CapabilitySet};
+use crate::error::WireError;
 use crate::runtime::credentials::{token_prefix, Credentials, CredentialsError};
 use crate::{Connection, Node, NodeKind, ServeCapability};
 
@@ -158,7 +160,10 @@ enum CredentialSource {
 pub struct Runner {
     config: RunConfig,
     credentials: CredentialSource,
-    capabilities: Vec<Arc<dyn ServeCapability>>,
+    capabilities: Arc<CapabilitySet>,
+    /// A duplicate handed to the builder. Reported by `try_run` rather than at the call that made
+    /// it, because the builder methods return `Self` so a node can be described in one expression.
+    capability_error: Option<WireError>,
     on_connect: Option<ConnectHook>,
 }
 
@@ -176,7 +181,8 @@ impl Runner {
         Runner {
             config: RunConfig::from_env(),
             credentials: CredentialSource::FromEnv,
-            capabilities: Vec::new(),
+            capabilities: CapabilitySet::new(),
+            capability_error: None,
             on_connect: None,
         }
     }
@@ -186,7 +192,8 @@ impl Runner {
         Runner {
             config,
             credentials: CredentialSource::Given(credentials),
-            capabilities: Vec::new(),
+            capabilities: CapabilitySet::new(),
+            capability_error: None,
             on_connect: None,
         }
     }
@@ -206,14 +213,21 @@ impl Runner {
         self
     }
 
-    pub fn capability(mut self, capability: impl ServeCapability) -> Self {
-        self.capabilities.push(Arc::new(capability));
-        self
+    pub fn capability(self, capability: impl ServeCapability) -> Self {
+        self.capability_arc(Arc::new(capability))
     }
 
     pub fn capability_arc(mut self, capability: Arc<dyn ServeCapability>) -> Self {
-        self.capabilities.push(capability);
+        if let Err(e) = self.capabilities.push(capability) {
+            self.capability_error.get_or_insert(e);
+        }
         self
+    }
+
+    /// What this node offers, available before [`run`](Self::run) so an application can hold onto
+    /// it and change the set while the node is connected. See [`Capabilities`].
+    pub fn capabilities(&self) -> Capabilities {
+        Capabilities::new(self.capabilities.clone())
     }
 
     /// What this node asks for at enrollment, unless `$ZYRIS_SCOPES` already said.
@@ -258,18 +272,20 @@ impl Runner {
 
     /// [`run`](Self::run) without the exit-code translation, for a caller that has its own idea of
     /// what to do when a node gives up.
-    pub async fn try_run(self) -> Result<(), RunError> {
+    pub async fn try_run(mut self) -> Result<(), RunError> {
+        if let Some(error) = self.capability_error.take() {
+            return Err(error.into());
+        }
         // Built once, outside the loop. A `Node` is reusable across connections, and the
         // capability impls are owned by it, so rebuilding per attempt would hand every reconnect a
-        // freshly initialised capability that had forgotten whatever the last one knew.
-        let node = self
-            .capabilities
-            .iter()
-            .fold(
-                Node::builder().name(&self.config.node_name).kind(self.config.kind.clone()),
-                |builder, capability| builder.capability_arc(capability.clone()),
-            )
-            .build()?;
+        // freshly initialised capability that had forgotten whatever the last one knew. The set is
+        // shared rather than copied, so a capability dropped while connected stays dropped across
+        // the reconnect too.
+        let node = Node::with_capabilities(
+            self.config.node_name.clone(),
+            self.config.kind.clone(),
+            self.capabilities.clone(),
+        );
 
         // Resolved here rather than at construction, so the scopes a device grant will ask for are
         // whatever the builder finally settled on.

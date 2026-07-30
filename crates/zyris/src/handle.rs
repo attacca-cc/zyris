@@ -7,6 +7,11 @@ use crate::connection::{typed_method, Connection};
 use crate::error::Result;
 use crate::serve::Streaming;
 
+/// How much a generated client will collect into memory to make an attachment look inline. Sized
+/// for the datums a tool call plausibly returns — a screenshot, a document — rather than for bulk
+/// transfer, which has `file_io.read` and its chunked stream.
+pub const MAX_HYDRATE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct CapabilityHandle {
     conn: Connection,
@@ -22,16 +27,24 @@ impl CapabilityHandle {
         &self.conn
     }
 
+    /// Call a unary tool.
+    ///
+    /// Any blob the peer moved onto a stream is pulled back inline before the response is
+    /// deserialized, so a generated client hands its caller a `Datum` with bytes in it whether the
+    /// peer inlined them or not — the whole attachment mechanism is invisible from here. The
+    /// ceiling is [`MAX_HYDRATE_BYTES`]; a caller expecting something larger than that wants
+    /// [`Connection::attachment`] and a destination to stream it into, not a `Vec` in memory.
     pub async fn call<Req: Serialize, Resp: DeserializeOwned>(
         &self,
         tool: &str,
         request: &Req,
     ) -> Result<Resp> {
         let params = Payload::from_typed(request)?;
-        let result = self
+        let mut result = self
             .conn
             .call_raw(&typed_method(self.capability, tool), params)
             .await?;
+        self.conn.hydrate(&mut result, MAX_HYDRATE_BYTES).await?;
         result.to_typed()
     }
 

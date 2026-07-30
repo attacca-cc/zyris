@@ -17,8 +17,13 @@ use greeter::{HelloServer, RandomGreeter};
 use zyris::runtime::Runner;
 use zyris::{Connection, ErrorCode, NodeKind};
 use zyris_attacca::{AttaccaApi, AttaccaApiClient};
-use zyris_caps::TerminalServer;
 use zyris_capkit::PtyTerminal;
+use zyris_caps::TerminalServer;
+
+#[cfg(feature = "desktop")]
+use zyris_capkit::{EnigoInput, HostDisplays, HostScreenCapture};
+#[cfg(feature = "desktop")]
+use zyris_caps::{ImageFormat, InputServer, ScreenCaptureServer};
 
 /// The server announces `attacca_api` immediately after the handshake; this is generous headroom.
 const CONSUME_WAIT: Duration = Duration::from_secs(5);
@@ -37,14 +42,53 @@ async fn main() -> ExitCode {
     // `$ZYRIS_NODE_NAME`, or this machine's hostname.
     let greeter = RandomGreeter::new(runner.node_name());
 
-    runner
+    let runner = runner
         .kind(NodeKind::Service)
         .request_scopes(["agents:read"])
         .capability(HelloServer(greeter))
-        .capability(TerminalServer(PtyTerminal::default()))
+        .capability(TerminalServer(PtyTerminal::default()));
+
+    #[cfg(feature = "desktop")]
+    let runner = with_desktop(runner);
+
+    runner
         .on_connect(|conn| async move { report_server_capabilities(&conn).await })
         .run()
         .await
+}
+
+/// Announce `screen_capture` and `input` — the two capabilities that need a display to exist.
+///
+/// The `max_width` here is about the reader, not the wire: a model resizes anything wider than
+/// ~1568px before it looks at it, so pixels above that cap buy nothing. Staying under
+/// `zyris::proto::INLINE_BLOB_MAX` is already handled — `HostScreenCapture` re-encodes smaller
+/// until it fits, and says so in the image's description. JPEG because a screenshot that has to
+/// shrink to fit a budget would rather spend the budget on pixels than on exactness.
+///
+/// `input` is announced only if the display server actually accepts a connection. A node that
+/// cannot type should not offer to: announcing it and failing every call is worse than never
+/// appearing in the tool list, because an agent has no way to tell the two apart.
+#[cfg(feature = "desktop")]
+fn with_desktop(runner: Runner) -> Runner {
+    let screen = HostScreenCapture::default()
+        .with_format(ImageFormat::Jpeg)
+        .with_max_width(1600);
+    let backend = screen.backend();
+    tracing::info!(backend = ?backend, "announcing screen_capture");
+    let runner = runner.capability(ScreenCaptureServer(screen));
+
+    // The same backend the screenshots come from: `move_to` takes display-local coordinates and
+    // adds that display's origin, so it has to agree with `screenshot` about where a monitor is.
+    match EnigoInput::new(HostDisplays(backend)) {
+        Ok(input) => {
+            tracing::info!("announcing input");
+            runner.capability(InputServer(input))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no display server for input; not announcing it");
+            runner
+        }
+    }
 }
 
 /// The consume half. A node is not only a tool provider: the server announces `attacca_api` on the

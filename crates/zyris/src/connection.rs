@@ -9,16 +9,23 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use zyris_proto::{
-    decode_binary, decode_text, encode_control, encode_stream_data, method_name, split_method,
-    AckProtocol, AnnounceParams, AnnounceResult, CapabilityDescriptor, ClosingParams, Envelope,
-    ErrorCode, HeartbeatConfig, Hello, HelloAck, HelloProtocol, IncomingFrame, Limits, Payload,
-    RejectedCapability, Serialization, StreamDecl, WireError, WireMessage, CLOSE_NORMAL,
-    CLOSE_UNSUPPORTED_VERSION, METHOD_ANNOUNCE, METHOD_CLOSING, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    attach, decode_binary, decode_text, encode_control, encode_stream_data, method_name,
+    split_method, AckProtocol, AnnounceParams, AnnounceResult, AttachmentRef, CapabilityDescriptor,
+    AttachmentTrailer, ClosingParams, Envelope, ErrorCode, HeartbeatConfig, Hello, HelloAck, HelloProtocol,
+    IncomingFrame, Limits, Payload, RejectedCapability, Serialization, StreamDecl, WireError,
+    WireMessage, CLOSE_NORMAL, CLOSE_UNSUPPORTED_VERSION, FEATURE_ATTACHMENTS, FEATURE_CANCEL,
+    INLINE_BLOB_MAX, METHOD_ANNOUNCE, METHOD_CLOSING, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 
+use crate::capabilities::CapabilitySet;
 use crate::error::{CloseReason, Result};
-use crate::serve::{IncomingCall, Outgoing, ServeCapability};
+use crate::serve::{IncomingCall, Outgoing};
 use crate::transport::{Transport, WireSink, WireStream};
+
+/// How long an announced attachment waits to be claimed before the receiver cancels it. Longer
+/// than any plausible gap between reading a response and deciding what to do with its bytes, short
+/// enough that a caller which never looks does not pin the sender for the life of the connection.
+const ATTACHMENT_CLAIM_GRACE: Duration = Duration::from_secs(120);
 
 enum WriterCmd {
     Send(WireMessage),
@@ -36,7 +43,16 @@ struct IncomingStreamEntry {
     next_seq: u32,
 }
 
+/// An attachment the peer announced in a payload, registered by the reader before that payload
+/// reaches whoever asked for it. Holding the reference alongside the stream is what lets a claimer
+/// check the size and digest it was promised against what actually arrives.
+struct PendingAttachment {
+    reference: AttachmentRef,
+    rx: mpsc::UnboundedReceiver<StreamEvent>,
+}
+
 struct InflightCall {
+    capability: String,
     abort: tokio::task::AbortHandle,
     replied: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
@@ -113,6 +129,10 @@ pub struct AcceptOptions {
     pub limits: Limits,
     pub heartbeat: HeartbeatConfig,
     pub reserved_capabilities: Vec<String>,
+    /// What this acceptor advertises it can do. Dropping [`FEATURE_ATTACHMENTS`] from the list
+    /// keeps every blob inline in both directions on connections it accepts, which is the switch a
+    /// deployment reaches for if it would rather bound a response by size than handle a stream.
+    pub features: Vec<String>,
 }
 
 impl Default for AcceptOptions {
@@ -125,6 +145,7 @@ impl Default for AcceptOptions {
             limits: Limits::default(),
             heartbeat: HeartbeatConfig::default(),
             reserved_capabilities: Vec::new(),
+            features: vec![FEATURE_CANCEL.into(), FEATURE_ATTACHMENTS.into()],
         }
     }
 }
@@ -138,9 +159,10 @@ pub(crate) struct Shared {
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Payload>>>>,
     incoming: Mutex<HashMap<u32, IncomingStreamEntry>>,
     credits: Mutex<HashMap<u32, Arc<CreditGate>>>,
+    attachments: Mutex<HashMap<u32, PendingAttachment>>,
+    attachments_enabled: bool,
     inflight: Mutex<HashMap<u64, InflightCall>>,
-    local: HashMap<String, Arc<dyn ServeCapability>>,
-    local_descriptors: Vec<CapabilityDescriptor>,
+    caps: Arc<CapabilitySet>,
     reserved: Vec<String>,
     peer_caps: RwLock<Vec<CapabilityDescriptor>>,
     announced: watch::Sender<u64>,
@@ -158,15 +180,99 @@ impl Shared {
             .map_err(|_| WireError::connection_lost())
     }
 
-    fn reply_res(&self, id: u64, replied: &AtomicBool, result: Payload) {
-        if !replied.swap(true, Ordering::SeqCst) {
-            let _ = self.send_envelope(&Envelope::Res { id, result });
+    /// Send a response, moving any oversized blob in it onto its own stream first.
+    ///
+    /// The detach happens here rather than in the capability layer so it covers every response the
+    /// connection sends — a unary result and a uni_stream head both arrive through this one call —
+    /// and so no generated client or server code has to know attachments exist.
+    fn reply_res(self: &Arc<Self>, id: u64, replied: &AtomicBool, mut result: Payload) {
+        if replied.swap(true, Ordering::SeqCst) {
+            return;
         }
+        let detached = if self.attachments_enabled {
+            let mut alloc = || self.next_stream_id.fetch_add(2, Ordering::Relaxed);
+            attach::detach(&mut result.0, INLINE_BLOB_MAX, &mut alloc)
+        } else {
+            Vec::new()
+        };
+
+        // Register every gate before the response goes out. An `s_credit` for a stream with no gate
+        // is dropped (`handle_control`), and the peer may top up the moment it reads the reference.
+        for item in &detached {
+            let gate = CreditGate::new(self.limits.initial_stream_credit as u64);
+            self.credits.lock().unwrap().insert(item.stream, gate);
+        }
+
+        let _ = self.send_envelope(&Envelope::Res { id, result });
+
+        for item in detached {
+            let shared = self.clone();
+            tokio::spawn(async move { shared.send_attachment(item).await });
+        }
+    }
+
+    /// Push one detached blob out as STREAM_DATA, respecting the peer's credit, and close with the
+    /// digest in the trailer.
+    async fn send_attachment(self: Arc<Self>, item: zyris_proto::Detached) {
+        let Some(gate) = self.credits.lock().unwrap().get(&item.stream).cloned() else { return };
+        let chunk_size = (self.limits.max_chunk as usize).max(1);
+        let mut seq = 0u32;
+        let mut ok = true;
+        for chunk in item.bytes.chunks(chunk_size) {
+            if gate.acquire(chunk.len() as u64).await.is_err() {
+                ok = false;
+                break;
+            }
+            let frame = encode_stream_data(item.stream, seq, chunk);
+            if self.out.send(WriterCmd::Send(WireMessage::Binary(frame))).is_err() {
+                ok = false;
+                break;
+            }
+            seq += 1;
+        }
+        if ok {
+            let trailer = Payload::from_typed(&AttachmentTrailer { sha256: Some(item.sha256) })
+                .unwrap_or_default();
+            let _ = self.send_envelope(&Envelope::SEnd { stream: item.stream, trailer });
+        }
+        self.credits.lock().unwrap().remove(&item.stream);
     }
 
     fn reply_err(&self, id: u64, replied: &AtomicBool, error: WireError) {
         if !replied.swap(true, Ordering::SeqCst) {
             let _ = self.send_envelope(&Envelope::Err { id, error });
+        }
+    }
+
+    /// Fail every call still running for a capability that has just been revoked, per §5.
+    fn revoke_inflight(&self, capability: &str) {
+        // A capability that revokes itself from inside one of its own tools would otherwise abort
+        // the task awaiting the removal, which would then never return.
+        let caller = tokio::task::try_id();
+        let victims: Vec<(u64, InflightCall)> = {
+            let mut inflight = self.inflight.lock().unwrap();
+            let ids: Vec<u64> = inflight
+                .iter()
+                .filter(|(_, call)| call.capability == capability)
+                .filter(|(_, call)| caller != Some(call.abort.id()))
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter().filter_map(|id| inflight.remove(&id).map(|call| (id, call))).collect()
+        };
+        for (id, call) in victims {
+            let error = WireError::new(
+                ErrorCode::CapabilityUnavailable,
+                format!("capability {capability} was revoked"),
+            );
+            if !call.replied.swap(true, Ordering::SeqCst) {
+                let _ = self.send_envelope(&Envelope::Err { id, error });
+            } else if let Some(stream) = call.stream {
+                // The head is already out, so the caller is reading items rather than waiting on a
+                // reply; the stream's own terminator is the only thing that reaches it.
+                let _ = self.send_envelope(&Envelope::SErr { stream, error });
+                self.credits.lock().unwrap().remove(&stream);
+            }
+            call.abort.abort();
         }
     }
 }
@@ -183,6 +289,14 @@ pub trait CapabilityClient: Sized {
 }
 
 impl Connection {
+    pub(crate) fn from_shared(shared: Arc<Shared>) -> Connection {
+        Connection { shared }
+    }
+
+    pub(crate) fn revoke_inflight(&self, capability: &str) {
+        self.shared.revoke_inflight(capability);
+    }
+
     pub fn info(&self) -> &ConnectionInfo {
         &self.shared.info
     }
@@ -196,7 +310,7 @@ impl Connection {
     }
 
     pub fn local_descriptors(&self) -> Vec<CapabilityDescriptor> {
-        self.shared.local_descriptors.clone()
+        self.shared.caps.descriptors()
     }
 
     pub fn has_peer_capability(&self, name: &str, version: u32) -> bool {
@@ -303,6 +417,92 @@ impl Connection {
         }
     }
 
+    /// Whether both ends agreed to move large blobs onto streams. False against a peer built
+    /// before attachments existed, in which case every blob it sends and receives is inline.
+    pub fn attachments_enabled(&self) -> bool {
+        self.shared.attachments_enabled
+    }
+
+    /// Take the byte stream for one attachment a received payload referenced.
+    ///
+    /// `None` once it has been claimed, or for a stream this connection never saw announced.
+    /// Dropping the returned stream cancels the transfer, which is the same contract every other
+    /// incoming stream has.
+    pub fn attachment(&self, stream: u32) -> Option<(AttachmentRef, RawIncomingStream)> {
+        let pending = self.shared.attachments.lock().unwrap().remove(&stream)?;
+        Some((
+            pending.reference,
+            RawIncomingStream {
+                shared: self.shared.clone(),
+                stream_id: stream,
+                rx: pending.rx,
+                finished: false,
+            },
+        ))
+    }
+
+    /// Collect one attachment into memory, checking it against what the reference promised.
+    ///
+    /// `max_bytes` is refused up front from the declared size rather than partway through the
+    /// transfer: a caller that cannot hold the blob should not spend the bandwidth to find out.
+    pub async fn collect_attachment(&self, stream: u32, max_bytes: usize) -> Result<Bytes> {
+        let Some((reference, mut chunks)) = self.attachment(stream) else {
+            return Err(WireError::new(
+                ErrorCode::Other("attachment_gone".into()),
+                format!("stream {stream} was never announced, or has already been claimed"),
+            ));
+        };
+        if reference.size > max_bytes as u64 {
+            drop(chunks);
+            return Err(WireError::new(
+                ErrorCode::PayloadTooLarge,
+                format!("attachment is {} bytes, over the {max_bytes}-byte limit", reference.size),
+            ));
+        }
+
+        let mut buf = Vec::with_capacity(reference.size as usize);
+        while let Some(chunk) = chunks.next().await {
+            buf.extend_from_slice(&chunk?);
+            if buf.len() > max_bytes {
+                return Err(WireError::new(
+                    ErrorCode::PayloadTooLarge,
+                    format!("attachment exceeded the {max_bytes}-byte limit mid-transfer"),
+                ));
+            }
+        }
+
+        // A blob that arrives short or altered is worse than one that fails: it becomes a corrupt
+        // file nobody traces back to the wire.
+        if buf.len() as u64 != reference.size {
+            return Err(WireError::new(
+                ErrorCode::Other("attachment_truncated".into()),
+                format!("attachment declared {} bytes, {} arrived", reference.size, buf.len()),
+            ));
+        }
+        if let Some(expected) = &reference.sha256 {
+            let actual = attach::digest(&buf);
+            if &actual != expected {
+                return Err(WireError::new(
+                    ErrorCode::Other("attachment_corrupt".into()),
+                    format!("attachment sha256 {actual} does not match the declared {expected}"),
+                ));
+            }
+        }
+        Ok(Bytes::from(buf))
+    }
+
+    /// Pull every attachment a payload references back inline, leaving it as the sender wrote it.
+    ///
+    /// This is what a caller who just wants the bytes uses; a caller who would rather stream them
+    /// somewhere reads the references itself and takes each with [`Connection::attachment`].
+    pub async fn hydrate(&self, payload: &mut Payload, max_bytes: usize) -> Result<()> {
+        for reference in attach::refs(&payload.0) {
+            let bytes = self.collect_attachment(reference.stream, max_bytes).await?;
+            attach::splice(&mut payload.0, reference.stream, &bytes);
+        }
+        Ok(())
+    }
+
     pub fn notify(&self, method: &str, params: Payload) -> Result<()> {
         self.shared
             .send_envelope(&Envelope::Note { method: method.to_string(), params })
@@ -310,7 +510,7 @@ impl Connection {
 
     pub async fn announce(&self) -> Result<AnnounceResult> {
         let params = Payload::from_typed(&AnnounceParams {
-            capabilities: self.shared.local_descriptors.clone(),
+            capabilities: self.shared.caps.descriptors(),
         })?;
         let result = self.call_raw(METHOD_ANNOUNCE, params).await?;
         result.to_typed()
@@ -395,6 +595,20 @@ impl Drop for RawIncomingStream {
     }
 }
 
+/// The two feature lists a handshake produces. A feature is usable only when it appears in both:
+/// §3.2 forbids sending frames gated behind something the other side did not advertise, and an
+/// acceptor that withheld a feature must not use it merely because the dialer offered it.
+struct Features {
+    local: Vec<String>,
+    peer: Vec<String>,
+}
+
+impl Features {
+    fn agreed(&self, feature: &str) -> bool {
+        self.local.iter().any(|f| f == feature) && self.peer.iter().any(|f| f == feature)
+    }
+}
+
 pub(crate) enum Role {
     Dial { agent: String },
     Accept { options: AcceptOptions },
@@ -403,17 +617,18 @@ pub(crate) enum Role {
 pub(crate) async fn establish(
     transport: Box<dyn Transport>,
     role: Role,
-    capabilities: Vec<Arc<dyn ServeCapability>>,
+    capabilities: Arc<CapabilitySet>,
 ) -> Result<Connection> {
     let (mut sink, mut stream) = transport.split();
 
-    let (serialization, limits, info, reserved) = match role {
+    let (serialization, limits, info, reserved, features) = match role {
         Role::Dial { agent } => {
+            let local = vec![FEATURE_CANCEL.to_string(), FEATURE_ATTACHMENTS.to_string()];
             let hello = Envelope::Hello(Hello {
                 protocol: HelloProtocol { major: PROTOCOL_MAJOR, minors_supported: vec![PROTOCOL_MINOR] },
                 serialization: vec![Serialization::Msgpack, Serialization::Json],
                 agent,
-                features: vec!["cancel".into()],
+                features: local.clone(),
                 resume: None,
             });
             send_handshake(&mut sink, &hello).await?;
@@ -441,7 +656,7 @@ pub(crate) async fn establish(
                 serialization: ack.serialization,
                 peer_agent: None,
             };
-            (ack.serialization, ack.limits, info, Vec::new())
+            (ack.serialization, ack.limits, info, Vec::new(), Features { local, peer: ack.features })
         }
         Role::Accept { options } => {
             let hello = match read_handshake(&mut stream).await? {
@@ -479,6 +694,7 @@ pub(crate) async fn establish(
                 heartbeat: options.heartbeat,
                 limits: options.limits,
                 resumed: options.resumed,
+                features: options.features.clone(),
             };
             send_handshake(&mut sink, &Envelope::HelloAck(ack)).await?;
             let info = ConnectionInfo {
@@ -489,7 +705,13 @@ pub(crate) async fn establish(
                 serialization,
                 peer_agent: Some(hello.agent),
             };
-            (serialization, options.limits, info, options.reserved_capabilities)
+            (
+                serialization,
+                options.limits,
+                info,
+                options.reserved_capabilities,
+                Features { local: options.features, peer: hello.features },
+            )
         }
     };
 
@@ -497,14 +719,6 @@ pub(crate) async fn establish(
         Some(_) => Side::Acceptor,
         None => Side::Dialer,
     };
-    let mut local = HashMap::new();
-    let mut local_descriptors = Vec::new();
-    for cap in capabilities {
-        let descriptor = cap.descriptor();
-        local_descriptors.push(descriptor.clone());
-        local.insert(descriptor.name, cap);
-    }
-
     let (out_tx, out_rx) = mpsc::unbounded_channel();
     let (close_tx, _) = watch::channel(None);
     let (announced, _) = watch::channel(0);
@@ -520,9 +734,10 @@ pub(crate) async fn establish(
         pending: Mutex::new(HashMap::new()),
         incoming: Mutex::new(HashMap::new()),
         credits: Mutex::new(HashMap::new()),
+        attachments: Mutex::new(HashMap::new()),
+        attachments_enabled: features.agreed(FEATURE_ATTACHMENTS),
         inflight: Mutex::new(HashMap::new()),
-        local,
-        local_descriptors,
+        caps: capabilities.clone(),
         reserved,
         peer_caps: RwLock::new(Vec::new()),
         announced,
@@ -531,11 +746,15 @@ pub(crate) async fn establish(
         info,
     });
 
+    // Registered before anything can be announced, so a capability change racing the handshake
+    // reaches this connection rather than being announced only to the ones that came before it.
+    capabilities.register(&shared);
+
     tokio::spawn(run_writer(out_rx, sink));
     tokio::spawn(run_reader(shared.clone(), stream));
 
     let conn = Connection { shared };
-    if !conn.shared.local_descriptors.is_empty() {
+    if !conn.shared.caps.is_empty() {
         let announcer = conn.clone();
         tokio::spawn(async move {
             if let Err(e) = announcer.announce().await {
@@ -620,6 +839,7 @@ fn shutdown(shared: &Arc<Shared>, reason: CloseReason) {
     for (_, gate) in shared.credits.lock().unwrap().drain() {
         gate.cancel();
     }
+    shared.attachments.lock().unwrap().clear();
     for (_, call) in shared.inflight.lock().unwrap().drain() {
         call.abort.abort();
     }
@@ -660,6 +880,11 @@ fn handle_control(shared: &Arc<Shared>, envelope: Envelope) {
             handle_request(shared, id, method, params, stream)
         }
         Envelope::Res { id, result } => {
+            // Before the payload leaves the reader. The peer starts sending chunks as soon as it
+            // has written the response, and `handle_frame` drops stream data for an id it has no
+            // entry for — so registering from the awakened caller's task would lose whatever
+            // arrived in between.
+            register_attachments(shared, &result);
             if let Some(tx) = shared.pending.lock().unwrap().remove(&id) {
                 let _ = tx.send(Ok(result));
             }
@@ -742,7 +967,7 @@ fn handle_request(
         });
         return;
     };
-    let Some(capability) = shared.local.get(cap_name).cloned() else {
+    let Some(capability) = shared.caps.get(cap_name) else {
         let _ = shared.send_envelope(&Envelope::Err {
             id,
             error: WireError::new(
@@ -755,6 +980,7 @@ fn handle_request(
 
     let replied = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
+    let cap_name = cap_name.to_string();
     let tool = tool.to_string();
     let task_shared = shared.clone();
     let task_replied = replied.clone();
@@ -833,8 +1059,49 @@ fn handle_request(
     if !done.load(Ordering::SeqCst) {
         inflight.insert(
             id,
-            InflightCall { abort: task.abort_handle(), replied, done, stream: stream_id },
+            InflightCall {
+                capability: cap_name,
+                abort: task.abort_handle(),
+                replied,
+                done,
+                stream: stream_id,
+            },
         );
+    }
+}
+
+/// Open a receive side for every attachment a payload references, so the chunks already in flight
+/// land somewhere. Claiming one later is then just taking the entry back out.
+fn register_attachments(shared: &Arc<Shared>, payload: &Payload) {
+    for reference in attach::refs(&payload.0) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut incoming = shared.incoming.lock().unwrap();
+        if incoming.contains_key(&reference.stream) {
+            continue;
+        }
+        incoming.insert(reference.stream, IncomingStreamEntry { tx, next_seq: 0 });
+        drop(incoming);
+        // The receiving half waits here until someone claims it; chunks queue on the channel in
+        // the meantime, bounded by the credit the peer was granted rather than by the queue.
+        let stream = reference.stream;
+        shared
+            .attachments
+            .lock()
+            .unwrap()
+            .insert(stream, PendingAttachment { reference, rx });
+
+        // Nobody is obliged to claim an attachment, and an unclaimed one holds the sender at its
+        // credit ceiling forever. Give the caller a generous window, then cancel — a transfer the
+        // application never asked about is not worth a wedged peer.
+        let sweeper = shared.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ATTACHMENT_CLAIM_GRACE).await;
+            if sweeper.attachments.lock().unwrap().remove(&stream).is_some() {
+                sweeper.incoming.lock().unwrap().remove(&stream);
+                let _ = sweeper.send_envelope(&Envelope::SCancel { stream });
+                tracing::debug!(stream, "cancelled an attachment nobody claimed");
+            }
+        });
     }
 }
 

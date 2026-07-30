@@ -1,3 +1,4 @@
+pub mod attach;
 mod capability;
 mod datum;
 mod envelope;
@@ -5,6 +6,7 @@ mod error;
 mod frame;
 mod payload;
 
+pub use attach::{AttachmentTrailer, Detached};
 pub use capability::{
     method_name, split_method, AnnounceParams, AnnounceResult, CapabilityDescriptor,
     ClosingParams, RejectedCapability, ToolDescriptor, Transfer,
@@ -13,8 +15,9 @@ pub use datum::{AttachmentRef, Blob, Chunk, Datum, INLINE_BLOB_MAX};
 pub use envelope::{
     AckProtocol, Envelope, HeartbeatConfig, Hello, HelloAck, HelloProtocol, Limits, ResumeInfo,
     Serialization, StreamDecl, CLOSE_FLOW_VIOLATION, CLOSE_MALFORMED_FRAME, CLOSE_NORMAL,
-    CLOSE_UNAUTHORIZED, CLOSE_UNSUPPORTED_VERSION, METHOD_ANNOUNCE, METHOD_CLOSING,
-    METHOD_WEBRTC_CLOSE, METHOD_WEBRTC_SIGNAL, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    CLOSE_UNAUTHORIZED, CLOSE_UNSUPPORTED_VERSION, FEATURE_ATTACHMENTS, FEATURE_CANCEL,
+    METHOD_ANNOUNCE, METHOD_CLOSING, METHOD_WEBRTC_CLOSE, METHOD_WEBRTC_SIGNAL, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
 };
 pub use error::{ErrorCode, WireError};
 pub use frame::{
@@ -82,6 +85,7 @@ mod tests {
             heartbeat: HeartbeatConfig::default(),
             limits: Limits::default(),
             resumed: false,
+            features: vec![FEATURE_ATTACHMENTS.into()],
         }));
     }
 

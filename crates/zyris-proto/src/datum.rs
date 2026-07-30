@@ -4,7 +4,17 @@ use schemars::{json_schema, JsonSchema};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub const INLINE_BLOB_MAX: usize = 128 * 1024;
+/// How many bytes a [`Blob::Inline`] may carry before it should be an attachment instead.
+///
+/// Advisory: nothing in this crate enforces it, because the transport does not care — a websocket
+/// frame is 16 MiB by default and msgpack `bin` costs one byte per byte. What cares is the far end
+/// of a deployment. Attacca measures a node's tool result as `serde_json::to_vec(..).len()`
+/// against `ZYRIS_MAX_RESULT_BYTES` (1,000,000 by default), and JSON means the blob is base64 —
+/// four bytes out for every three in.
+///
+/// 512 KiB is the largest round number that survives that: 699,052 base64 bytes, leaving the
+/// envelope most of a third of the budget. 1 MiB would encode to 1,398,101 and be rejected.
+pub const INLINE_BLOB_MAX: usize = 512 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AttachmentRef {

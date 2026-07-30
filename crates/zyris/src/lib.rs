@@ -1,3 +1,4 @@
+mod capabilities;
 mod connection;
 pub mod enroll;
 mod error;
@@ -22,9 +23,10 @@ pub const DEFAULT_SERVER_URL: &str = "wss://attacca.cc/api/zyris/v1/ws";
 #[cfg(feature = "hostname")]
 pub use hostname::machine_name;
 
+pub use capabilities::Capabilities;
 pub use connection::{AcceptOptions, CapabilityClient, Connection, ConnectionInfo, RawIncomingStream};
 pub use error::{CloseReason, Error, ErrorCode, Result, TransportError};
-pub use handle::CapabilityHandle;
+pub use handle::{CapabilityHandle, MAX_HYDRATE_BYTES};
 pub use node::{Node, NodeBuilder, NodeKind};
 pub use serve::{
     decode_call, encode_response, encode_streaming, unknown_tool, IncomingCall, ItemStream,
@@ -33,8 +35,8 @@ pub use serve::{
 
 pub use zyris_proto as proto;
 pub use zyris_proto::{
-    AttachmentRef, Blob, CapabilityDescriptor, Chunk, Datum, Payload, Serialization,
-    ToolDescriptor, Transfer, WireError,
+    AttachmentRef, AttachmentTrailer, Blob, CapabilityDescriptor, Chunk, Datum, Payload,
+    Serialization, ToolDescriptor, Transfer, WireError, INLINE_BLOB_MAX,
 };
 
 pub use async_trait::async_trait;

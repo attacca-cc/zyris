@@ -24,3 +24,10 @@ zyris = { version = "0.1.0", path = "../zyris", features = ["enroll"] }
 zyris-attacca = { version = "0.1.0", path = "../zyris-attacca" }
 zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
 zyris-capkit = { version = "0.1.0", path = "../zyris-capkit" }
+
+[features]
+# Off by default so `cargo build --workspace` needs no X11/Wayland development packages. Turn it on
+# for a node that sits at a desk with a screen and a keyboard someone wants driven:
+#     cargo run -p zyris-hello --features desktop
+# On Linux that build needs the libraries in this repo's `flake.nix`; `nix develop` provides them.
+desktop = ["zyris-capkit/desktop", "zyris-capkit/input-wayland"]

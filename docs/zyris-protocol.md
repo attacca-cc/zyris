@@ -140,7 +140,7 @@ outcome of negotiation.
   "protocol": { "major": 1, "minors_supported": [0] },
   "serialization": ["msgpack", "json"],
   "agent": "zyris-node/0.1.0 (linux; x86_64)",
-  "features": ["cancel", "video-webrtc", "video-mjpeg"],
+  "features": ["cancel", "attachments", "video-webrtc", "video-mjpeg"],
   "resume": { "conn_id": "…", "resume_token": "…" } }        // optional
 
 // acceptor → dialer
@@ -152,11 +152,14 @@ outcome of negotiation.
   "heartbeat": { "interval_s": 20, "timeout_s": 45 },
   "limits": { "max_control_frame": 1048576, "max_chunk": 262144,
               "max_inflight_reqs": 64, "initial_stream_credit": 262144 },
-  "resumed": false }
+  "resumed": false,
+  "features": ["cancel", "attachments"] }
 ```
 
 Version mismatch ⇒ `err unsupported_version` then websocket close `4400`. A peer MUST NOT
-send frames gated behind a feature the other side did not advertise.
+send frames gated behind a feature the other side did not advertise. `features` is absent
+on an acceptor that predates the field, which reads as advertising nothing — the safe
+answer, since a feature is usable only when it appears in *both* lists.
 
 ### 3.3 Heartbeat and close
 
@@ -279,18 +282,37 @@ Three datum kinds cross the wire as values inside `params` / `result` / stream i
 
 A blob is either:
 
-- **inline** — allowed only when ≤ 128 KiB: msgpack `bin` (base64 string under negotiated
-  JSON — one reason msgpack is the default), or
+- **inline** — allowed only when ≤ 512 KiB: msgpack `bin` (base64 string under negotiated
+  JSON — one reason msgpack is the default). The ceiling comes from the far end rather than the
+  wire: a deployment that measures a result as JSON pays base64's four-for-three, so 512 KiB
+  arrives as 699,052 bytes, and Attacca's `ZYRIS_MAX_RESULT_BYTES` defaults to 1,000,000, or
 - **attachment** — metadata in place of bytes:
   `{ "attachment": { "stream": 42, "size": 48293812, "sha256": "…", "offset": 0 } }`,
   bytes following as STREAM_DATA chunks on the referenced stream, `s_end.trailer.sha256`
   for end-to-end integrity. Interrupted transfers resume by re-issuing the call with
   `offset`.
 
-Implementation status: the Rust library currently ships inline blobs and chunked
-uni-streams (which cover bulk file transfer via `file_io.read`/`write_at`); attachment
-hydration for blobs embedded in unary payloads is a wire-compatible extension point, not
-yet implemented.
+Attachments are **negotiated**: both peers must advertise the `attachments` feature in
+`hello.features` / `hello_ack.features`. Against a peer that did not, blobs stay inline
+whatever their size, per §3.2.
+
+Where they are used, the conversion is automatic and by size. A responder detaches every
+blob over 512 KiB as it writes the response: it allocates a stream from its own parity
+space (§4 — the byte sender allocates, so no `req.stream.id` is involved), writes the
+reference in place of the bytes, sends the `res`, and then pushes the bytes as
+STREAM_DATA chunks of at most `max_chunk`, paced by the receiver's credit. `s_end` carries
+the digest, which the reference also names, so a receiver can check length and content
+without having trusted either end alone.
+
+The receiver opens the stream when it decodes the payload, not when its caller gets
+around to looking — chunks are already in flight by then. An announced attachment nobody
+claims within two minutes is cancelled, because an unclaimed stream otherwise holds its
+sender at the credit ceiling for the life of the connection.
+
+Implementation status: inline blobs, chunked uni-streams (which cover bulk file transfer
+via `file_io.read`/`write_at`), and attachments in responses. Attachments in *request
+params* — a large datum travelling caller-ward, as `file_io.write` would want — are the
+same mechanism mirrored and are not implemented yet.
 
 ## 7. Node identity, enrollment, presence
 

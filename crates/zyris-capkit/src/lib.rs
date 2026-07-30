@@ -11,7 +11,7 @@
 //! |---|---|---|
 //! | `file-io` (default) | [`LocalFileIo`] | `tokio::fs` |
 //! | `terminal` (default) | [`PtyTerminal`] | `portable-pty` |
-//! | `screen` | [`XcapScreenCapture`] | [`xcap`] |
+//! | `screen` | [`HostScreenCapture`] | [`xcap`], or `libwayshot` in a wlroots Wayland session |
 //! | `input` | [`EnigoInput`] | [`enigo`] |
 //!
 //! `desktop` turns on both of the last two.
@@ -33,16 +33,29 @@
 //!
 //! # Screen capture on Wayland
 //!
-//! A Wayland compositor does not let a client read the screen, so `xcap` goes through
-//! `org.freedesktop.portal.Screenshot` and falls back to the wlroots `zwlr_screencopy` protocol
-//! when no portal offers that interface. Give the session a Screenshot portal backend if you can:
-//! the fallback is where the rough edges are. On Hyprland with `xdg-desktop-portal-hyprland` and
-//! no Screenshot portal exposed, capturing a whole output fails with
-//! `wl_shm_pool: Couldn't mmap from fd` — a region one pixel narrower than the output succeeds,
-//! which places the bug in the screencopy path rather than here.
+//! A Wayland compositor does not let a client read the screen, so there are two ways in and
+//! [`ScreenBackend::detect`] picks between them at construction.
+//!
+//! On a wlroots-based compositor — Hyprland, Sway, river, Wayfire — [`ScreenBackend::Wayland`]
+//! talks `wl_output` and `zwlr_screencopy` directly, the same pair `grim` uses. This is not the
+//! same as letting `xcap` do it: `xcap` enumerates monitors over XRandR even in a Wayland session
+//! and then captures in Wayland's coordinate space, and the two only agree while Xwayland can
+//! express the compositor's layout. Put a monitor above the origin and its `y` goes negative,
+//! which X11 cannot represent, so Xwayland flattens the arrangement into a row and every captured
+//! rectangle lands on the wrong output.
+//!
+//! Everywhere else — GNOME, KDE, and any compositor without `zwlr_screencopy` — the probe fails
+//! and [`ScreenBackend::Xcap`] takes over, reaching the screen through
+//! `org.freedesktop.portal.Screenshot`. That interface has to actually be offered: a session whose
+//! portal backend does not register it has no way to capture at all.
 
 pub mod path;
 pub use path::resolve_under;
+
+#[cfg(any(feature = "input", feature = "screen"))]
+mod display;
+#[cfg(any(feature = "input", feature = "screen"))]
+pub use display::Displays;
 
 #[cfg(feature = "file-io")]
 mod file_io;
@@ -57,7 +70,7 @@ pub use terminal::PtyTerminal;
 #[cfg(feature = "screen")]
 mod screen;
 #[cfg(feature = "screen")]
-pub use screen::XcapScreenCapture;
+pub use screen::{HostDisplays, HostScreenCapture, ScreenBackend};
 #[cfg(feature = "screen")]
 pub use xcap::{self, image};
 
