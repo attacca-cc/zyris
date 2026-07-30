@@ -354,3 +354,49 @@ async fn screen_does_not_advance_the_read_cursor() {
         term.read(pty, None, Some(Settle { quiet_ms: 0, timeout_ms: 1000 })).await.unwrap();
     assert!(out.content.contains("SECOND-NEEDLE"), "screen이 커서를 먹었다: {:?}", out.content);
 }
+
+// ── 수명: 상한과 유휴 수거 ──────────────────────────────────────────────
+
+/// 상한이 없으면 루프에 빠진 에이전트가 셸을 무한히 뽑는다.
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_past_the_cap_fails_with_too_many_ptys() {
+    let term = connect(PtyTerminal::default()).await;
+    for _ in 0..8 {
+        term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
+    }
+    let err = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap_err();
+    assert!(format!("{err:?}").contains("too_many_ptys"), "본 오류: {err:?}");
+}
+
+/// 유휴 타임아웃이 세션을 닫는다. 벽시계 대신 주입한 값으로 잰다 —
+/// 10분을 기다리는 테스트는 테스트가 아니다.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_idle_session_is_reaped() {
+    let term = connect(PtyTerminal::default().with_idle_timeout(Duration::from_millis(300))).await;
+    let opened = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let err = term
+        .read(opened.pty, None, Some(Settle { quiet_ms: 0, timeout_ms: 500 }))
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("pty_gone"), "본 오류: {err:?}");
+}
+
+/// 계속 만지는 세션은 살아 있어야 한다 — 스위퍼가 `last_touch`를 진짜로 보는지.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_touched_session_is_not_reaped() {
+    let term = connect(PtyTerminal::default().with_idle_timeout(Duration::from_millis(400))).await;
+    let opened = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
+
+    for _ in 0..6 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        term.read(opened.pty.clone(), None, Some(Settle { quiet_ms: 0, timeout_ms: 500 }))
+            .await
+            .expect("만지고 있는 세션이 수거됐다");
+    }
+}
