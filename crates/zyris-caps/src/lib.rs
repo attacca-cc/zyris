@@ -24,6 +24,6 @@ pub use screen::{
     ScreenCaptureServer,
 };
 pub use terminal::{
-    terminal_capability, ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal, TerminalClient,
-    TerminalServer,
+    terminal_capability, ExecOutput, PtyChunk, PtyId, PtyOpened, PtyRead, PtyScreen, Settle,
+    Terminal, TerminalClient, TerminalServer,
 };
