@@ -3,8 +3,8 @@ mod session;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -23,11 +23,23 @@ const STREAM_CHUNK_MAX: usize = 64 * 1024;
 /// Attacca의 `ZYRIS_MAX_RESULT_BYTES`(기본 1,000,000) 예산 통과가 실측으로 확인된 값.
 const PTY_READ_MAX: usize = 128 * 1024;
 
+/// 동시에 열어 둘 수 있는 세션 수. 상한이 없으면 루프에 빠진 에이전트가 셸을 무한히 뽑는다.
+const MAX_SESSIONS: usize = 8;
+
+/// 아무도 만지지 않는 세션을 닫기까지의 시간.
+///
+/// 스펙 §5.1이 연결 추적 배선 대신 이것으로 덮기로 한 지점이다 — 와이어만 끊긴 경우
+/// 아무도 `read`를 부르지 않으므로 결국 여기서 수거된다. 대가는 끊김 후 최대 이만큼
+/// 셸 프로세스가 살아 있다는 것이다.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+
 pub struct PtyTerminal {
     default_shell: String,
     root: PathBuf,
     next_id: AtomicU64,
     sessions: Sessions,
+    idle_timeout: Duration,
+    sweeper_started: AtomicBool,
 }
 
 impl PtyTerminal {
@@ -35,7 +47,45 @@ impl PtyTerminal {
         PtyTerminal { root: root.into(), ..PtyTerminal::default() }
     }
 
+    /// 유휴 타임아웃 주입점. 테스트가 10분을 기다릴 수는 없다.
+    pub fn with_idle_timeout(mut self, d: Duration) -> Self {
+        self.idle_timeout = d;
+        self
+    }
+
+    /// 유휴 스위퍼를 처음 `open` 때 건다.
+    ///
+    /// 생성자에서 걸 수 없다 — `PtyTerminal::default()`는 tokio 런타임 밖에서도 불리고
+    /// `tokio::spawn`은 거기서 패닉한다. `open`은 async라 런타임 안이 보장된다.
+    ///
+    /// 세션 맵을 `Weak`으로 잡는다. 강하게 잡으면 `local.declare` 재선언으로
+    /// `PtyTerminal`이 drop돼도 스위퍼가 맵을 붙들고 있어 셸이 살아남는다.
+    fn ensure_sweeper(&self) {
+        if self.sweeper_started.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let weak: Weak<Mutex<HashMap<String, session::PtySession>>> = Arc::downgrade(&self.sessions);
+        let idle = self.idle_timeout;
+        let tick = (idle / 4).max(Duration::from_millis(10));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tick).await;
+                let Some(sessions) = weak.upgrade() else { return };
+                // 세션이 맵에서 빠지면 `PtySession`이 drop되며 master fd가 닫히고,
+                // 슬레이브 쪽 셸이 SIGHUP을 받는다.
+                sessions.lock().unwrap().retain(|_, s| s.last_touch.elapsed() < idle);
+            }
+        });
+    }
+
     fn new_session(&self, shell: Option<String>, cols: u16, rows: u16) -> zyris::Result<String> {
+        self.ensure_sweeper();
+        if self.sessions.lock().unwrap().len() >= MAX_SESSIONS {
+            return Err(WireError::new(
+                ErrorCode::Other("too_many_ptys".into()),
+                format!("at most {MAX_SESSIONS} PTYs at a time; close one first"),
+            ));
+        }
         let id = format!("pty-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         session::spawn(
             &self.sessions,
@@ -153,6 +203,8 @@ impl Default for PtyTerminal {
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             next_id: AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            idle_timeout: IDLE_TIMEOUT,
+            sweeper_started: AtomicBool::new(false),
         }
     }
 }
