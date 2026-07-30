@@ -31,6 +31,7 @@ pub use store::{
 };
 
 pub use protocol::{
-    authorization_notice, authorized_notice, AuthorizeRequest, AuthorizeResponse, ClientHint,
-    ErrorResponse, PollOutcome, PollState, TokenResponse,
+    authorization_notice, authorized_notice, classify_refresh_error, AuthorizeRequest,
+    AuthorizeResponse, ClientHint, ErrorResponse, PollOutcome, PollState, RefreshOutcome,
+    TokenResponse,
 };

@@ -143,6 +143,40 @@ impl PollState {
     }
 }
 
+/// What a refused refresh means for the credential that was presented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The grant chain is dead — the stored credential has to be discarded and the node enrolled
+    /// again. Nothing a retry can reach will change this answer.
+    Dead(String),
+    /// The server could not answer right now. The credential is very probably still good, so it is
+    /// kept and the whole thing is tried again later.
+    Unavailable(String),
+}
+
+/// Fold a refused refresh into the one decision that matters: keep the credential, or throw it away.
+///
+/// Only `invalid_grant` is fatal. On the refresh endpoint that code has exactly one meaning — the
+/// refresh token is unknown, expired, revoked, or was replayed past the reuse grace — and in every
+/// one of those cases the server will never honour it again.
+///
+/// Everything else is transient by default, deliberately: this classification decides whether a
+/// file gets deleted, and the two mistakes are not symmetric. Discarding a live credential drags a
+/// person back to a terminal to approve a code; keeping a dead one costs a backoff cycle. That
+/// asymmetry is also why the catch-all sits on this side — `parse_error` synthesises `http_503` and
+/// friends for bodies it could not read, and a proxy returning HTML mid-outage must not be able to
+/// unenroll a fleet.
+pub fn classify_refresh_error(error: &ErrorResponse) -> RefreshOutcome {
+    let described = match &error.error_description {
+        Some(description) => format!("{}: {description}", error.error),
+        None => error.error.clone(),
+    };
+    match error.error.as_str() {
+        "invalid_grant" => RefreshOutcome::Dead(described),
+        _ => RefreshOutcome::Unavailable(described),
+    }
+}
+
 fn clamp_interval(interval: Duration) -> Duration {
     interval.clamp(MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)
 }
@@ -279,6 +313,40 @@ mod tests {
         let PollOutcome::Fatal(message) = outcome else { panic!("expected fatal") };
         assert!(message.contains("invalid_grant"));
         assert!(message.contains("because"), "the server's reason must survive");
+    }
+
+    /// The one answer that means "this credential is gone" — and the reason has to survive, because
+    /// it is what gets logged immediately before a file is deleted.
+    #[test]
+    fn only_invalid_grant_kills_a_stored_credential() {
+        let outcome = classify_refresh_error(&error("invalid_grant", None));
+        let RefreshOutcome::Dead(reason) = outcome else { panic!("expected dead") };
+        assert!(reason.contains("invalid_grant"));
+        assert!(reason.contains("because"), "the server's reason must survive");
+    }
+
+    /// The asymmetry this classification exists for: an outage must never unenroll a node. Every one
+    /// of these is a real answer from the refresh endpoint, and none of them means the grant is dead.
+    #[test]
+    fn a_server_having_a_bad_day_never_discards_a_credential() {
+        for kind in ["temporarily_unavailable", "slow_down", "server_error", "invalid_request"] {
+            assert!(
+                matches!(classify_refresh_error(&error(kind, None)), RefreshOutcome::Unavailable(_)),
+                "{kind} must not be treated as a dead grant"
+            );
+        }
+    }
+
+    /// `parse_error` synthesises this shape when the body is not JSON at all — an HTML error page
+    /// from a proxy mid-outage. Unreadable must not mean unenrolled.
+    #[test]
+    fn an_unreadable_error_body_is_transient_not_fatal() {
+        let synthetic =
+            ErrorResponse { error: "http_503".into(), error_description: None, interval: None };
+        let RefreshOutcome::Unavailable(reason) = classify_refresh_error(&synthetic) else {
+            panic!("a body we could not read tells us nothing about the grant")
+        };
+        assert_eq!(reason, "http_503", "with no description the code stands alone");
     }
 
     /// The notice is the primary UX of this feature and has to survive SSH: ASCII only, and no

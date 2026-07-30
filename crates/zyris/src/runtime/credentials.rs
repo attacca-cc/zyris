@@ -40,9 +40,11 @@ pub trait Credentials: Send + Sync + 'static {
 
     /// Called once when a dial is refused as unauthorized, before giving up.
     ///
-    /// Return `true` if a different credential is now available and the dial is worth repeating.
-    /// The default is `false`: a source that hands back the same token every time has nothing to
-    /// contribute here, and answering `true` would loop on a credential that will never work.
+    /// Return `true` if the next dial is worth attempting — because a different credential is now
+    /// available, or because this source has thrown away the dead one and the following
+    /// [`bearer`](Self::bearer) will go and get a fresh one. The default is `false`: a source that
+    /// hands back the same token every time has nothing to contribute here, and answering `true`
+    /// would loop on a credential that will never work.
     async fn refresh(&self) -> Result<bool, CredentialsError> {
         Ok(false)
     }
@@ -225,7 +227,11 @@ impl Credentials for DeviceGrant {
     async fn refresh(&self) -> Result<bool, CredentialsError> {
         let mut held = self.held.lock().await;
         let Some(current) = held.as_ref() else { return Ok(false) };
-        *held = Some(self.enroller.force_refresh(current).await?);
+        // `None` means the server disowned this credential and the store has already been cleared.
+        // Dropping what is held sends the next `bearer` back through `obtain`, which finds nothing
+        // stored and enrolls — so a revoked node prints a fresh code instead of dying, and there is
+        // still exactly one place that enrollment can begin.
+        *held = self.enroller.force_refresh(current).await?;
         Ok(true)
     }
 
@@ -345,6 +351,61 @@ mod tests {
 
         std::fs::write(&path, "znt_rotated").unwrap();
         assert_eq!(creds.bearer().await.unwrap(), "znt_rotated");
+    }
+
+    /// What the run loop actually depends on after a 401: a rotation the server refuses answers
+    /// `true` — dial again — while dropping what is held, so the next `bearer` goes back through
+    /// `obtain`, finds an empty store, and enrolls. Answering `false` here is what made a revoked
+    /// node exit instead of printing a fresh code.
+    #[cfg(all(feature = "enroll", test))]
+    #[tokio::test]
+    async fn a_disowned_device_grant_asks_for_another_dial_and_forgets_what_it_held() {
+        use crate::enroll::{CredentialStore, Enroller, MemoryCredentialStore, StoredCredential};
+
+        let url = crate::enroll::http::canned_responder(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"that code is not valid"}"#,
+        );
+        let store = Arc::new(MemoryCredentialStore::new());
+        let credential = StoredCredential::new(
+            "zna_access".into(),
+            "znr_refresh".into(),
+            "node-id".into(),
+            "hello node".into(),
+            "allen@example.com".into(),
+            now_unix() + 3600,
+        );
+        store.save(&credential).await.unwrap();
+
+        let grant = DeviceGrant::new(
+            Enroller::new(&url, "hello node".into(), "linux".into(), vec![], store.clone()).unwrap(),
+        );
+        // Seed what `bearer` would have cached, without dialling anything.
+        *grant.held.lock().await = Some(credential);
+
+        assert!(grant.refresh().await.unwrap(), "a cleared store is still worth another dial");
+        assert!(grant.held.lock().await.is_none(), "the dead credential must not be presented again");
+        assert_eq!(store.load().await.unwrap(), None);
+    }
+
+    /// Nothing held, nothing to rotate. The run loop reads `false` as "give up", which is right:
+    /// there is no credential here for a refusal to have been about.
+    #[cfg(all(feature = "enroll", test))]
+    #[tokio::test]
+    async fn a_device_grant_that_never_obtained_anything_has_nothing_to_rotate() {
+        use crate::enroll::{Enroller, MemoryCredentialStore};
+
+        let grant = DeviceGrant::new(
+            Enroller::new(
+                "ws://127.0.0.1:1/zyris/v1/ws",
+                "hello node".into(),
+                "linux".into(),
+                vec![],
+                Arc::new(MemoryCredentialStore::new()),
+            )
+            .unwrap(),
+        );
+        assert!(!grant.refresh().await.unwrap());
     }
 
     #[tokio::test]

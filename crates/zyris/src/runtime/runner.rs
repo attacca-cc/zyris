@@ -1,10 +1,11 @@
 //! The dial/reconnect loop every node runs, so no node has to write it.
 //!
 //! Nothing here is clever, and that is the point: backoff with jitter, a healthy connection resets
-//! it, one forced credential rotation on a 401, graceful shutdown on `Ctrl-C`, and exit codes a
-//! supervisor can act on. Each of those is a small decision that is easy to get subtly wrong once
-//! and then carry forever — a node pinned at the backoff ceiling after a nightly server restart, a
-//! restart loop printing enrollment codes into a log nobody reads.
+//! it, one forced credential rotation on a 401 — which a credential source may answer by discarding
+//! itself and enrolling again — graceful shutdown on `Ctrl-C`, and exit codes a supervisor can act
+//! on. Each of those is a small decision that is easy to get subtly wrong once and then carry
+//! forever — a node pinned at the backoff ceiling after a nightly server restart, a restart loop
+//! printing enrollment codes into a log nobody reads.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use futures_util::future::BoxFuture;
 
 use crate::capabilities::{Capabilities, CapabilitySet};
-use crate::error::WireError;
+use crate::error::{ErrorCode, WireError};
 use crate::runtime::credentials::{token_prefix, Credentials, CredentialsError};
 use crate::{Connection, Node, NodeKind, ServeCapability};
 
@@ -330,12 +331,19 @@ impl Runner {
                 // A refusal here can be a slept laptop or a clock that drifted — recoverable, but
                 // the transport marks 401 non-retriable, so without one forced rotation a node
                 // would exit permanently on a condition it could fix itself.
-                Err(e) if !e.retriable && !rotated_after_refusal => {
+                Err(e) if e.code == ErrorCode::Unauthorized && !rotated_after_refusal => {
                     tracing::warn!(error = %e, "credential refused; rotating once before giving up");
                     rotated_after_refusal = true;
                     match credentials.refresh().await {
                         Ok(true) => continue,
                         Ok(false) => return Err(RunError::Refused(e.to_string())),
+                        // The rotation endpoint could not be reached, so no rotation actually
+                        // happened. Charging it against the one attempt would mean a server that
+                        // blipped during a deploy kills every node that dialled through it.
+                        Err(refresh_error @ CredentialsError::Unavailable(_)) => {
+                            tracing::warn!(error = %refresh_error, "could not rotate the credential");
+                            rotated_after_refusal = false;
+                        }
                         Err(refresh_error) => return Err(refresh_error.into()),
                     }
                 }

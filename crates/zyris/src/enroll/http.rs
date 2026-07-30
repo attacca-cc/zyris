@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::enroll::protocol::{
-    authorization_notice, authorized_notice, AuthorizeRequest, AuthorizeResponse, ClientHint,
-    ErrorResponse, PollOutcome, PollState, TokenResponse,
+    authorization_notice, authorized_notice, classify_refresh_error, AuthorizeRequest,
+    AuthorizeResponse, ClientHint, ErrorResponse, PollOutcome, PollState, RefreshOutcome,
+    TokenResponse,
 };
 use crate::enroll::store::{CredentialStore, CredentialStoreError, StoredCredential};
 
@@ -30,6 +31,9 @@ pub enum EnrollError {
     /// codes into a log nobody reads.
     #[error("{0}")]
     NeedsOperator(String),
+    /// The server will never honour this grant again — it was revoked, it expired, or its chain was
+    /// broken. Both refresh paths answer this by clearing the store and enrolling from scratch, so
+    /// a merely *unreachable* server must never be reported here. See `classify_refresh_error`.
     #[error("the server rejected this node: {0}")]
     Rejected(String),
     #[error(transparent)]
@@ -131,14 +135,28 @@ impl Enroller {
         self.enroll().await
     }
 
-    /// Force a rotation, for the one recoverable 401 at the websocket upgrade — a slept laptop or
-    /// a clock that drifted can produce one, and the transport maps 401 to non-retriable, so
-    /// without this a node would exit permanently on a condition it could have fixed itself.
+    /// Force a rotation, for the 401 at the websocket upgrade — a slept laptop or a clock that
+    /// drifted can produce one, and the transport maps 401 to non-retriable, so without this a node
+    /// would exit permanently on a condition it could have fixed itself.
+    ///
+    /// `Ok(None)` means the server disowned the credential outright: the store has already been
+    /// cleared, and the caller's next [`obtain`](Self::obtain) will enroll from scratch. That is the
+    /// same conclusion `obtain` reaches on the startup path — a node whose grant chain was revoked
+    /// while it was connected must not be left presenting the dead token until a human deletes the
+    /// file, which is exactly what happens if a rejected rotation merely propagates.
     pub async fn force_refresh(
         &self,
         stored: &StoredCredential,
-    ) -> Result<StoredCredential, EnrollError> {
-        self.refresh(&stored.refresh_token).await
+    ) -> Result<Option<StoredCredential>, EnrollError> {
+        match self.refresh(&stored.refresh_token).await {
+            Ok(rotated) => Ok(Some(rotated)),
+            Err(EnrollError::Rejected(reason)) => {
+                tracing::warn!(%reason, "zyris credential rejected on rotation; re-enrolling");
+                self.store.clear().await?;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// A corrupt or unreadable credential is a reason to enroll again, not to die. A *refused* one
@@ -247,8 +265,15 @@ impl Enroller {
             .post("/zyris/v1/device/refresh", &serde_json::json!({ "refresh_token": refresh_token }))
             .await?;
         if !response.status().is_success() {
+            // `Rejected` from here is load-bearing in a way it is not anywhere else: both callers
+            // answer it by deleting the credential. So a refusal is classified rather than assumed
+            // fatal — a 503 during a deploy would otherwise unenroll every node that dialled through
+            // it. See `classify_refresh_error`.
             let error = parse_error(response).await;
-            return Err(EnrollError::Rejected(describe(&error)));
+            return Err(match classify_refresh_error(&error) {
+                RefreshOutcome::Dead(reason) => EnrollError::Rejected(reason),
+                RefreshOutcome::Unavailable(reason) => EnrollError::Transport(reason),
+            });
         }
         let token: TokenResponse =
             response.json().await.map_err(|e| EnrollError::Transport(e.to_string()))?;
@@ -382,9 +407,118 @@ fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// Answer every request on a fresh loopback port with one canned response, and return the
+/// websocket URL an [`Enroller`] should be built with to reach it.
+///
+/// A real socket rather than a faked HTTP client, because the branch under test — the one that
+/// deletes a node's credential — keys off a status line and a response body, and stubbing the
+/// client would stub out exactly the input that decides it.
+#[cfg(test)]
+pub(crate) fn canned_responder(status_line: &str, body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("no loopback port");
+    let address = listener.local_addr().expect("no local address");
+    let status_line = status_line.to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            use std::io::{Read, Write};
+            let Ok(mut stream) = stream else { return };
+            let _ = stream.read(&mut [0u8; 4096]);
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    format!("ws://{address}/zyris/v1/ws")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enroll::MemoryCredentialStore;
+
+    fn credential() -> StoredCredential {
+        StoredCredential::new(
+            "zna_access".into(),
+            "znr_refresh".into(),
+            "node-id".into(),
+            "hello node".into(),
+            "allen@example.com".into(),
+            now_unix() + 3600,
+        )
+    }
+
+    fn enroller_against(url: &str, store: Arc<MemoryCredentialStore>) -> Enroller {
+        Enroller::new(url, "hello node".into(), "linux".into(), vec!["agents:read".into()], store)
+            .expect("the client builds")
+    }
+
+    /// The whole point of the rotation path: a grant the server has disowned must not survive on
+    /// disk. Leaving it there is what turns one revoked node into a restart loop that presents the
+    /// same dead token forever, since a stored access token with life left is never re-validated.
+    #[tokio::test]
+    async fn a_disowned_grant_is_deleted_rather_than_presented_again() {
+        let url = canned_responder(
+            "400 Bad Request",
+            r#"{"error":"invalid_grant","error_description":"that code is not valid"}"#,
+        );
+        let store = Arc::new(MemoryCredentialStore::new());
+        store.save(&credential()).await.unwrap();
+
+        let enroller = enroller_against(&url, store.clone());
+        let rotated = enroller.force_refresh(&credential()).await.expect("not a hard failure");
+
+        assert!(rotated.is_none(), "a dead grant yields no credential to carry on with");
+        assert_eq!(store.load().await.unwrap(), None, "the dead credential must not survive");
+    }
+
+    /// The mirror image, and the reason the refusal is classified at all: a server having a bad day
+    /// must not be able to unenroll a fleet. The credential stays, and the caller is told to retry.
+    #[tokio::test]
+    async fn an_outage_during_rotation_leaves_the_credential_alone() {
+        let url = canned_responder(
+            "503 Service Unavailable",
+            r#"{"error":"temporarily_unavailable","error_description":"enrollment is temporarily unavailable"}"#,
+        );
+        let store = Arc::new(MemoryCredentialStore::new());
+        store.save(&credential()).await.unwrap();
+
+        let enroller = enroller_against(&url, store.clone());
+        let error = enroller.force_refresh(&credential()).await.expect_err("503 is a failure");
+
+        assert!(matches!(error, EnrollError::Transport(_)), "must be retriable, got {error}");
+        assert_eq!(
+            store.load().await.unwrap().as_ref(),
+            Some(&credential()),
+            "an outage must never unenroll a node"
+        );
+    }
+
+    /// `obtain` shares the classification, so the same outage on the proactive 80%-of-lifetime
+    /// refresh keeps the node running on the credential it already holds.
+    #[tokio::test]
+    async fn a_stored_credential_outlives_an_unreachable_refresh() {
+        let url = canned_responder("503 Service Unavailable", r#"{"error":"server_error"}"#);
+        let store = Arc::new(MemoryCredentialStore::new());
+        // Past the 80% mark, so `obtain` tries to refresh rather than handing it straight back.
+        let stale = StoredCredential::new(
+            "zna_access".into(),
+            "znr_refresh".into(),
+            "node-id".into(),
+            "hello node".into(),
+            "allen@example.com".into(),
+            now_unix() + 60,
+        );
+        store.save(&stale).await.unwrap();
+
+        let obtained = enroller_against(&url, store.clone()).obtain().await.expect("kept going");
+
+        assert_eq!(obtained, stale, "an unreachable server is not a reason to stop");
+        assert_eq!(store.load().await.unwrap().as_ref(), Some(&stale));
+    }
 
     /// A node is configured with one address; enrolling against a different deployment than it
     /// connects to is exactly the mistake this derivation exists to make impossible.
