@@ -1,36 +1,74 @@
 mod buffer;
+mod session;
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem};
-use tokio::sync::mpsc;
 use zyris::{Blob, ErrorCode, Streaming, WireError};
 
 use zyris_caps::{ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal};
 
 use crate::path::resolve_under;
+use session::{gone, Sessions, POLL_INTERVAL};
 
-struct PtySession {
-    pair: PtyPair,
-    writer: Box<dyn Write + Send>,
-}
+/// `open_stream` 구독자가 한 청크에 싣는 최대 바이트.
+const STREAM_CHUNK_MAX: usize = 64 * 1024;
 
 pub struct PtyTerminal {
     default_shell: String,
     root: PathBuf,
     next_id: AtomicU64,
-    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    sessions: Sessions,
 }
 
 impl PtyTerminal {
     pub fn rooted(root: impl Into<PathBuf>) -> Self {
         PtyTerminal { root: root.into(), ..PtyTerminal::default() }
     }
+
+    fn new_session(&self, shell: Option<String>, cols: u16, rows: u16) -> zyris::Result<String> {
+        let id = format!("pty-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        session::spawn(
+            &self.sessions,
+            id.clone(),
+            shell.unwrap_or_else(|| self.default_shell.clone()),
+            &self.root,
+            cols,
+            rows,
+        )?;
+        Ok(id)
+    }
+}
+
+/// 링버퍼를 자기 커서로 훑는 `open_stream` 구독자.
+///
+/// 세션의 `read_cursor`를 건드리지 않으므로, 스트림을 붙여 둔 채 `read`를 불러도
+/// 서로 바이트를 빼앗지 않는다.
+fn subscribe(
+    sessions: Sessions,
+    id: String,
+) -> impl futures_util::Stream<Item = zyris::Result<PtyChunk>> {
+    futures_util::stream::unfold((sessions, id, 0u64), |(sessions, id, mut cursor)| async move {
+        loop {
+            {
+                let guard = sessions.lock().unwrap();
+                let s = guard.get(&id)?;
+                let (bytes, _dropped) = s.buf.read_at(&mut cursor, STREAM_CHUNK_MAX);
+                if !bytes.is_empty() {
+                    let chunk = PtyChunk { data: Blob::from_bytes(Bytes::from(bytes)) };
+                    drop(guard);
+                    return Some((Ok(chunk), (sessions, id, cursor)));
+                }
+                if s.exited.is_some() {
+                    return None;
+                }
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
 }
 
 impl Default for PtyTerminal {
@@ -49,7 +87,7 @@ impl Default for PtyTerminal {
     }
 }
 
-fn pty_err(msg: impl std::fmt::Display) -> WireError {
+pub(crate) fn pty_err(msg: impl std::fmt::Display) -> WireError {
     WireError::new(ErrorCode::Internal, msg.to_string())
 }
 
@@ -61,46 +99,8 @@ impl Terminal for PtyTerminal {
         cols: u16,
         rows: u16,
     ) -> zyris::Result<Streaming<PtyOpened, PtyChunk>> {
-        let system = NativePtySystem::default();
-        let pair = system
-            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(pty_err)?;
-        let mut cmd = CommandBuilder::new(shell.unwrap_or_else(|| self.default_shell.clone()));
-        cmd.cwd(&self.root);
-        let mut child = pair.slave.spawn_command(cmd).map_err(pty_err)?;
-        let mut reader = pair.master.try_clone_reader().map_err(pty_err)?;
-        let writer = pair.master.take_writer().map_err(pty_err)?;
-
-        let id = format!("pty-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(id.clone(), PtySession { pair, writer });
-
-        let (tx, rx) = mpsc::channel::<zyris::Result<PtyChunk>>(64);
-        let sessions = self.sessions.clone();
-        let reader_id = id.clone();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let chunk = PtyChunk {
-                            data: Blob::from_bytes(Bytes::copy_from_slice(&buf[..n])),
-                        };
-                        if tx.blocking_send(Ok(chunk)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = child.wait();
-            sessions.lock().unwrap().remove(&reader_id);
-        });
-
-        let items = tokio_stream_from_receiver(rx);
+        let id = self.new_session(shell, cols, rows)?;
+        let items = subscribe(self.sessions.clone(), id.clone());
         Ok(Streaming::new(PtyOpened { pty: PtyId(id) }, items))
     }
 
@@ -112,23 +112,16 @@ impl Terminal for PtyTerminal {
             }
         };
         let mut sessions = self.sessions.lock().unwrap();
-        let session = sessions
-            .get_mut(&pty.0)
-            .ok_or_else(|| WireError::new(ErrorCode::Other("pty_gone".into()), "no such pty"))?;
-        session.writer.write_all(&bytes).map_err(pty_err)?;
-        session.writer.flush().map_err(pty_err)
+        let s = sessions.get_mut(&pty.0).ok_or_else(gone)?;
+        s.touch();
+        s.write_input(&bytes)
     }
 
     async fn resize(&self, pty: PtyId, cols: u16, rows: u16) -> zyris::Result<()> {
-        let sessions = self.sessions.lock().unwrap();
-        let session = sessions
-            .get(&pty.0)
-            .ok_or_else(|| WireError::new(ErrorCode::Other("pty_gone".into()), "no such pty"))?;
-        session
-            .pair
-            .master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(pty_err)
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.get_mut(&pty.0).ok_or_else(gone)?;
+        s.touch();
+        s.resize(cols, rows)
     }
 
     async fn close(&self, pty: PtyId) -> zyris::Result<()> {
@@ -179,12 +172,4 @@ impl Terminal for PtyTerminal {
             timed_out: false,
         })
     }
-}
-
-fn tokio_stream_from_receiver(
-    rx: mpsc::Receiver<zyris::Result<PtyChunk>>,
-) -> impl futures_util::Stream<Item = zyris::Result<PtyChunk>> {
-    futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    })
 }
