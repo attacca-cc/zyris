@@ -9,8 +9,9 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem}
 use tokio::sync::mpsc;
 use zyris::{Blob, ErrorCode, Streaming, WireError};
 
+use zyris_caps::{ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal};
+
 use crate::path::resolve_under;
-use crate::terminal::{ExecOutput, PtyChunk, PtyId, PtyOpened, Terminal};
 
 struct PtySession {
     pair: PtyPair,

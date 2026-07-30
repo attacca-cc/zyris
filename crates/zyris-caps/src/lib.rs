@@ -1,21 +1,18 @@
+//! The standard Zyris capability catalogue: declarations only.
+//!
+//! Each module holds one `#[zyris::capability]` trait and the types it speaks in. The macro turns
+//! each into a descriptor, a `…Server<T>` wrapper a node registers, and a `…Client` a peer calls
+//! through — so a client crate and a server crate agree on the wire by depending on this and
+//! nothing else.
+//!
+//! There is deliberately no implementation here, and no dependency that touches an operating
+//! system. The reference implementations live in `zyris-capkit`.
+
 pub mod browser;
 pub mod file_io;
 pub mod input;
 pub mod screen;
 pub mod terminal;
-
-#[cfg(any(feature = "file-io-impl", feature = "terminal-impl"))]
-mod path;
-
-#[cfg(feature = "file-io-impl")]
-mod file_io_impl;
-#[cfg(feature = "file-io-impl")]
-pub use file_io_impl::LocalFileIo;
-
-#[cfg(feature = "terminal-impl")]
-mod terminal_impl;
-#[cfg(feature = "terminal-impl")]
-pub use terminal_impl::PtyTerminal;
 
 pub use browser::{browser_chrome_capability, BrowserChrome, BrowserChromeClient, BrowserChromeServer};
 pub use file_io::{
@@ -23,7 +20,7 @@ pub use file_io::{
 };
 pub use input::{input_capability, Input, InputClient, InputServer, MouseButton};
 pub use screen::{
-    screen_capture_capability, Display, Region, ScreenCapture, ScreenCaptureClient,
+    screen_capture_capability, Display, ImageFormat, Region, ScreenCapture, ScreenCaptureClient,
     ScreenCaptureServer,
 };
 pub use terminal::{

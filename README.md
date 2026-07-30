@@ -18,7 +18,8 @@ sessions in return.
 | [`zyris`](crates/zyris) | The node runtime and client — connection state machine, transports, capability announce/accept, the dial/reconnect loop, and device-grant enrollment. Depend on this one. |
 | [`zyris-proto`](crates/zyris-proto) | Wire types only: envelopes, frames, the handshake, datums and blobs. No I/O, no async. Re-exported as `zyris::proto`. |
 | [`zyris-macros`](crates/zyris-macros) | The `#[zyris::capability]` proc-macro. Re-exported by `zyris`; not a direct dependency. |
-| [`zyris-caps`](crates/zyris-caps) | The standard capability catalogue — `terminal`, `file_io`, `input`, `screen_capture`, `browser_chrome` — with reference implementations of the first two. |
+| [`zyris-caps`](crates/zyris-caps) | The standard capability catalogue — `terminal`, `file_io`, `input`, `screen_capture`, `browser_chrome`. Declarations only: no tokio, no OS dependencies, cheap for a client to depend on. |
+| [`zyris-capkit`](crates/zyris-capkit) | Reference implementations of that catalogue: `LocalFileIo` and `PtyTerminal` by default, plus `XcapScreenCapture` and `EnigoInput` behind the `screen` and `input` features. |
 | [`zyris-attacca`](crates/zyris-attacca) | The `attacca_api` capability: the one surface that runs the other way, announced by the server rather than by a node. Depend on it to call Attacca back. |
 | [`zyris-hello`](crates/zyris-hello) | A complete node in two short files. The thing to copy. |
 

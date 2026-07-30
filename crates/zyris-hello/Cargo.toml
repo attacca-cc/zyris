@@ -23,3 +23,4 @@ tracing-subscriber.workspace = true
 zyris = { version = "0.1.0", path = "../zyris", features = ["enroll"] }
 zyris-attacca = { version = "0.1.0", path = "../zyris-attacca" }
 zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
+zyris-capkit = { version = "0.1.0", path = "../zyris-capkit" }

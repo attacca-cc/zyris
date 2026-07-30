@@ -1,6 +1,11 @@
 use std::path::{Component, Path, PathBuf};
 
-pub(crate) fn resolve_under(root: &Path, path: &str) -> PathBuf {
+/// Resolve a caller-supplied path against a node's root.
+///
+/// A relative path joins the root; a path with a leading `/` (or a Windows prefix) escapes it and
+/// addresses the host filesystem directly. `.` collapses and `..` pops, so the result never
+/// contains either — the root is a default, not a jail.
+pub fn resolve_under(root: &Path, path: &str) -> PathBuf {
     let requested = Path::new(path);
     let mut resolved = if requested.has_root() {
         PathBuf::new()

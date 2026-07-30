@@ -4,7 +4,8 @@ use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use zyris::{Blob, Chunk, Datum, ErrorCode, Streaming, WireError};
 
-use crate::file_io::{DirEntry, FileIo, FileStat};
+use zyris_caps::{DirEntry, FileIo, FileStat};
+
 use crate::path::resolve_under;
 
 const READ_CHUNK: usize = 128 * 1024;

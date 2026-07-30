@@ -259,8 +259,8 @@ Announcement is a normal request, available to **either peer** after `hello_ack`
   `capability_rejected`, reason `reserved`. Attacca reserves exactly `attacca_api`: it rejects that
   name from any node and announces it itself immediately after `hello_ack`, filtered to the tools
   the node's scopes permit, with every `attacca_api.*` call scope-checked. That capability is
-  declared in `crates/zyris-attacca` — the deployment's surface, not the wire's, which is why it is
-  its own crate and not part of `zyris-caps`.
+  declared in `crates/zyris-attacca` — the deployment's surface, not the wire's, and the one
+  capability a node only ever calls, which is why it is its own crate and not part of `zyris-caps`.
 - A node may announce two versions of the same capability simultaneously (two entries).
   Additive tool changes within a version are permitted; consumers discover tools by
   descriptor.

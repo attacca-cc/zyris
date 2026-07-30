@@ -7,8 +7,7 @@
 //! its own tools on.
 //!
 //! It sits in its own crate rather than in `zyris-caps` because `zyris-caps` is the catalogue of
-//! things a node implements, and because that crate's default features build a PTY. A node that
-//! only wants to call back into Attacca should not compile `portable-pty` to do it.
+//! things a node implements, and this is the one surface a node only ever calls.
 //!
 //! Tools are added within version 1 rather than by bumping it: additive tool changes inside a
 //! version are permitted, and consumers discover tools by descriptor. An older node keeps working

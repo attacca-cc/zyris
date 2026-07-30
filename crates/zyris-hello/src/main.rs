@@ -17,7 +17,8 @@ use greeter::{HelloServer, RandomGreeter};
 use zyris::runtime::Runner;
 use zyris::{Connection, ErrorCode, NodeKind};
 use zyris_attacca::{AttaccaApi, AttaccaApiClient};
-use zyris_caps::{PtyTerminal, TerminalServer};
+use zyris_caps::TerminalServer;
+use zyris_capkit::PtyTerminal;
 
 /// The server announces `attacca_api` immediately after the handshake; this is generous headroom.
 const CONSUME_WAIT: Duration = Duration::from_secs(5);
