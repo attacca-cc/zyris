@@ -9,6 +9,7 @@ use libwayshot::{output::OutputInfo, WayshotConnection};
 use zyris_caps::Display;
 
 use super::{internal, no_such_display};
+use crate::display::scale;
 
 /// Whether this session has a compositor that will hand over pixels.
 ///
@@ -33,8 +34,20 @@ fn covers_origin(output: &OutputInfo) -> bool {
         && y + region.size.height as i32 > 0
 }
 
+/// Physical pixels, not the compositor's logical ones: this is the space `screenshot_single_output`
+/// hands back and the space `input.move_to` moves in, and reporting the logical size here is what
+/// puts a cursor at `1/scale` of where it was aimed.
+///
+/// The origin is the exact conversion only while every output shares a scale — a mixed-scale
+/// wlroots layout has no single physical grid to place them on. `EnigoInput::move_to` refuses a
+/// multi-output Wayland layout for a related reason, so nothing depends on the inexact case.
 fn describe(output: &OutputInfo) -> Display {
     let region = output.logical_region.inner;
+    // `OutputInfo::scale` is private upstream; it is this ratio.
+    let factor = scale(match region.size.height {
+        0 => 1.0,
+        logical => output.physical_size.height as f32 / logical as f32,
+    });
     Display {
         id: output.name.clone(),
         name: if output.description.is_empty() {
@@ -42,15 +55,11 @@ fn describe(output: &OutputInfo) -> Display {
         } else {
             output.description.clone()
         },
-        x: region.position.x,
-        y: region.position.y,
-        width: region.size.width,
-        height: region.size.height,
-        // `OutputInfo::scale` is private upstream; it is this ratio.
-        scale_factor: match region.size.height {
-            0 => 1.0,
-            logical => output.physical_size.height as f32 / logical as f32,
-        },
+        x: (region.position.x as f32 * factor).round() as i32,
+        y: (region.position.y as f32 * factor).round() as i32,
+        width: output.physical_size.width,
+        height: output.physical_size.height,
+        scale_factor: factor,
         primary: covers_origin(output),
     }
 }

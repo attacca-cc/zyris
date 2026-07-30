@@ -15,16 +15,22 @@ pub struct Display {
     pub x: i32,
     #[serde(default)]
     pub y: i32,
+    /// Size in physical pixels: the pixels a `screenshot` of this display is made of, and the ones
+    /// `input.move_to` takes. `x` and `y` are in the same space.
     pub width: u32,
     pub height: u32,
     /// Physical pixels per logical pixel. `1.0` on a display that is not scaled.
+    ///
+    /// Reported for a caller that needs to talk about the display the way its desktop environment
+    /// does. It is not something to apply to the fields above — those are already physical.
     #[serde(default)]
     pub scale_factor: f32,
     #[serde(default)]
     pub primary: bool,
 }
 
-/// A region of a display, in display-local pixels.
+/// A region of a display, in display-local physical pixels — the same space as [`Display`] and as
+/// the coordinates `input.move_to` takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Region {
     pub x: i32,
@@ -64,7 +70,7 @@ pub trait ScreenCapture {
     /// Capture a still image of a display (optionally cropped to a region).
     ///
     /// `display` matches a [`Display::id`] first and a [`Display::name`] second; `None` picks the
-    /// primary display. `region` is in display-local pixels.
+    /// primary display. `region` is in display-local physical pixels.
     ///
     /// `format` and `max_width` exist because a full-resolution PNG of a 4K display is several
     /// megabytes, and a `Datum::Image` travels inline in the response — `zyris::proto::
@@ -76,9 +82,10 @@ pub trait ScreenCapture {
     /// so the image returned may be smaller than either the display or `max_width`. When it is,
     /// the returned `Datum::Image` describes what happened — its `description` names the display's
     /// real size and the factor to multiply image coordinates by. Read it before feeding a
-    /// position from a screenshot into `input.move_to`: that call takes the same `display` and
-    /// display-local coordinates, so the scale factor and the `region` origin are the whole
-    /// conversion — the display's own position on the desktop is `move_to`'s to add, not yours.
+    /// position from a screenshot into `input.move_to`: that call takes the same `display` and the
+    /// same display-local physical pixels, so the downscale factor and the `region` origin are the
+    /// whole conversion — the display's own position on the desktop is `move_to`'s to add, not
+    /// yours, and [`Display::scale_factor`] plays no part.
     async fn screenshot(
         &self,
         display: Option<String>,

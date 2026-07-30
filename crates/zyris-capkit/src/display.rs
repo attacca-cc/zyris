@@ -28,6 +28,21 @@ pub(crate) fn no_such_display(wanted: &str) -> WireError {
     WireError::invalid_params(format!("no display matches `{wanted}`"))
 }
 
+/// The scale factor to actually divide or multiply by.
+///
+/// A display with no scale is not a display scaled by zero, but that is what reaches us: `xcap`
+/// reduces over an empty output list in its Wayland branch and hands back `0.0`. Every conversion
+/// built on that either divides by zero or collapses the layout onto the origin, which is the same
+/// class of wrong position this guard exists to prevent.
+#[cfg(any(feature = "screen", target_os = "macos"))]
+pub(crate) fn scale(scale_factor: f32) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
 /// Id first, name second — the rule `screen_capture.screenshot` documents, applied to a layout
 /// that has already been enumerated rather than to live platform handles. The `screen` backends do
 /// their own matching against live `Monitor`/`OutputInfo` handles instead.

@@ -21,8 +21,10 @@ pub trait Input {
     ///
     /// `display` matches a [`Display::id`](crate::Display::id) first and a
     /// [`Display::name`](crate::Display::name) second, the same way `screen_capture.screenshot`
-    /// resolves it. `x` and `y` are display-local pixels, so a coordinate read off a screenshot of
-    /// that display goes in unchanged.
+    /// resolves it. `x` and `y` are display-local physical pixels — the same pixels
+    /// [`Display::width`](crate::Display::width) counts — so a coordinate read off a screenshot of
+    /// that display goes in unchanged, and [`Display::scale_factor`](crate::Display::scale_factor)
+    /// is not something to apply on the way.
     async fn move_to(&self, display: String, x: i32, y: i32) -> zyris::Result<()>;
 
     /// Click a mouse button at the current position.
