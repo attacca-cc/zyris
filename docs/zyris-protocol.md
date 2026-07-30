@@ -198,7 +198,7 @@ Transfer mechanisms, declared per tool in the capability descriptor:
 
 Chunk payload semantics are defined per tool. Typed uni-streams encode exactly one item
 per chunk in the connection's negotiated serialization (msgpack by default) — this is how
-`attacca_api.turn_events` frames and `file_io.read` byte chunks (a `bin`-encoded item)
+`attacca_api.turn_events` frames and `file_io.read_stream` byte chunks (a `bin`-encoded item)
 travel. MJPEG fallback chunks are `[u64 BE timestamp_µs][one complete JPEG]`.
 
 ### 4.1 Flow control
@@ -310,7 +310,7 @@ claims within two minutes is cancelled, because an unclaimed stream otherwise ho
 sender at the credit ceiling for the life of the connection.
 
 Implementation status: inline blobs, chunked uni-streams (which cover bulk file transfer
-via `file_io.read`/`write_at`), and attachments in responses. Attachments in *request
+via `file_io.read_stream`/`write_at`), and attachments in responses. Attachments in *request
 params* — a large datum travelling caller-ward, as `file_io.write` would want — are the
 same mechanism mirrored and are not implemented yet.
 

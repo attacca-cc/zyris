@@ -4,11 +4,22 @@ use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use zyris::{Blob, Chunk, Datum, ErrorCode, Streaming, WireError};
 
-use zyris_caps::{DirEntry, FileIo, FileStat};
+use zyris_caps::{DirEntry, FileIo, FileRead, FileStat};
 
 use crate::path::resolve_under;
 
 const READ_CHUNK: usize = 128 * 1024;
+
+/// How many bytes one unary [`FileIo::read`] returns before it truncates.
+///
+/// Bounded by what the far end of a deployment accepts, the same constraint that sizes
+/// [`INLINE_BLOB_MAX`](zyris::INLINE_BLOB_MAX): Attacca measures a tool result as
+/// `serde_json::to_vec(..).len()` against `ZYRIS_MAX_RESULT_BYTES` (1,000,000 by default). The
+/// content is JSON-escaped text, so the worst case is six bytes out per byte in (`` for a
+/// control character); 128 KiB survives even that, and ordinary source costs barely more than one
+/// byte per byte. Anything larger should page with `offset` or use
+/// [`FileIo::read_stream`](zyris_caps::FileIo::read_stream).
+const READ_UNARY_MAX: usize = 128 * 1024;
 
 pub struct LocalFileIo {
     root: PathBuf,
@@ -72,6 +83,45 @@ impl FileIo for LocalFileIo {
     }
 
     async fn read(
+        &self,
+        path: String,
+        offset: Option<u64>,
+        len: Option<u64>,
+    ) -> zyris::Result<FileRead> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let resolved = self.resolve(&path)?;
+        let stat = stat_path(path, &resolved).await?;
+        if stat.is_dir {
+            return Err(WireError::invalid_params("path is a directory"));
+        }
+        let offset = offset.unwrap_or(0);
+        // The caller's `len` still cannot exceed the response budget — it bounds the read, it does
+        // not raise the ceiling.
+        let want = len.map_or(READ_UNARY_MAX, |l| (l as usize).min(READ_UNARY_MAX));
+
+        let mut file = tokio::fs::File::open(&resolved).await.map_err(io_err)?;
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset)).await.map_err(io_err)?;
+        }
+        let mut buf = Vec::with_capacity(want.min(READ_CHUNK));
+        (&mut file).take(want as u64).read_to_end(&mut buf).await.map_err(io_err)?;
+
+        // Truncated means "there are more bytes after this slice", which is a fact about the file,
+        // not about `want` — a caller that asked for exactly the rest of the file is not truncated.
+        let end = offset.saturating_add(buf.len() as u64);
+        let truncated = end < stat.size;
+
+        Ok(FileRead {
+            len: buf.len() as u64,
+            content: String::from_utf8_lossy(&buf).into_owned(),
+            offset,
+            truncated,
+            stat,
+        })
+    }
+
+    async fn read_stream(
         &self,
         path: String,
         offset: Option<u64>,
