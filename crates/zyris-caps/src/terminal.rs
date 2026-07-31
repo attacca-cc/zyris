@@ -50,6 +50,11 @@ impl Default for Settle {
 pub struct PtyRead {
     /// Output since the last `read`, decoded as UTF-8 and cut on a character boundary. A
     /// multi-byte character split across a chunk boundary carries over to the next call.
+    ///
+    /// Terminal control sequences are stripped — only `\n` and `\t` survive. Escape codes are
+    /// not something a reader can act on, and a tool result carrying a raw `U+001B` is rejected
+    /// outright by at least one agent runtime. When the *effect* of those codes is what matters,
+    /// [`Terminal::screen`] renders it. `open_stream` still carries the bytes untouched.
     pub content: String,
     /// Bytes are still buffered. **Call again and you get them.**
     pub more: bool,
