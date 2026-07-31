@@ -1,4 +1,5 @@
 mod buffer;
+mod sanitize;
 mod session;
 
 use std::collections::HashMap;
@@ -14,6 +15,7 @@ use zyris_caps::{ExecOutput, PtyChunk, PtyId, PtyOpened, PtyRead, PtyScreen, Set
 
 use crate::path::resolve_under;
 use buffer::trim_incomplete_tail;
+use sanitize::{strip_controls, trim_incomplete_escape};
 use session::{gone, Sessions, POLL_INTERVAL};
 
 /// `open_stream` 구독자가 한 청크에 싣는 최대 바이트.
@@ -243,14 +245,18 @@ impl Terminal for PtyTerminal {
         let mut cursor = s.read_cursor;
         let (bytes, dropped) = s.buf.read_at(&mut cursor, PTY_READ_MAX);
 
-        // 잘린 멀티바이트 꼬리는 다음 호출로 넘긴다. 단 셸이 끝났고 이게 마지막
-        // 바이트라면 넘길 다음이 없으므로 그냥 태운다 — 아니면 `more`가 영영 선다.
+        // 잘린 꼬리는 다음 호출로 넘긴다 — 멀티바이트 문자든 이스케이프 시퀀스든.
+        // 단 셸이 끝났고 이게 마지막 바이트라면 넘길 다음이 없으므로 그냥 태운다.
         let at_end = s.exited.is_some() && cursor == s.buf.total_written();
-        let keep = if at_end { bytes.len() } else { trim_incomplete_tail(&bytes) };
+        let keep = if at_end {
+            bytes.len()
+        } else {
+            trim_incomplete_tail(&bytes).min(trim_incomplete_escape(&bytes))
+        };
         s.read_cursor = cursor - (bytes.len() - keep) as u64;
 
         Ok(PtyRead {
-            content: String::from_utf8_lossy(&bytes[..keep]).into_owned(),
+            content: strip_controls(&String::from_utf8_lossy(&bytes[..keep])),
             more: s.read_cursor < s.buf.total_written(),
             dropped,
             exited: s.exited,

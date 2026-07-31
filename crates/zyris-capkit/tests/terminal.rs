@@ -400,3 +400,38 @@ async fn a_touched_session_is_not_reaped() {
             .expect("만지고 있는 세션이 수거됐다");
     }
 }
+
+/// 진짜 셸의 출력에 ESC가 한 바이트도 남아선 안 된다.
+///
+/// 라이브 실측(2026-07-31)에서 Attacca의 안전 가드가 U+001B가 든 tool 출력을 통째로
+/// 거부했다 — `"tool output contains disallowed control character U+001B"`. 셸 프롬프트의
+/// bracketed-paste 시퀀스 하나로 걸리므로, 이게 새면 `read`는 실제 사용에서 거의 항상
+/// 차단된다. 단위 테스트는 합성 입력만 보므로 진짜 프롬프트로 한 번 더 못 박는다.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_real_shell_read_carries_no_escape_bytes() {
+    let term = connect(PtyTerminal::default()).await;
+    let opened = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
+    let pty = opened.pty;
+
+    // 프롬프트 + 색 + 커서 이동을 한꺼번에 낸다.
+    let out: PtyRead = term
+        .read(
+            pty,
+            Some("printf '\\033[31mRED\\033[0m\\033[2;3HAT\\n'\n".into()),
+            Some(Settle { quiet_ms: 200, timeout_ms: 5000 }),
+        )
+        .await
+        .unwrap();
+
+    assert!(!out.content.contains('\u{1b}'), "ESC가 남았다: {:?}", out.content);
+    assert!(out.content.contains("RED"), "본문이 사라졌다: {:?}", out.content);
+    for c in out.content.chars() {
+        assert!(
+            c >= ' ' || c == '\n' || c == '\t',
+            "제어 문자 {:?}가 남았다: {:?}",
+            c,
+            out.content
+        );
+    }
+}
