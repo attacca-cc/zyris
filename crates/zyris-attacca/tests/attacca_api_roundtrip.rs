@@ -8,11 +8,68 @@ use futures_util::StreamExt;
 use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
-    ZHistoryQuery, ZMe, ZNewAgent, ZNewSession, ZProject, ZScope, ZSession, ZSessionEvent,
-    ZSessionFilter, ZTurnFrame, ZTurnStatus, ZUsage, ATTACCA_API_CAPABILITY,
+    ZHistoryQuery, ZJob, ZJobFilter, ZJobState, ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewProject,
+    ZNewSession, ZNewWork, ZProject, ZProjectUpdate, ZScope, ZSession, ZSessionEvent,
+    ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame, ZTurnStatus, ZUsage, ZWork,
+    ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate, ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
+
+fn stub_job(id: &str, state: ZJobState) -> ZJob {
+    ZJob {
+        id: id.into(),
+        title: "Summarize the changelog".into(),
+        description: None,
+        state,
+        project_id: Some("project-1".into()),
+        agent_id: Some("agent-1".into()),
+        session_id: Some("session-1".into()),
+        last_activity: Some("reading CHANGELOG.md".into()),
+        failure_reason: None,
+        planning: false,
+        created_at: Some("2026-07-29T00:00:00Z".into()),
+        updated_at: Some("2026-07-29T00:00:01Z".into()),
+    }
+}
+
+fn stub_work(id: &str, state: ZWorkState) -> ZWork {
+    ZWork {
+        id: id.into(),
+        title: "Port the parser".into(),
+        description: None,
+        state,
+        project_id: Some("project-1".into()),
+        agent_id: Some("agent-1".into()),
+        planner_session_id: Some("session-9".into()),
+        final_goal: Some("every fixture round-trips".into()),
+        requirements_report: None,
+        integration_branch: Some("work/work-1/integration".into()),
+        failure_reason: None,
+        last_activity: None,
+        created_at: Some("2026-07-29T00:00:00Z".into()),
+        updated_at: Some("2026-07-29T00:00:01Z".into()),
+    }
+}
+
+fn stub_task(id: &str, work_id: &str, state: ZTaskState) -> ZTask {
+    ZTask {
+        id: id.into(),
+        work_id: work_id.into(),
+        title: "Move the lexer".into(),
+        description: "Lift it out of the old crate".into(),
+        state,
+        phase_id: None,
+        main_session_id: Some("session-10".into()),
+        branch: Some(format!("work/{work_id}/task/{id}")),
+        micro_measurables: serde_json::json!([{ "text": "tests pass", "met": false }]),
+        verification_result: None,
+        failure_reason: None,
+        last_activity: None,
+        created_at: Some("2026-07-29T00:00:00Z".into()),
+        updated_at: Some("2026-07-29T00:00:01Z".into()),
+    }
+}
 
 #[zyris::async_trait]
 impl AttaccaApi for StubApi {
@@ -48,6 +105,43 @@ impl AttaccaApi for StubApi {
                 is_default: false,
             },
         ])
+    }
+
+    async fn get_project(&self, project_id: String) -> zyris::Result<ZProject> {
+        Ok(ZProject {
+            id: project_id,
+            name: "Rollout".into(),
+            description: Some("Q3".into()),
+            is_default: false,
+        })
+    }
+
+    async fn create_project(&self, project: ZNewProject) -> zyris::Result<ZProject> {
+        Ok(ZProject {
+            id: "project-3".into(),
+            name: project.name,
+            description: project.description,
+            is_default: false,
+        })
+    }
+
+    /// Echoes the three-valued description back as it arrived, which is the only way the test can
+    /// tell "clear it" apart from "leave it alone".
+    async fn update_project(
+        &self,
+        project_id: String,
+        update: ZProjectUpdate,
+    ) -> zyris::Result<ZProject> {
+        Ok(ZProject {
+            id: project_id,
+            name: update.name.unwrap_or_else(|| "Rollout".into()),
+            description: update.description.unwrap_or(Some("Q3".into())),
+            is_default: false,
+        })
+    }
+
+    async fn delete_project(&self, _project_id: String) -> zyris::Result<()> {
+        Ok(())
     }
 
     async fn list_agents(&self) -> zyris::Result<Vec<ZAgent>> {
@@ -155,6 +249,122 @@ impl AttaccaApi for StubApi {
         Ok(())
     }
 
+    async fn list_jobs(&self, filter: ZJobFilter) -> zyris::Result<Vec<ZJob>> {
+        let mut out = vec![stub_job("job-1", ZJobState::Processing), stub_job("job-2", ZJobState::Done)];
+        if let Some(project_id) = filter.project_id {
+            out.retain(|job| job.project_id.as_deref() == Some(project_id.as_str()));
+        }
+        if let Some(limit) = filter.limit {
+            out.truncate(limit as usize);
+        }
+        Ok(out)
+    }
+
+    async fn get_job(&self, job_id: String) -> zyris::Result<ZJob> {
+        Ok(stub_job(&job_id, ZJobState::Processing))
+    }
+
+    async fn create_job(&self, job: ZNewJob) -> zyris::Result<ZJob> {
+        let mut created = stub_job("job-3", ZJobState::Processing);
+        created.description = Some(job.message);
+        created.project_id = job.project_id;
+        created.planning = job.planning;
+        Ok(created)
+    }
+
+    async fn update_job(&self, job_id: String, update: ZJobUpdate) -> zyris::Result<ZJob> {
+        let mut job = stub_job(&job_id, ZJobState::Processing);
+        if let Some(title) = update.title {
+            job.title = title;
+        }
+        job.description = update.description.or(job.description);
+        job.project_id = update.project_id.or(job.project_id);
+        Ok(job)
+    }
+
+    async fn delete_job(&self, _job_id: String) -> zyris::Result<()> {
+        Ok(())
+    }
+
+    async fn list_works(&self, filter: ZWorkFilter) -> zyris::Result<Vec<ZWork>> {
+        let mut out = vec![
+            stub_work("work-1", ZWorkState::AwaitingGoalApproval),
+            stub_work("work-2", ZWorkState::Executing),
+        ];
+        if let Some(project_id) = filter.project_id {
+            out.retain(|work| work.project_id.as_deref() == Some(project_id.as_str()));
+        }
+        if let Some(limit) = filter.limit {
+            out.truncate(limit as usize);
+        }
+        Ok(out)
+    }
+
+    async fn get_work(&self, work_id: String) -> zyris::Result<ZWork> {
+        Ok(stub_work(&work_id, ZWorkState::Executing))
+    }
+
+    /// Comes back at gate 1, which is where a real deployment leaves it — a node that treats
+    /// creation as "it is running now" is the mistake this stub is shaped to expose.
+    async fn create_work(&self, work: ZNewWork) -> zyris::Result<ZWork> {
+        let mut created = stub_work("work-3", ZWorkState::AwaitingGoalApproval);
+        created.description = Some(work.message);
+        created.project_id = work.project_id;
+        Ok(created)
+    }
+
+    async fn update_work(&self, work_id: String, update: ZWorkUpdate) -> zyris::Result<ZWork> {
+        let mut work = stub_work(&work_id, ZWorkState::Executing);
+        if let Some(title) = update.title {
+            work.title = title;
+        }
+        work.description = update.description.or(work.description);
+        work.project_id = update.project_id.or(work.project_id);
+        Ok(work)
+    }
+
+    async fn delete_work(&self, _work_id: String) -> zyris::Result<()> {
+        Ok(())
+    }
+
+    async fn approve_work_goal(&self, work_id: String) -> zyris::Result<ZWork> {
+        Ok(stub_work(&work_id, ZWorkState::Planning))
+    }
+
+    async fn approve_work_plan(&self, work_id: String) -> zyris::Result<ZWork> {
+        Ok(stub_work(&work_id, ZWorkState::Executing))
+    }
+
+    async fn work_tasks(&self, work_id: String) -> zyris::Result<ZWorkTasks> {
+        Ok(ZWorkTasks {
+            tasks: vec![
+                stub_task("task-1", &work_id, ZTaskState::Done),
+                stub_task("task-2", &work_id, ZTaskState::Creating),
+            ],
+            deps: vec![ZTaskDep {
+                upstream_task_id: "task-1".into(),
+                downstream_task_id: "task-2".into(),
+            }],
+        })
+    }
+
+    async fn stop_work(&self, _work_id: String) -> zyris::Result<()> {
+        Ok(())
+    }
+
+    async fn continue_work(&self, work_id: String) -> zyris::Result<ZWork> {
+        Ok(stub_work(&work_id, ZWorkState::Executing))
+    }
+
+    async fn work_message(
+        &self,
+        _work_id: String,
+        _message: String,
+        _data: Vec<Datum>,
+    ) -> zyris::Result<()> {
+        Ok(())
+    }
+
     async fn turn_events(
         &self,
         session_id: String,
@@ -199,7 +409,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 12);
+    assert_eq!(descriptor.tools.len(), 32);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
@@ -211,6 +421,20 @@ fn descriptor_matches_the_reserved_name() {
     assert_eq!(descriptor.tool("create_session_with").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("session_history").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("session_usage").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("create_project").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("create_job").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("create_work").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("approve_work_plan").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("work_tasks").unwrap().transfer, Transfer::Unary);
+
+    // `turn_events` stays the only stream: everything added since answers once.
+    let streams: Vec<&str> = descriptor
+        .tools
+        .iter()
+        .filter(|tool| tool.transfer == Transfer::UniStream)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(streams, ["turn_events"]);
 }
 
 /// The steer toward an unset `title` — leave it off and Attacca's title agent names the session
@@ -406,4 +630,173 @@ async fn turn_events_streams_head_then_frames() {
     assert!(matches!(frames[0], ZTurnFrame::Event { cursor: 7, .. }));
     assert!(matches!(frames[1], ZTurnFrame::Delta { kind: ZDeltaKind::Assistant, .. }));
     assert!(matches!(frames[2], ZTurnFrame::Status { running: false }));
+}
+
+#[tokio::test]
+async fn project_crud_round_trips() {
+    let api = client().await;
+
+    let created = api
+        .create_project(ZNewProject { name: "Rollout".into(), description: Some("Q3".into()) })
+        .await
+        .unwrap();
+    assert_eq!((created.name.as_str(), created.description.as_deref()), ("Rollout", Some("Q3")));
+    assert!(!created.is_default);
+
+    assert_eq!(api.get_project("project-2".into()).await.unwrap().id, "project-2");
+
+    let renamed = api
+        .update_project(
+            "project-2".into(),
+            ZProjectUpdate { name: Some("Rollout 2".into()), ..ZProjectUpdate::default() },
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "Rollout 2");
+
+    api.delete_project("project-2".into()).await.unwrap();
+}
+
+/// The one thing a single `Option` could not express. An omitted `description` has to leave the
+/// project's alone while an explicit `null` clears it, and the two are indistinguishable by the time
+/// they reach the deployment unless the double wrapping survives the wire — which is what this
+/// checks, since the stub echoes whatever it was handed.
+#[tokio::test]
+async fn clearing_a_description_is_distinct_from_leaving_it_alone() {
+    let api = client().await;
+
+    let untouched =
+        api.update_project("project-2".into(), ZProjectUpdate::default()).await.unwrap();
+    assert_eq!(untouched.description.as_deref(), Some("Q3"));
+
+    let cleared = api
+        .update_project(
+            "project-2".into(),
+            ZProjectUpdate { description: Some(None), ..ZProjectUpdate::default() },
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.description, None);
+
+    // And the same distinction on the way in, since that is where serde has to be told about it.
+    let omitted: ZProjectUpdate = serde_json::from_str("{}").unwrap();
+    assert_eq!(omitted.description, None);
+    let explicit_null: ZProjectUpdate = serde_json::from_str(r#"{"description":null}"#).unwrap();
+    assert_eq!(explicit_null.description, Some(None));
+}
+
+#[tokio::test]
+async fn job_crud_round_trips() {
+    let api = client().await;
+
+    let created = api
+        .create_job(ZNewJob {
+            message: "Summarize the changelog".into(),
+            agent_id: None,
+            project_id: Some("project-1".into()),
+            timezone: Some("Europe/Berlin".into()),
+            planning: false,
+            plan_mode: false,
+            data: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.description.as_deref(), Some("Summarize the changelog"));
+    assert_eq!(created.state, ZJobState::Processing);
+    // The session the node then streams with the tools it already had.
+    assert_eq!(created.session_id.as_deref(), Some("session-1"));
+
+    assert_eq!(api.get_job("job-1".into()).await.unwrap().id, "job-1");
+
+    let all = api.list_jobs(ZJobFilter::default()).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let capped = api.list_jobs(ZJobFilter { limit: Some(1), ..ZJobFilter::default() }).await.unwrap();
+    assert_eq!(capped.len(), 1);
+
+    let renamed = api
+        .update_job("job-1".into(), ZJobUpdate { title: Some("Renamed".into()), ..ZJobUpdate::default() })
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Renamed");
+
+    api.delete_job("job-1".into()).await.unwrap();
+}
+
+/// A created work is not a running work: it stops at gate 1 and stays there. The two approvals are
+/// the whole reason works have tools of their own rather than being jobs with extra fields.
+#[tokio::test]
+async fn a_work_is_created_then_let_through_both_gates() {
+    let api = client().await;
+
+    let created = api
+        .create_work(ZNewWork {
+            message: "Port the parser\nand keep the fixtures green".into(),
+            agent_id: None,
+            project_id: Some("project-1".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.state, ZWorkState::AwaitingGoalApproval);
+    // What gate 1 is actually deciding on, and the session to argue with it over.
+    assert_eq!(created.final_goal.as_deref(), Some("every fixture round-trips"));
+    assert_eq!(created.planner_session_id.as_deref(), Some("session-9"));
+
+    api.work_message(created.id.clone(), "narrow it to the lexer".into(), Vec::new()).await.unwrap();
+
+    let planning = api.approve_work_goal(created.id.clone()).await.unwrap();
+    assert_eq!(planning.state, ZWorkState::Planning);
+
+    let executing = api.approve_work_plan(created.id.clone()).await.unwrap();
+    assert_eq!(executing.state, ZWorkState::Executing);
+}
+
+#[tokio::test]
+async fn work_tasks_come_back_as_a_graph() {
+    let api = client().await;
+
+    let graph = api.work_tasks("work-1".into()).await.unwrap();
+    assert_eq!(graph.tasks.len(), 2);
+    assert_eq!(graph.tasks[0].state, ZTaskState::Done);
+    assert_eq!(graph.tasks[1].state, ZTaskState::Creating);
+    // The planner's own shape, passed through rather than typed by the protocol.
+    assert_eq!(graph.tasks[0].micro_measurables[0]["text"], "tests pass");
+    assert_eq!(graph.deps.len(), 1);
+    assert_eq!(graph.deps[0].upstream_task_id, "task-1");
+    assert_eq!(graph.deps[0].downstream_task_id, "task-2");
+
+    // An unplanned work has a graph, it is just empty — not an error and not an absent field.
+    assert_eq!(serde_json::from_str::<ZWorkTasks>("{}").unwrap(), ZWorkTasks::default());
+}
+
+#[tokio::test]
+async fn work_read_and_lifecycle_tools_round_trip() {
+    let api = client().await;
+
+    assert_eq!(api.list_works(ZWorkFilter::default()).await.unwrap().len(), 2);
+    let capped =
+        api.list_works(ZWorkFilter { limit: Some(1), ..ZWorkFilter::default() }).await.unwrap();
+    assert_eq!(capped.len(), 1);
+
+    assert_eq!(api.get_work("work-1".into()).await.unwrap().id, "work-1");
+
+    let renamed = api
+        .update_work("work-1".into(), ZWorkUpdate { title: Some("Renamed".into()), ..ZWorkUpdate::default() })
+        .await
+        .unwrap();
+    assert_eq!(renamed.title, "Renamed");
+
+    api.stop_work("work-1".into()).await.unwrap();
+    assert_eq!(api.continue_work("work-1".into()).await.unwrap().state, ZWorkState::Executing);
+    api.delete_work("work-1".into()).await.unwrap();
+}
+
+/// The two scopes added alongside the work tools. `ZScope::ALL` is what a node asks for when it
+/// wants everything, so a scope missing from it is a scope no node ever requests.
+#[tokio::test]
+async fn works_scopes_are_spelled_the_way_the_wire_spells_them() {
+    assert_eq!(ZScope::WorksRead.as_str(), "works:read");
+    assert_eq!(ZScope::WorksWrite.as_str(), "works:write");
+    assert_eq!(ZScope::from_str("works:write"), Some(ZScope::WorksWrite));
+    assert!(ZScope::ALL.contains(&ZScope::WorksRead));
+    assert!(ZScope::ALL.contains(&ZScope::WorksWrite));
 }
