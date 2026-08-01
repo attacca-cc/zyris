@@ -48,6 +48,10 @@ pub enum ZScope {
     SessionsRead,
     #[serde(rename = "sessions:write")]
     SessionsWrite,
+    #[serde(rename = "files:read")]
+    FilesRead,
+    #[serde(rename = "files:write")]
+    FilesWrite,
     #[serde(rename = "jobs:read")]
     JobsRead,
     #[serde(rename = "jobs:write")]
@@ -77,13 +81,15 @@ pub enum ZScope {
 impl ZScope {
     /// Every scope, in the order Attacca lists them. Useful for a node that wants to ask for
     /// everything and let the approving user cut it down.
-    pub const ALL: [ZScope; 15] = [
+    pub const ALL: [ZScope; 17] = [
         ZScope::AgentsRead,
         ZScope::AgentsWrite,
         ZScope::ProjectsRead,
         ZScope::ProjectsWrite,
         ZScope::SessionsRead,
         ZScope::SessionsWrite,
+        ZScope::FilesRead,
+        ZScope::FilesWrite,
         ZScope::JobsRead,
         ZScope::JobsWrite,
         ZScope::WorksRead,
@@ -104,6 +110,8 @@ impl ZScope {
             ZScope::ProjectsWrite => "projects:write",
             ZScope::SessionsRead => "sessions:read",
             ZScope::SessionsWrite => "sessions:write",
+            ZScope::FilesRead => "files:read",
+            ZScope::FilesWrite => "files:write",
             ZScope::JobsRead => "jobs:read",
             ZScope::JobsWrite => "jobs:write",
             ZScope::WorksRead => "works:read",
