@@ -52,6 +52,13 @@ pub enum ZScope {
     JobsRead,
     #[serde(rename = "jobs:write")]
     JobsWrite,
+    /// Works are scoped apart from jobs rather than folded in with them: a work owns a git
+    /// integration branch and a graph of task worktrees, so granting a node the run of them is a
+    /// materially larger thing to hand over than letting it queue a job.
+    #[serde(rename = "works:read")]
+    WorksRead,
+    #[serde(rename = "works:write")]
+    WorksWrite,
     #[serde(rename = "artifacts:read")]
     ArtifactsRead,
     #[serde(rename = "artifacts:write")]
@@ -70,7 +77,7 @@ pub enum ZScope {
 impl ZScope {
     /// Every scope, in the order Attacca lists them. Useful for a node that wants to ask for
     /// everything and let the approving user cut it down.
-    pub const ALL: [ZScope; 13] = [
+    pub const ALL: [ZScope; 15] = [
         ZScope::AgentsRead,
         ZScope::AgentsWrite,
         ZScope::ProjectsRead,
@@ -79,6 +86,8 @@ impl ZScope {
         ZScope::SessionsWrite,
         ZScope::JobsRead,
         ZScope::JobsWrite,
+        ZScope::WorksRead,
+        ZScope::WorksWrite,
         ZScope::ArtifactsRead,
         ZScope::ArtifactsWrite,
         ZScope::KanbanRead,
@@ -97,6 +106,8 @@ impl ZScope {
             ZScope::SessionsWrite => "sessions:write",
             ZScope::JobsRead => "jobs:read",
             ZScope::JobsWrite => "jobs:write",
+            ZScope::WorksRead => "works:read",
+            ZScope::WorksWrite => "works:write",
             ZScope::ArtifactsRead => "artifacts:read",
             ZScope::ArtifactsWrite => "artifacts:write",
             ZScope::KanbanRead => "kanban:read",
@@ -164,6 +175,37 @@ pub struct ZProject {
     /// and exactly one project per account has this set.
     #[serde(default)]
     pub is_default: bool,
+}
+
+/// What [`AttaccaApi::create_project`] takes. A project is a folder, not a workspace: nothing runs
+/// in it, so there is nothing to configure beyond its name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewProject {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A partial project edit: an omitted field is left alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZProjectUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Three-valued, which is why it is doubly wrapped: omitted leaves the description as it is, an
+    /// explicit `null` clears it, and a string replaces it. A single `Option` would collapse the
+    /// first two together and leave a node no way to remove a description it once set.
+    #[serde(default, deserialize_with = "deserialize_some", skip_serializing_if = "Option::is_none")]
+    pub description: Option<Option<String>>,
+}
+
+/// Forces an explicit JSON `null` to deserialize as `Some(None)` rather than collapsing into the
+/// same `None` a missing key produces.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -276,6 +318,278 @@ pub struct ZSessionFilter {
     pub limit: Option<u32>,
 }
 
+/// Where a job is in its life. Derived by Attacca from the job's session rather than set by the
+/// caller, so this is a thing to read and not a thing to write — [`ZJobUpdate`] has no state field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ZJobState {
+    Backlog,
+    Processing,
+    Done,
+    /// The agent asked a question and is waiting on an answer — send one with `send_message` to the
+    /// job's `session_id`.
+    Ambiguous,
+    Failed,
+    Recurring,
+    /// A plan-mode job that has produced a plan and is waiting for it to be approved.
+    AwaitingPlan,
+}
+
+/// One item of autonomous work: a message handed to an agent that runs it to completion on its own
+/// session, reporting long results as artifacts. The unit a node reaches for when it wants something
+/// done rather than a conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZJob {
+    pub id: String,
+    /// Titled in the background from the opening message, so a job read back immediately still
+    /// carries Attacca's placeholder.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub state: ZJobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The session driving the job. Pass it to `send_message` to answer a question, or to
+    /// `turn_events` to watch the work happen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// A one-line "what the agent is doing right now", so a node can show progress without opening
+    /// the event stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
+    /// Why the job ended, set only in [`ZJobState::Failed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// A planning job: it drafts a plan and turns it into a [`ZWork`] rather than doing the work
+    /// itself.
+    #[serde(default)]
+    pub planning: bool,
+    /// RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// What [`AttaccaApi::create_job`] takes. Creating a job starts it: the first turn is enqueued
+/// before this call returns, so the job comes back already `Processing`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewJob {
+    /// What the agent is being asked to do. Also what the job is titled from.
+    pub message: String,
+    /// Omit to run the job on the account's Main Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Omit to file the job under the account's default project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// IANA name, e.g. `Europe/Berlin`. What the agent answers "what time is it" with; omitting it
+    /// leaves the deployment's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Draft a plan and turn it into a [`ZWork`] instead of doing the work here.
+    #[serde(default)]
+    pub planning: bool,
+    /// Investigate, hand back a plan, and wait for approval before executing — all within this one
+    /// job. Distinct from `planning`, which hands off to a work.
+    #[serde(default)]
+    pub plan_mode: bool,
+    /// Attachments for the opening message, the same way `send_message` takes them. Text datums are
+    /// folded into `message`; files land in the account's workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data: Vec<Datum>,
+}
+
+/// A partial job edit: an omitted field is left alone. State is derived and cannot be set here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZJobUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZJobFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Where a work is in its life. Like [`ZJobState`], derived rather than set — but two of these are
+/// gates rather than progress: [`ZWorkState::AwaitingGoalApproval`] and
+/// [`ZWorkState::AwaitingPlanApproval`] are where the loop stops and waits to be let through, with
+/// `approve_work_goal` and `approve_work_plan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ZWorkState {
+    Draft,
+    CheckingRequirements,
+    /// Gate 1: the goal is drafted and needs approving before planning starts.
+    AwaitingGoalApproval,
+    Planning,
+    /// Gate 2: the task graph is drafted and needs approving before anything executes.
+    AwaitingPlanApproval,
+    Executing,
+    /// A phase finished that was set to stop for review. `continue_work` resumes.
+    Halted,
+    Verifying,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// A larger unit than a job: a goal that is planned into a graph of tasks, each executed in its own
+/// git worktree and merged into a shared integration branch. A work pauses twice for approval, which
+/// is why creating one is not enough to make it run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZWork {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub state: ZWorkState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The planning conversation. This is an ordinary session id: `send_message` to argue with the
+    /// plan, `turn_events` to watch it being drawn up, `work_message` to do the former without
+    /// having to read this field first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_session_id: Option<String>,
+    /// The measurable success criterion, settled at gate 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_goal: Option<String>,
+    /// Blockers found up front — a missing toolchain, a login the agent cannot perform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements_report: Option<String>,
+    /// The git branch the task worktrees merge into. Set once execution starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
+    /// RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// What [`AttaccaApi::create_work`] takes. Creating a work starts its planning turns; it then stops
+/// at `awaiting_goal_approval` and stays there until `approve_work_goal` is called.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewWork {
+    /// The goal, in prose. The work's title is derived from its first line.
+    pub message: String,
+    /// Omit to plan the work with the account's Main Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Omit to file the work under the account's default project. A work's tasks run against the
+    /// project's checkout, so this decides what the work is allowed to change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// A partial work edit: an omitted field is left alone. State is derived and cannot be set here —
+/// use the approval and stop/continue tools to move a work along.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZWorkUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZWorkFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Where one task in a work's graph has got to. `creating`/`verifying`/`recording` name the agent
+/// role currently holding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ZTaskState {
+    Pending,
+    /// An upstream task failed, so this one cannot start.
+    Blocked,
+    /// The agent asked a question and is waiting on an answer in the task's own session.
+    AwaitingInput,
+    Creating,
+    SelfVerifying,
+    Verifying,
+    Recording,
+    Merging,
+    Done,
+    Failed,
+    /// The merge into the integration branch hit a conflict.
+    Conflicted,
+}
+
+/// One node of a work's task graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZTask {
+    pub id: String,
+    pub work_id: String,
+    pub title: String,
+    pub description: String,
+    pub state: ZTaskState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
+    /// The session doing the work. An ordinary session id, so `turn_events` follows one task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_session_id: Option<String>,
+    /// The task's own git branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// `[{ "text": String, "met": bool }]` — the checks the task has to satisfy. Passed through as
+    /// JSON rather than typed, because it is the planner's shape and not the protocol's.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub micro_measurables: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
+    /// RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// An edge: `downstream_task_id` may not start until `upstream_task_id` is done. Two tasks with no
+/// edge between them run in parallel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZTaskDep {
+    pub upstream_task_id: String,
+    pub downstream_task_id: String,
+}
+
+/// A work's plan, as a graph: [`AttaccaApi::work_tasks`]'s answer. Empty until the work has been
+/// through `planning`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZWorkTasks {
+    #[serde(default)]
+    pub tasks: Vec<ZTask>,
+    #[serde(default)]
+    pub deps: Vec<ZTaskDep>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ZTurnStatus {
     pub session_id: String,
@@ -326,6 +640,23 @@ pub trait AttaccaApi {
     /// created on demand, so this never comes back empty.
     async fn list_projects(&self) -> zyris::Result<Vec<ZProject>>;
 
+    /// Read one project.
+    async fn get_project(&self, project_id: String) -> zyris::Result<ZProject>;
+
+    /// Create a project.
+    async fn create_project(&self, project: ZNewProject) -> zyris::Result<ZProject>;
+
+    /// Edit a project's name or description. Omitted fields are left alone.
+    async fn update_project(
+        &self,
+        project_id: String,
+        update: ZProjectUpdate,
+    ) -> zyris::Result<ZProject>;
+
+    /// Delete a project. Refused while it still holds sessions, boards or jobs, and refused outright
+    /// for the account's default project — move or delete the contents first.
+    async fn delete_project(&self, project_id: String) -> zyris::Result<()>;
+
     /// List the caller's sessions.
     async fn list_sessions(&self, filter: ZSessionFilter) -> zyris::Result<Vec<ZSession>>;
 
@@ -374,6 +705,68 @@ pub trait AttaccaApi {
 
     /// Stop the running turn on a session.
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()>;
+
+    /// List the caller's jobs, newest first.
+    async fn list_jobs(&self, filter: ZJobFilter) -> zyris::Result<Vec<ZJob>>;
+
+    /// Read one job.
+    async fn get_job(&self, job_id: String) -> zyris::Result<ZJob>;
+
+    /// Queue a job and start it. The returned job is already running; watch it with `turn_events` on
+    /// its `session_id`, or poll `get_job` for its state.
+    async fn create_job(&self, job: ZNewJob) -> zyris::Result<ZJob>;
+
+    /// Edit a job's title, description or project. Omitted fields are left alone.
+    async fn update_job(&self, job_id: String, update: ZJobUpdate) -> zyris::Result<ZJob>;
+
+    /// Delete a job.
+    async fn delete_job(&self, job_id: String) -> zyris::Result<()>;
+
+    /// List the caller's works, newest first.
+    async fn list_works(&self, filter: ZWorkFilter) -> zyris::Result<Vec<ZWork>>;
+
+    /// Read one work.
+    async fn get_work(&self, work_id: String) -> zyris::Result<ZWork>;
+
+    /// Create a work and start planning it. It will settle at `awaiting_goal_approval` and go no
+    /// further on its own — a node that creates a work and walks away has created something that
+    /// never runs. See `approve_work_goal`.
+    async fn create_work(&self, work: ZNewWork) -> zyris::Result<ZWork>;
+
+    /// Edit a work's title, description or project. Omitted fields are left alone.
+    async fn update_work(&self, work_id: String, update: ZWorkUpdate) -> zyris::Result<ZWork>;
+
+    /// Delete a work.
+    async fn delete_work(&self, work_id: String) -> zyris::Result<()>;
+
+    /// Let a work through gate 1: accept the goal it drafted and start planning the task graph.
+    /// Read `final_goal` and `requirements_report` off the work first — that is what is being
+    /// approved, and `work_message` is how to ask for changes instead.
+    async fn approve_work_goal(&self, work_id: String) -> zyris::Result<ZWork>;
+
+    /// Let a work through gate 2: accept the task graph and begin executing it. Read it first with
+    /// `work_tasks`.
+    async fn approve_work_plan(&self, work_id: String) -> zyris::Result<ZWork>;
+
+    /// A work's task graph. Empty before planning has run.
+    async fn work_tasks(&self, work_id: String) -> zyris::Result<ZWorkTasks>;
+
+    /// Stop a running work, and every task under it.
+    async fn stop_work(&self, work_id: String) -> zyris::Result<()>;
+
+    /// Resume a stopped, halted or failed work from where it left off: the tasks that already
+    /// finished are kept, the rest are re-run.
+    async fn continue_work(&self, work_id: String) -> zyris::Result<ZWork>;
+
+    /// Say something to a work's planner — to steer the goal at gate 1 or the plan at gate 2.
+    /// Exactly `send_message` against the work's `planner_session_id`, spelled so a node does not
+    /// have to read the work first, and streamed back the same way.
+    async fn work_message(
+        &self,
+        work_id: String,
+        message: String,
+        data: Vec<Datum>,
+    ) -> zyris::Result<()>;
 
     /// Live turn feed with cursor resume: the head carries the current running flag and
     /// last cursor; items mirror LiveFrame (durable events with cursor, deltas, status).
