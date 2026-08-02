@@ -76,12 +76,17 @@ pub enum ZScope {
     /// stream, because a caller cannot tell "nothing happened" from "you weren't allowed to see it".
     #[serde(rename = "events:read")]
     EventsRead,
+    /// Register and destroy the account's *temporary* zyris nodes — the session-scoped nodes a
+    /// program like zyris-code creates per coding agent. Ephemeral only: the server clamps their
+    /// lifetime and idle TTL and sweeps them, so this scope cannot mint a permanent node.
+    #[serde(rename = "nodes:write")]
+    NodesWrite,
 }
 
 impl ZScope {
     /// Every scope, in the order Attacca lists them. Useful for a node that wants to ask for
     /// everything and let the approving user cut it down.
-    pub const ALL: [ZScope; 17] = [
+    pub const ALL: [ZScope; 18] = [
         ZScope::AgentsRead,
         ZScope::AgentsWrite,
         ZScope::ProjectsRead,
@@ -99,6 +104,7 @@ impl ZScope {
         ZScope::KanbanRead,
         ZScope::KanbanWrite,
         ZScope::EventsRead,
+        ZScope::NodesWrite,
     ];
 
     /// The wire spelling, which is also what `request_scopes` and `$ZYRIS_SCOPES` take.
@@ -121,6 +127,7 @@ impl ZScope {
             ZScope::KanbanRead => "kanban:read",
             ZScope::KanbanWrite => "kanban:write",
             ZScope::EventsRead => "events:read",
+            ZScope::NodesWrite => "nodes:write",
         }
     }
 
@@ -632,6 +639,45 @@ pub enum ZTurnFrame {
     Status { running: bool },
 }
 
+/// What a node or API key asks for when registering a temporary node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewTempNode {
+    /// Display name; the server slugs it for the tool namespace like any node's.
+    pub name: String,
+    /// Platform label; `linux` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Scopes the temp node may carry. The server clamps these to the caller's own grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+    /// Seconds the node may go without activity before the server destroys it. Clamped server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_ttl_secs: Option<u64>,
+    /// Absolute lifetime cap in seconds. Clamped server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lifetime_secs: Option<u64>,
+}
+
+/// A registered temporary node, as the server reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZTempNode {
+    pub node_id: String,
+    pub name: String,
+    pub slug: String,
+    /// The node that registered this one, when it came from `create_temp_node` over `attacca_api`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_node_id: Option<String>,
+    /// One-time plaintext node token. Present only on the create response — `list_temp_nodes`
+    /// never carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// RFC 3339 absolute lifetime cap; the server destroys the node past this.
+    pub expires_at: String,
+    /// Seconds of allowed inactivity before the server destroys the node.
+    pub idle_ttl_secs: u64,
+    pub connected: bool,
+}
+
 #[zyris::capability(name = "attacca_api", version = 1)]
 pub trait AttaccaApi {
     /// Identify the account this connection is authorized as, and the scopes it was granted.
@@ -775,6 +821,22 @@ pub trait AttaccaApi {
         message: String,
         data: Vec<Datum>,
     ) -> zyris::Result<()>;
+
+    /// Register a dedicated temporary node under this account — one coding agent of a
+    /// session-scoped program like zyris-code. The node dials like any static-token node, but the
+    /// server destroys it once it has been idle for `idle_ttl_secs` or after `max_lifetime_secs`,
+    /// whichever comes first; the returned token is shown once and never retrievable again.
+    ///
+    /// Requires the `nodes:write` scope, and the temp node's scopes are clamped to this node's own
+    /// grant — it cannot be minted with more power than its creator holds.
+    async fn create_temp_node(&self, request: ZNewTempNode) -> zyris::Result<ZTempNode>;
+
+    /// Destroy a temporary node this account created — the explicit end-of-session cleanup, which
+    /// closes its socket immediately rather than waiting for its idle TTL. Requires `nodes:write`.
+    async fn destroy_temp_node(&self, node_id: String) -> zyris::Result<()>;
+
+    /// List the account's temporary nodes. Requires `nodes:write`.
+    async fn list_temp_nodes(&self) -> zyris::Result<Vec<ZTempNode>>;
 
     /// Live turn feed with cursor resume: the head carries the current running flag and
     /// last cursor; items mirror LiveFrame (durable events with cursor, deltas, status).

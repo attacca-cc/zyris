@@ -9,8 +9,8 @@ use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
     ZHistoryQuery, ZJob, ZJobFilter, ZJobState, ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewProject,
-    ZNewSession, ZNewWork, ZProject, ZProjectUpdate, ZScope, ZSession, ZSessionEvent,
-    ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame, ZTurnStatus, ZUsage, ZWork,
+    ZNewSession, ZNewWork, ZNewTempNode, ZProject, ZProjectUpdate, ZScope, ZSession, ZSessionEvent,
+    ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTempNode, ZTurnFrame, ZTurnStatus, ZUsage, ZWork,
     ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate, ATTACCA_API_CAPABILITY,
 };
 
@@ -387,6 +387,36 @@ impl AttaccaApi for StubApi {
         ];
         Ok(Streaming::new(head, futures_util::stream::iter(frames)))
     }
+
+    async fn create_temp_node(&self, request: ZNewTempNode) -> zyris::Result<ZTempNode> {
+        Ok(ZTempNode {
+            node_id: "temp-1".into(),
+            name: request.name,
+            slug: "temp-1".into(),
+            parent_node_id: Some("parent-1".into()),
+            token: Some("znt_temp_only_once".into()),
+            expires_at: "2026-08-03T00:00:00Z".into(),
+            idle_ttl_secs: request.idle_ttl_secs.unwrap_or(1800),
+            connected: false,
+        })
+    }
+
+    async fn destroy_temp_node(&self, _node_id: String) -> zyris::Result<()> {
+        Ok(())
+    }
+
+    async fn list_temp_nodes(&self) -> zyris::Result<Vec<ZTempNode>> {
+        Ok(vec![ZTempNode {
+            node_id: "temp-1".into(),
+            name: "coder-a".into(),
+            slug: "coder-a".into(),
+            parent_node_id: None,
+            token: None,
+            expires_at: "2026-08-03T00:00:00Z".into(),
+            idle_ttl_secs: 1800,
+            connected: true,
+        }])
+    }
 }
 
 fn server_node() -> Node {
@@ -409,7 +439,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 32);
+    assert_eq!(descriptor.tools.len(), 35);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
@@ -426,6 +456,9 @@ fn descriptor_matches_the_reserved_name() {
     assert_eq!(descriptor.tool("create_work").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("approve_work_plan").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("work_tasks").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("create_temp_node").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("destroy_temp_node").unwrap().transfer, Transfer::Unary);
+    assert_eq!(descriptor.tool("list_temp_nodes").unwrap().transfer, Transfer::Unary);
 
     // `turn_events` stays the only stream: everything added since answers once.
     let streams: Vec<&str> = descriptor
@@ -799,4 +832,43 @@ async fn works_scopes_are_spelled_the_way_the_wire_spells_them() {
     assert_eq!(ZScope::from_str("works:write"), Some(ZScope::WorksWrite));
     assert!(ZScope::ALL.contains(&ZScope::WorksRead));
     assert!(ZScope::ALL.contains(&ZScope::WorksWrite));
+}
+
+/// A temporary node: registered over `attacca_api`, listed without its one-time token, destroyed on
+/// demand. The token is the only thing that must never survive a round trip into a listing.
+#[tokio::test]
+async fn temp_nodes_round_trip() {
+    let api = client().await;
+
+    let created = api
+        .create_temp_node(ZNewTempNode {
+            name: "coder-a".into(),
+            platform: Some("linux".into()),
+            scopes: vec!["sessions:write".into()],
+            idle_ttl_secs: Some(600),
+            max_lifetime_secs: Some(3600),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.node_id, "temp-1");
+    assert_eq!(created.slug, "temp-1");
+    assert_eq!(created.parent_node_id.as_deref(), Some("parent-1"));
+    assert!(created.token.is_some(), "the create response is the one chance to see the token");
+    assert_eq!(created.idle_ttl_secs, 600, "the requested idle TTL survives");
+
+    let listed = api.list_temp_nodes().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].node_id, "temp-1");
+    assert!(listed[0].token.is_none(), "the one-time token must never come back in a listing");
+
+    api.destroy_temp_node("temp-1".into()).await.unwrap();
+}
+
+/// The scope added alongside the temp-node tools. `ZScope::ALL` is what a node asks for when it
+/// wants everything, so a scope missing from it is a scope no node ever requests.
+#[tokio::test]
+async fn temp_node_scope_is_spelled_the_way_the_wire_spells_it() {
+    assert_eq!(ZScope::NodesWrite.as_str(), "nodes:write");
+    assert_eq!(ZScope::from_str("nodes:write"), Some(ZScope::NodesWrite));
+    assert!(ZScope::ALL.contains(&ZScope::NodesWrite));
 }
