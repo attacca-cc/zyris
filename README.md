@@ -20,7 +20,7 @@ sessions in return.
 | [`zyris-macros`](crates/zyris-macros) | The `#[zyris::capability]` proc-macro. Re-exported by `zyris`; not a direct dependency. |
 | [`zyris-caps`](crates/zyris-caps) | The standard capability catalogue — `terminal`, `file_io`, `input`, `screen_capture`, `browser_chrome`. Declarations only: no tokio, no OS dependencies, cheap for a client to depend on. |
 | [`zyris-capkit`](crates/zyris-capkit) | Reference implementations of that catalogue: `LocalFileIo` and `PtyTerminal` by default, plus `HostScreenCapture` and `EnigoInput` behind the `screen` and `input` features. |
-| [`zyris-attacca`](crates/zyris-attacca) | The `attacca_api` capability: the one surface that runs the other way, announced by the server rather than by a node. Depend on it to call Attacca back. |
+| [`zyris-attacca`](crates/zyris-attacca) | The `attacca_api` capability: the one surface that runs the other way, announced by the server rather than by a node. Depend on it to call Attacca back — agents, sessions, jobs, works, and the temporary per-session nodes a program like zyris-code registers with `create_temp_node`. |
 | [`zyris-hello`](crates/zyris-hello) | A complete node in two short files. The thing to copy. |
 
 ## A capability
