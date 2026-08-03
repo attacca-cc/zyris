@@ -42,12 +42,33 @@ pub enum EnrollError {
     Transport(String),
 }
 
+/// A node that wants to draw the enrollment code itself instead of the plain printed block.
+///
+/// Every method defaults to doing nothing, so an implementor that only wants the code can
+/// implement [`show`](EnrollmentUi::show) and ignore the rest.
+pub trait EnrollmentUi: Send + Sync {
+    /// A fresh code is ready. Called **instead of** the printed block — from this point the
+    /// implementor owns the display.
+    fn show(&self, response: &AuthorizeResponse);
+    /// Another poll happened and the grant is still pending, with this much time left on the code.
+    fn progress(&self, _remaining: Duration) {}
+    /// The code lapsed; a new one is being requested and [`show`](EnrollmentUi::show) will follow.
+    fn lapsed(&self) {}
+    /// The user declined the request in the browser.
+    fn denied(&self) {}
+    /// The node is authorized; the credential is saved and the dial proceeds.
+    fn authorized(&self, _response: &TokenResponse) {}
+}
+
 /// Everything a node needs to enroll itself and keep its credentials current.
 pub struct Enroller {
     http: reqwest::Client,
     base_url: String,
     store: Arc<dyn CredentialStore>,
     request: AuthorizeRequest,
+    /// The screen that owns the enrollment display, if any. With one set, nothing is printed to
+    /// stdout — the node must keep its screen up long enough for the human to act.
+    ui: Option<Arc<dyn EnrollmentUi>>,
 }
 
 impl Enroller {
@@ -81,7 +102,18 @@ impl Enroller {
                 scopes,
                 client_hint: local_client_hint(),
             },
+            ui: None,
         })
+    }
+
+    /// Draw the enrollment code through this UI instead of printing the plain block.
+    ///
+    /// The UI owns the display from the moment the code is issued until the node is authorized or
+    /// the attempt ends — see [`EnrollmentUi`]. While one is set, the printed block and the
+    /// terminal progress line are both suppressed.
+    pub fn with_ui(mut self, ui: Arc<dyn EnrollmentUi>) -> Self {
+        self.ui = Some(ui);
+        self
     }
 
     /// The zero-configuration path: keep the credential in the conventional per-user file for this
@@ -179,17 +211,25 @@ impl Enroller {
         for round in 0..MAX_ENROLLMENT_ROUNDS {
             let authorization = self.authorize().await?;
             // `println!`, not `tracing`: someone running with `RUST_LOG=error` must still see the
-            // code. This block is the primary UX of the whole feature.
-            println!("{}", authorization_notice(&authorization));
+            // code. This block is the primary UX of the whole feature. A node that passed a UI
+            // owns the display instead — nothing is printed while one is set.
+            match &self.ui {
+                Some(ui) => ui.show(&authorization),
+                None => println!("{}", authorization_notice(&authorization)),
+            }
 
             match self.poll_until_resolved(&authorization).await? {
-                Some(credential) => {
-                    println!("{}", authorized_notice(&credential.0));
-                    return Ok(credential.1);
+                Some((token, credential)) => {
+                    match &self.ui {
+                        Some(ui) => ui.authorized(&token),
+                        None => println!("{}", authorized_notice(&token)),
+                    }
+                    return Ok(credential);
                 }
-                None if round + 1 < MAX_ENROLLMENT_ROUNDS => {
-                    println!("That code expired. Requesting a new one.");
-                }
+                None if round + 1 < MAX_ENROLLMENT_ROUNDS => match &self.ui {
+                    Some(ui) => ui.lapsed(),
+                    None => println!("That code expired. Requesting a new one."),
+                },
                 None => break,
             }
         }
@@ -206,7 +246,8 @@ impl Enroller {
     ) -> Result<Option<(TokenResponse, StoredCredential)>, EnrollError> {
         let mut state = PollState::new(authorization.interval);
         let deadline = std::time::Instant::now() + Duration::from_secs(authorization.expires_in.max(0) as u64);
-        let mut progress = Progress::new(deadline);
+        // A UI draws the code; the rewritten terminal progress line would fight it for the screen.
+        let mut progress = Progress::new(deadline, self.ui.is_none());
 
         loop {
             tokio::time::sleep(state.interval()).await;
@@ -214,6 +255,9 @@ impl Enroller {
                 return Ok(None);
             }
             progress.tick();
+            if let Some(ui) = &self.ui {
+                ui.progress(deadline.saturating_duration_since(std::time::Instant::now()));
+            }
 
             let response = self
                 .post("/zyris/v1/device/token", &serde_json::json!({
@@ -239,6 +283,9 @@ impl Enroller {
                 }
                 PollOutcome::Denied => {
                     progress.finish();
+                    if let Some(ui) = &self.ui {
+                        ui.denied();
+                    }
                     return Err(EnrollError::NeedsOperator(
                         "the request was declined in Attacca".to_string(),
                     ));
@@ -314,20 +361,27 @@ impl Enroller {
 /// a terminal this rewrites one line; otherwise it prints at most one line a minute.
 struct Progress {
     deadline: std::time::Instant,
+    /// Rewrites one line on an interactive terminal.
     interactive: bool,
+    /// An enrollment UI owns the screen; nothing may be written while it is set.
+    quiet: bool,
     last_logged: std::time::Instant,
 }
 
 impl Progress {
-    fn new(deadline: std::time::Instant) -> Progress {
+    fn new(deadline: std::time::Instant, print: bool) -> Progress {
         Progress {
             deadline,
-            interactive: std::io::stdout().is_terminal(),
+            interactive: print && std::io::stdout().is_terminal(),
+            quiet: !print,
             last_logged: std::time::Instant::now(),
         }
     }
 
     fn tick(&mut self) {
+        if self.quiet {
+            return;
+        }
         let remaining = self.deadline.saturating_duration_since(std::time::Instant::now());
         if self.interactive {
             use std::io::Write;
@@ -484,15 +538,18 @@ mod tests {
             r#"{"error":"temporarily_unavailable","error_description":"enrollment is temporarily unavailable"}"#,
         );
         let store = Arc::new(MemoryCredentialStore::new());
-        store.save(&credential()).await.unwrap();
+        // 한 번만 만든다 — `credential()`은 `now_unix()`를 찍으므로 두 번 부르면 1초 차이로
+        // `access_expires_at`이 어긋나 이 테스트가 간헐적으로 실패한다.
+        let credential = credential();
+        store.save(&credential).await.unwrap();
 
         let enroller = enroller_against(&url, store.clone());
-        let error = enroller.force_refresh(&credential()).await.expect_err("503 is a failure");
+        let error = enroller.force_refresh(&credential).await.expect_err("503 is a failure");
 
         assert!(matches!(error, EnrollError::Transport(_)), "must be retriable, got {error}");
         assert_eq!(
             store.load().await.unwrap().as_ref(),
-            Some(&credential()),
+            Some(&credential),
             "an outage must never unenroll a node"
         );
     }
@@ -558,5 +615,89 @@ mod tests {
             interval: None,
         };
         assert_eq!(describe(&error), "http_503");
+    }
+
+    /// `canned_responder` answers every request alike; the enrollment flow needs different answers
+    /// for the authorize and token endpoints, so this one picks by path.
+    fn scripted_responder(scripts: &'static [(&'static str, &'static str, &'static str)]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("no loopback port");
+        let address = listener.local_addr().expect("no local address");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let Ok(n) = stream.read(&mut buf) else { return };
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or("");
+                let Some((_, status, body)) = scripts.iter().find(|(suffix, _, _)| path.contains(suffix))
+                else {
+                    return;
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("ws://{address}/zyris/v1/ws")
+    }
+
+    /// A UI that records what it was told.
+    #[derive(Default)]
+    struct RecordingUi {
+        shown: std::sync::Mutex<Option<String>>,
+        denied: std::sync::atomic::AtomicBool,
+        lapsed: std::sync::atomic::AtomicBool,
+    }
+
+    impl EnrollmentUi for RecordingUi {
+        fn show(&self, response: &AuthorizeResponse) {
+            *self.shown.lock().unwrap() = Some(response.user_code.clone());
+        }
+        fn denied(&self) {
+            self.denied.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn lapsed(&self) {
+            self.lapsed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// With a UI set, the code goes to the UI instead of the printed block, and the outcome is
+    /// reported back — a declined request must reach the screen, not vanish into an error string.
+    #[tokio::test]
+    async fn a_ui_receives_the_code_and_the_outcome() {
+        let url = scripted_responder(&[
+            (
+                "/device/authorize",
+                "200 OK",
+                r#"{"device_code":"zdc_secret","user_code":"WXQR-7KBD","verification_uri":"https://attacca.example/settings/zyris/device","expires_in":600,"interval":1}"#,
+            ),
+            (
+                "/device/token",
+                "400 Bad Request",
+                r#"{"error":"access_denied","error_description":"the user declined"}"#,
+            ),
+        ]);
+        let ui = Arc::new(RecordingUi::default());
+        let store = Arc::new(MemoryCredentialStore::new());
+        let enroller =
+            Enroller::new(&url, "hello node".into(), "linux".into(), vec![], store.clone())
+                .expect("the client builds")
+                .with_ui(ui.clone());
+
+        let error = enroller.obtain().await.expect_err("declined is a hard stop");
+
+        assert!(matches!(error, EnrollError::NeedsOperator(_)));
+        assert_eq!(ui.shown.lock().unwrap().as_deref(), Some("WXQR-7KBD"));
+        assert!(
+            ui.denied.load(std::sync::atomic::Ordering::SeqCst),
+            "declined must reach the screen"
+        );
+        assert!(!ui.lapsed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(store.load().await.unwrap(), None, "nothing is saved before approval");
     }
 }
