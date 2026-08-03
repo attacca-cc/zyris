@@ -14,7 +14,7 @@ const READ_CHUNK: usize = 128 * 1024;
 ///
 /// Bounded by what the far end of a deployment accepts, the same constraint that sizes
 /// [`INLINE_BLOB_MAX`](zyris::INLINE_BLOB_MAX): Attacca measures a tool result as
-/// `serde_json::to_vec(..).len()` against `ZYRIS_MAX_RESULT_BYTES` (1,000,000 by default). The
+/// `serde_json::to_vec(..).len()` against `ZYRIS_MAX_RESULT_BYTES` (8 MiB by default). The
 /// content is JSON-escaped text, so the worst case is six bytes out per byte in (`` for a
 /// control character); 128 KiB survives even that, and ordinary source costs barely more than one
 /// byte per byte. Anything larger should page with `offset` or use

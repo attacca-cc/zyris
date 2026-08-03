@@ -74,7 +74,9 @@ pub trait ScreenCapture {
     ///
     /// `format` and `max_width` exist because a full-resolution PNG of a 4K display is several
     /// megabytes, and a `Datum::Image` travels inline in the response — `zyris::proto::
-    /// INLINE_BLOB_MAX` puts the comfortable ceiling at 512 KiB. `format` defaults to PNG;
+    /// INLINE_BLOB_MAX` puts the comfortable ceiling at 4 MiB, which a 4K JPEG (or an ordinary
+    /// desktop's 4K PNG) fits at full resolution; a larger capture is detached onto its own stream
+    /// and arrives as an attachment instead. `format` defaults to PNG;
     /// `max_width` downscales the capture before encoding, preserving aspect ratio, and is
     /// ignored when it is not smaller than the capture.
     ///

@@ -49,8 +49,9 @@ Serialization modes:
 it trivially contiguous; it exists so a relayed hop (§9) can detect loss: any gap MUST fail
 the stream with `stream_lagged` — never deliver bytes past a gap.
 
-Limits are server-declared in `hello_ack` (defaults): max CONTROL frame 1 MiB, max
-STREAM_DATA payload 256 KiB, `max_inflight_reqs` 64, `initial_stream_credit` 256 KiB.
+Limits are server-declared in `hello_ack` (defaults): max CONTROL frame 8 MiB (headroom above
+the 4 MiB inline-blob ceiling), max STREAM_DATA payload 256 KiB, `max_inflight_reqs` 64,
+`initial_stream_credit` 256 KiB.
 Violations are protocol errors: `payload_too_large` on the offending request, or connection
 close `4409` for credit violations.
 
@@ -297,7 +298,7 @@ Attachments are **negotiated**: both peers must advertise the `attachments` feat
 whatever their size, per §3.2.
 
 Where they are used, the conversion is automatic and by size. A responder detaches every
-blob over 512 KiB as it writes the response: it allocates a stream from its own parity
+blob over 4 MiB as it writes the response: it allocates a stream from its own parity
 space (§4 — the byte sender allocates, so no `req.stream.id` is involved), writes the
 reference in place of the bytes, sends the `res`, and then pushes the bytes as
 STREAM_DATA chunks of at most `max_chunk`, paced by the receiver's credit. `s_end` carries

@@ -9,12 +9,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Advisory: nothing in this crate enforces it, because the transport does not care — a websocket
 /// frame is 16 MiB by default and msgpack `bin` costs one byte per byte. What cares is the far end
 /// of a deployment. Attacca measures a node's tool result as `serde_json::to_vec(..).len()`
-/// against `ZYRIS_MAX_RESULT_BYTES` (1,000,000 by default), and JSON means the blob is base64 —
-/// four bytes out for every three in.
+/// against `ZYRIS_MAX_RESULT_BYTES` (8 MiB by default), and JSON means the blob is base64 — four
+/// bytes out for every three in.
 ///
-/// 512 KiB is the largest round number that survives that: 699,052 base64 bytes, leaving the
-/// envelope most of a third of the budget. 1 MiB would encode to 1,398,101 and be rejected.
-pub const INLINE_BLOB_MAX: usize = 512 * 1024;
+/// 4 MiB is sized to carry a full-resolution capture of a 4K display: a JPEG at the node's default
+/// quality is typically 1–3 MiB and a PNG of an ordinary desktop is under 4 MiB, so both ride
+/// inline at their full size. 4 MiB encodes to 5,592,406 base64 bytes, leaving the envelope most of
+/// a third of the budget, and keeps the image under the 5 MiB file cap Anthropic applies to a
+/// single image. Anything larger — a noisy PNG, a PDF — is detached onto its own credited stream by
+/// the connection, which costs a stream rather than a refusal.
+pub const INLINE_BLOB_MAX: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AttachmentRef {
