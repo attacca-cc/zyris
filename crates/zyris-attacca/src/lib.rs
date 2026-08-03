@@ -76,12 +76,16 @@ pub enum ZScope {
     /// stream, because a caller cannot tell "nothing happened" from "you weren't allowed to see it".
     #[serde(rename = "events:read")]
     EventsRead,
+    /// Register and list nodes under the caller's own authenticated device — the per-auth
+    /// management surface a machine that owns a device grant uses to mint sibling nodes.
+    #[serde(rename = "nodes:write")]
+    NodesWrite,
 }
 
 impl ZScope {
     /// Every scope, in the order Attacca lists them. Useful for a node that wants to ask for
     /// everything and let the approving user cut it down.
-    pub const ALL: [ZScope; 17] = [
+    pub const ALL: [ZScope; 18] = [
         ZScope::AgentsRead,
         ZScope::AgentsWrite,
         ZScope::ProjectsRead,
@@ -99,6 +103,7 @@ impl ZScope {
         ZScope::KanbanRead,
         ZScope::KanbanWrite,
         ZScope::EventsRead,
+        ZScope::NodesWrite,
     ];
 
     /// The wire spelling, which is also what `request_scopes` and `$ZYRIS_SCOPES` take.
@@ -121,6 +126,7 @@ impl ZScope {
             ZScope::KanbanRead => "kanban:read",
             ZScope::KanbanWrite => "kanban:write",
             ZScope::EventsRead => "events:read",
+            ZScope::NodesWrite => "nodes:write",
         }
     }
 
@@ -632,6 +638,44 @@ pub enum ZTurnFrame {
     Status { running: bool },
 }
 
+/// What [`AttaccaApi::register_node`] takes: a permanent sibling node under the caller's own
+/// authenticated device — another agent of the same computer, e.g. a per-project zyris-cli
+/// checkout on the machine that already owns a device grant. The node's scopes are clamped
+/// server-side to the caller's own grant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNewNode {
+    /// Display name; the server slugs it for the tool namespace like any node's.
+    pub name: String,
+    /// Platform label; `linux` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Scopes the node may carry. The server clamps these to the caller's own grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+/// A node registered under the caller's device, as the server reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ZNode {
+    pub node_id: String,
+    pub name: String,
+    pub slug: String,
+    /// `linux` / `windows` / `macos` / `cli` / `other`.
+    pub platform: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub connected: bool,
+    /// One-time plaintext node token. Present only on the register response — `list_nodes` never
+    /// carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// RFC 3339.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
 #[zyris::capability(name = "attacca_api", version = 1)]
 pub trait AttaccaApi {
     /// Identify the account this connection is authorized as, and the scopes it was granted.
@@ -784,4 +828,17 @@ pub trait AttaccaApi {
         session_id: String,
         after: Option<i64>,
     ) -> zyris::Result<Streaming<ZTurnStatus, ZTurnFrame>>;
+
+    /// Register a permanent sibling node under this node's authenticated device — another agent of
+    /// the same computer, e.g. a per-project zyris-cli checkout on a machine that already owns a
+    /// device grant. The new node dials with its own static `znt_` token (shown once, never
+    /// retrievable again) and groups under the same device in the dashboard.
+    ///
+    /// Requires the `nodes:write` scope, and the node's scopes are clamped to this node's own
+    /// grant — it cannot be minted with more power than its creator holds.
+    async fn register_node(&self, request: ZNewNode) -> zyris::Result<ZNode>;
+
+    /// List the nodes registered under this node's authenticated device. Requires `nodes:write`;
+    /// never includes a token.
+    async fn list_nodes(&self) -> zyris::Result<Vec<ZNode>>;
 }
