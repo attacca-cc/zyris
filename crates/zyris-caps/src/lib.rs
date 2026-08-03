@@ -16,7 +16,7 @@ pub mod terminal;
 
 pub use browser::{browser_chrome_capability, BrowserChrome, BrowserChromeClient, BrowserChromeServer};
 pub use file_io::{
-    file_io_capability, DirEntry, FileIo, FileIoClient, FileIoServer, FileRead, FileStat,
+    file_io_capability, DirEntry, FileEdit, FileIo, FileIoClient, FileIoServer, FileRead, FileStat,
 };
 pub use input::{input_capability, Input, InputClient, InputServer, MouseButton};
 pub use screen::{

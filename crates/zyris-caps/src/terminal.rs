@@ -22,6 +22,12 @@ pub struct ExecOutput {
     pub stderr: String,
     #[serde(default)]
     pub timed_out: bool,
+    /// True when stdout hit the per-stream cap and surplus bytes were discarded.
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    /// True when stderr hit the per-stream cap and surplus bytes were discarded.
+    #[serde(default)]
+    pub stderr_truncated: bool,
 }
 
 /// What bounds a `read` or `screen` call: how long the PTY must be quiet before the reply goes
@@ -77,7 +83,7 @@ pub struct PtyScreen {
     pub exited: Option<i32>,
 }
 
-#[zyris::capability(name = "terminal", version = 2)]
+#[zyris::capability(name = "terminal", version = 3)]
 pub trait Terminal {
     /// Open an interactive PTY and return its handle. Output is collected in the node and
     /// fetched with `read` (raw bytes since the last call) or `screen` (the rendered display).
@@ -133,17 +139,48 @@ pub trait Terminal {
     /// Close an open PTY.
     async fn close(&self, pty: PtyId) -> zyris::Result<()>;
 
-    /// Run a shell command to completion and capture its stdout, stderr and exit code. `timeout_ms`
-    /// bounds the run; on expiry the result has `timed_out` set and an exit code of -1.
+    /// Run a command to completion and capture its stdout, stderr and exit code.
     ///
-    /// `cwd` may be relative or absolute. A relative path (`crates/zyris-caps`) resolves against the
-    /// node's root directory. A path with a leading `/` is an absolute host path
-    /// (`/home/allen/projects`) and is used as given. `.` and `..` are normalized. Omit `cwd` to run
-    /// in the root itself.
+    /// Say what to run with **exactly one** of `command` or `argv`:
+    ///
+    /// - `command`: a shell one-liner, run through `/bin/sh -c` on Unix (honouring `shell`, which
+    ///   defaults to `/bin/sh`) or `cmd /C` on Windows (`shell` is ignored there — use `argv` to
+    ///   pick a Windows program). Use this only when you actually need shell features (pipes,
+    ///   redirection, globbing).
+    /// - `argv`: a program and its argument list, run **without any shell**. Nothing is re-quoted
+    ///   or re-interpreted: spaces, quotes, `$`, backticks and `%` inside an element reach the
+    ///   program exactly as given. This is the escaping-free path — prefer it for anything longer
+    ///   than a trivial one-liner.
+    ///
+    /// For a PowerShell script on a Windows node the reliable, quoting-free pattern is:
+    ///
+    /// ```text
+    /// argv: ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "-"], stdin: <script>
+    /// ```
+    ///
+    /// `-Command -` makes PowerShell read the script from stdin, so the script travels as plain
+    /// text — no escaping, no base64 encoding. Short one-liners can go straight into `argv`
+    /// (`["powershell.exe", "-NoProfile", "-Command", "Get-Date"]`).
+    ///
+    /// `stdin` is written to the child and closed before the output is gathered; omit it to run
+    /// with an empty stdin. `env` entries override the node's own environment. `cwd` may be
+    /// relative or absolute: a relative path (`crates/zyris-caps`) resolves against the node's root
+    /// directory, a leading `/` is used as given, and `.` / `..` are normalized; omit it to run in
+    /// the root itself.
+    ///
+    /// `timeout_ms` bounds the whole run; on expiry the **whole process tree** is killed, partial
+    /// output is returned with `timed_out` set, and the exit code is -1. Each output stream is
+    /// capped; when a cap is hit the surplus is discarded and `stdout_truncated` / `stderr_truncated`
+    /// report it (the child keeps running to completion either way).
+    #[allow(clippy::too_many_arguments)]
     async fn exec(
         &self,
-        command: String,
+        command: Option<String>,
+        argv: Option<Vec<String>>,
         cwd: Option<String>,
         timeout_ms: Option<u64>,
+        stdin: Option<String>,
+        env: Option<std::collections::HashMap<String, String>>,
+        shell: Option<String>,
     ) -> zyris::Result<ExecOutput>;
 }

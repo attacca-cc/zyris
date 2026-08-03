@@ -4302,6 +4302,7 @@ dependencies = [
  "enigo",
  "futures-util",
  "image",
+ "libc",
  "libwayshot-xcap",
  "portable-pty",
  "tempfile",

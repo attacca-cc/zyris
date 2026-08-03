@@ -4,7 +4,7 @@ use std::time::UNIX_EPOCH;
 use bytes::Bytes;
 use zyris::{Blob, Chunk, Datum, ErrorCode, Streaming, WireError};
 
-use zyris_caps::{DirEntry, FileIo, FileRead, FileStat};
+use zyris_caps::{DirEntry, FileEdit, FileIo, FileRead, FileStat};
 
 use crate::path::resolve_under;
 
@@ -191,11 +191,52 @@ impl FileIo for LocalFileIo {
         stat_path(path, &resolved).await
     }
 
-    async fn remove(&self, path: String) -> zyris::Result<()> {
+    async fn edit(
+        &self,
+        path: String,
+        old_string: String,
+        new_string: String,
+        replace_all: bool,
+    ) -> zyris::Result<FileEdit> {
+        if old_string.is_empty() {
+            return Err(WireError::invalid_params("old_string must not be empty"));
+        }
         let resolved = self.resolve(&path)?;
         let meta = tokio::fs::metadata(&resolved).await.map_err(io_err)?;
         if meta.is_dir() {
-            tokio::fs::remove_dir(&resolved).await.map_err(io_err)
+            return Err(WireError::invalid_params("path is a directory"));
+        }
+        let bytes = tokio::fs::read(&resolved).await.map_err(io_err)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| WireError::invalid_params("file is not valid UTF-8 text"))?;
+        let count = text.matches(&old_string).count();
+        if count == 0 {
+            return Err(WireError::invalid_params("old_string not found in file"));
+        }
+        if count > 1 && !replace_all {
+            return Err(WireError::invalid_params(format!(
+                "old_string appears {count} times; pass replace_all: true to replace all"
+            )));
+        }
+        let new_text = if replace_all {
+            text.replace(&old_string, &new_string)
+        } else {
+            text.replacen(&old_string, &new_string, 1)
+        };
+        tokio::fs::write(&resolved, new_text.as_bytes()).await.map_err(io_err)?;
+        let stat = stat_path(path, &resolved).await?;
+        Ok(FileEdit { stat, replaced: count as u64 })
+    }
+
+    async fn remove(&self, path: String, recursive: Option<bool>) -> zyris::Result<()> {
+        let resolved = self.resolve(&path)?;
+        let meta = tokio::fs::metadata(&resolved).await.map_err(io_err)?;
+        if meta.is_dir() {
+            if recursive.unwrap_or(false) {
+                tokio::fs::remove_dir_all(&resolved).await.map_err(io_err)
+            } else {
+                tokio::fs::remove_dir(&resolved).await.map_err(io_err)
+            }
         } else {
             tokio::fs::remove_file(&resolved).await.map_err(io_err)
         }

@@ -211,6 +211,83 @@ impl Default for PtyTerminal {
     }
 }
 
+/// `exec`이 한 출력 스트림에 허용하는 최대 바이트. 넘치는 바이트는 버려지고
+/// `ExecOutput::stdout_truncated` / `stderr_truncated`가 알린다.
+///
+/// Attacca의 결과 예산(`ZYRIS_MAX_RESULT_BYTES`)을 넘지 않도록 하는 것이 목적이다 —
+/// `PTY_READ_MAX`와 같은 이유로 1 MiB 쪽이 안전하다.
+const EXEC_OUTPUT_CAP: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct OutputAcc {
+    buf: Vec<u8>,
+    truncated: bool,
+}
+
+/// 파이프를 `cap`까지 모으고, 넘치는 바이트는 버리면서도 계속 읽는다.
+///
+/// 읽기를 멈추면 자식이 파이프가 차서 블록할 수 있다. cap을 넘긴 바이트는 결과에
+/// 포함되지 않지만 자식은 끝까지 돌게 둔다.
+async fn drain_capped<R>(mut reader: R, acc: Arc<Mutex<OutputAcc>>, cap: usize)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let mut acc = acc.lock().unwrap();
+        let room = cap.saturating_sub(acc.buf.len());
+        if room > 0 {
+            acc.buf.extend_from_slice(&chunk[..room.min(n)]);
+        }
+        if n > room {
+            acc.truncated = true;
+        }
+    }
+}
+
+/// 프로세스 트리를 죽인다.
+///
+/// 유닉스: `exec`가 `process_group(0)`으로 자식을 새 그룹의 리더로 만들었으므로, 그
+/// 리더의 pid를 음수로 잡으면 셸이 남긴 손자까지 한 번에 죽는다. setpgid 경합(자식이
+/// 아직 그룹을 만들기 전)을 위해 그룹이 사라질 때까지 짧게 재시도한다.
+#[cfg(unix)]
+fn kill_tree(pid: Option<u32>) {
+    use std::thread;
+    use std::time::Duration;
+
+    let Some(pid) = pid else { return };
+    let target = -(pid as i32);
+    for _ in 0..50 {
+        // SAFETY: 음수 pid는 프로세스 그룹을 가리킨다. 우리가 방금 만든 그룹이고 그
+        // 안에 우리 프로세스는 없다.
+        if unsafe { libc::kill(target, libc::SIGKILL) } == 0 {
+            return; // 그룹 전체에 SIGKILL이 전달됐다
+        }
+        // 리더(자식) 자신이 이미 죽었으면 그룹은 앞으로 생기지 않는다.
+        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// 윈도우: `taskkill /T`가 자식 트리를 죽인다. cmd.exe 하나만 죽이면 손자가 고아로 남으므로
+/// 트리 킬이 필요하다.
+#[cfg(not(unix))]
+fn kill_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .output();
+    }
+}
+
 pub(crate) fn pty_err(msg: impl std::fmt::Display) -> WireError {
     WireError::new(ErrorCode::Internal, msg.to_string())
 }
@@ -310,47 +387,125 @@ impl Terminal for PtyTerminal {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn exec(
         &self,
-        command: String,
+        command: Option<String>,
+        argv: Option<Vec<String>>,
         cwd: Option<String>,
         timeout_ms: Option<u64>,
+        stdin: Option<String>,
+        env: Option<HashMap<String, String>>,
+        shell: Option<String>,
     ) -> zyris::Result<ExecOutput> {
-        let mut cmd = if cfg!(windows) {
-            let mut c = tokio::process::Command::new("cmd");
-            c.arg("/C").arg(&command);
-            c
-        } else {
-            let mut c = tokio::process::Command::new("/bin/sh");
-            c.arg("-c").arg(&command);
-            c
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        let argv = match argv {
+            Some(v) if v.is_empty() => {
+                return Err(WireError::invalid_params("argv must not be empty"))
+            }
+            other => other,
         };
+        let has_command = matches!(command.as_deref(), Some(c) if !c.trim().is_empty());
+        match (has_command, argv.is_some()) {
+            (false, false) => return Err(WireError::invalid_params("give `command` or `argv`, not neither")),
+            (true, true) => return Err(WireError::invalid_params("give `command` or `argv`, not both")),
+            _ => {}
+        }
+        // 윈도우 command 모드는 항상 cmd /C라 shell은 쓰지 않는다 (argv로 PowerShell을 고른다).
+        #[cfg(not(unix))]
+        let _ = &shell;
+
+        let mut cmd = match argv {
+            // argv 모드: 셸을 거치지 않는다. 인자는 그대로 프로그램에 전달되므로
+            // 이스케이프가 필요 없다 — PowerShell 난해한 인용의 근원이 사라진다.
+            Some(argv) => {
+                let mut c = Command::new(&argv[0]);
+                c.args(&argv[1..]);
+                c
+            }
+            None => {
+                #[cfg(unix)]
+                {
+                    let mut c = Command::new(shell.unwrap_or_else(|| "/bin/sh".to_string()));
+                    c.arg("-c").arg(command.unwrap_or_default());
+                    c
+                }
+                #[cfg(not(unix))]
+                {
+                    // cmd /C는 인용 규칙이 최악이라 PowerShell은 argv로 부르는 게 맞다.
+                    let mut c = Command::new("cmd");
+                    c.arg("/C").arg(command.unwrap_or_default());
+                    c
+                }
+            }
+        };
+
         cmd.current_dir(match cwd {
             Some(cwd) => resolve_under(&self.root, &cwd),
             None => self.root.clone(),
         });
-        let child = cmd.output();
-        let output = match timeout_ms {
-            Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), child)
-                .await
-            {
-                Ok(result) => result.map_err(pty_err)?,
+        if let Some(env) = env {
+            cmd.envs(env);
+        }
+        cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        // 유닉스에서 자식을 새 프로세스 그룹의 리더로 만든다 — 타임아웃 때 트리 전체를
+        // 죽일 수 있게 (셸이 남긴 손자까지).
+        #[cfg(unix)]
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn().map_err(pty_err)?;
+        let pid = child.id();
+
+        if let Some(input) = stdin {
+            if let Some(mut sin) = child.stdin.take() {
+                tokio::spawn(async move {
+                    let _ = sin.write_all(input.as_bytes()).await;
+                    let _ = sin.shutdown().await;
+                });
+            }
+        }
+
+        // 출력은 스트림마다 독립 태스크가 cap까지 모은다. cap을 넘겨도 **계속 읽어
+        // 비운다** — 읽기를 멈추면 자식이 파이프가 차서 영영 막히기 때문이다.
+        let stdout = child.stdout.take().expect("stdout은 piped로 띄웠다");
+        let stderr = child.stderr.take().expect("stderr은 piped로 띄웠다");
+        let out_acc = Arc::new(Mutex::new(OutputAcc::default()));
+        let err_acc = Arc::new(Mutex::new(OutputAcc::default()));
+        let out_task = tokio::spawn(drain_capped(stdout, out_acc.clone(), EXEC_OUTPUT_CAP));
+        let err_task = tokio::spawn(drain_capped(stderr, err_acc.clone(), EXEC_OUTPUT_CAP));
+
+        let (exit_code, timed_out) = match timeout_ms {
+            Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), child.wait()).await {
+                Ok(status) => (status.map_err(pty_err)?.code().unwrap_or(-1), false),
+                // 타임아웃: 트리 전체를 죽이고 수거한다. 예전 구현은 자식을 drop만 해서
+                // 좀비·고아를 남겼다.
                 Err(_) => {
-                    return Ok(ExecOutput {
-                        exit_code: -1,
-                        stdout: String::new(),
-                        stderr: "command timed out".into(),
-                        timed_out: true,
-                    })
+                    kill_tree(pid);
+                    let _ = child.wait().await;
+                    (-1, true)
                 }
             },
-            None => child.await.map_err(pty_err)?,
+            None => (child.wait().await.map_err(pty_err)?.code().unwrap_or(-1), false),
         };
-        Ok(ExecOutput {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            timed_out: false,
-        })
+
+        // 자식이 죽거나 끝나야 파이프가 닫히고 독자 태스크도 끝난다.
+        let _ = out_task.await;
+        let _ = err_task.await;
+
+        let (stdout, stdout_truncated) = {
+            let acc = out_acc.lock().unwrap();
+            (String::from_utf8_lossy(&acc.buf).into_owned(), acc.truncated)
+        };
+        let (stderr, stderr_truncated) = {
+            let acc = err_acc.lock().unwrap();
+            (String::from_utf8_lossy(&acc.buf).into_owned(), acc.truncated)
+        };
+
+        Ok(ExecOutput { exit_code, stdout, stderr, timed_out, stdout_truncated, stderr_truncated })
     }
 }
