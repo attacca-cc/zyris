@@ -67,7 +67,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_control_frame: 1024 * 1024,
+            max_control_frame: 8 * 1024 * 1024,
             max_chunk: 256 * 1024,
             max_inflight_reqs: 64,
             initial_stream_credit: 256 * 1024,

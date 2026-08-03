@@ -390,6 +390,23 @@ mod tests {
     }
 
     #[test]
+    fn a_4k_capture_fits_the_default_budget_at_full_resolution() {
+        // A mostly-flat desktop screenshot: compressible, unlike the noise fixtures above, and the
+        // case a real 4K display presents. If this stops fitting, the budget was lowered or the
+        // encoder changed — either way a full-resolution 4K capture no longer rides inline.
+        let mut image = RgbaImage::from_pixel(3840, 2160, image::Rgba([245, 245, 245, 255]));
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            if (x / 16 + y / 16) % 2 == 0 {
+                *pixel = image::Rgba([200 + (x % 56) as u8, 200, 200, 255]);
+            }
+        }
+        let budget = zyris::proto::INLINE_BLOB_MAX;
+        let (bytes, w, h) = fit(image, ImageFormat::Png, 80, Some(budget)).unwrap();
+        assert_eq!((w, h), (3840, 2160));
+        assert!(bytes.len() <= budget, "{} bytes over {budget}", bytes.len());
+    }
+
+    #[test]
     fn shrinking_stops_at_the_minimum_width() {
         // No budget this small is reachable, so the loop must give up rather than spin or
         // produce a one-pixel image.
