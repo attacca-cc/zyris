@@ -828,3 +828,37 @@ async fn works_scopes_are_spelled_the_way_the_wire_spells_them() {
     assert!(ZScope::ALL.contains(&ZScope::WorksRead));
     assert!(ZScope::ALL.contains(&ZScope::WorksWrite));
 }
+
+/// A sibling node: registered under the caller's device, listed without its one-time token. The
+/// token is the only thing that must never survive a round trip into a listing.
+#[tokio::test]
+async fn sibling_nodes_round_trip() {
+    let api = client().await;
+
+    let created = api
+        .register_node(ZNewNode {
+            name: "coder-a".into(),
+            platform: Some("linux".into()),
+            scopes: vec!["sessions:write".into()],
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.node_id, "sibling-1");
+    assert_eq!(created.platform, "linux");
+    assert_eq!(created.scopes, vec!["sessions:write".to_string()]);
+    assert!(created.token.is_some(), "the register response is the one chance to see the token");
+
+    let listed = api.list_nodes().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].node_id, "sibling-1");
+    assert!(listed[0].token.is_none(), "the one-time token must never come back in a listing");
+}
+
+/// The scope added alongside the sibling-node tools. `ZScope::ALL` is what a node asks for when it
+/// wants everything, so a scope missing from it is a scope no node ever requests.
+#[tokio::test]
+async fn sibling_node_scope_is_spelled_the_way_the_wire_spells_it() {
+    assert_eq!(ZScope::NodesWrite.as_str(), "nodes:write");
+    assert_eq!(ZScope::from_str("nodes:write"), Some(ZScope::NodesWrite));
+    assert!(ZScope::ALL.contains(&ZScope::NodesWrite));
+}
