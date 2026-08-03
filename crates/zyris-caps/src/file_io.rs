@@ -42,9 +42,17 @@ pub struct DirEntry {
     pub size: u64,
 }
 
+/// What a unary [`FileIo::edit`] returns: the file's new stat plus how many replacements were made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FileEdit {
+    pub stat: FileStat,
+    /// How many occurrences of `old_string` were replaced.
+    pub replaced: u64,
+}
+
 /// Every method takes a `path` in one of two forms — see the per-method docs, which are what the
 /// announced tool descriptors carry (only method doc comments reach the wire, not this one).
-#[zyris::capability(name = "file_io", version = 2)]
+#[zyris::capability(name = "file_io", version = 3)]
 pub trait FileIo {
     /// Stat a file or directory, returning its size, kind and modification time.
     ///
@@ -102,12 +110,31 @@ pub trait FileIo {
     /// (`/home/allen/projects/notes.txt`) and is used as given. `.` and `..` are normalized.
     async fn write(&self, path: String, data: Datum, overwrite: bool) -> zyris::Result<FileStat>;
 
-    /// Remove a file or an empty directory.
+    /// Replace occurrences of `old_string` with `new_string` in a UTF-8 text file, writing the
+    /// result back in place. The exact-substring semantics mirror Attacca's `computer_file_edit`:
+    /// `old_string` must appear at least once, and when it appears more than once you must pass
+    /// `replace_all: true` — the call fails rather than guessing. Binary files fail with an
+    /// invalid-params error. Read the file first (with `read`) so you know exactly what you are
+    /// replacing; the returned `replaced` count tells you how many occurrences were changed.
     ///
     /// `path` may be relative or absolute. A relative path (`notes/hello.txt`) resolves against the
     /// node's root directory. A path with a leading `/` is an absolute host path
     /// (`/home/allen/projects/notes.txt`) and is used as given. `.` and `..` are normalized.
-    async fn remove(&self, path: String) -> zyris::Result<()>;
+    async fn edit(
+        &self,
+        path: String,
+        old_string: String,
+        new_string: String,
+        replace_all: bool,
+    ) -> zyris::Result<FileEdit>;
+
+    /// Remove a file or a directory. A directory must be empty unless `recursive: true`, which
+    /// deletes the whole tree under it — the behaviour of Attacca's `computer_file_delete`.
+    ///
+    /// `path` may be relative or absolute. A relative path (`notes/hello.txt`) resolves against the
+    /// node's root directory. A path with a leading `/` is an absolute host path
+    /// (`/home/allen/projects/notes.txt`) and is used as given. `.` and `..` are normalized.
+    async fn remove(&self, path: String, recursive: Option<bool>) -> zyris::Result<()>;
 
     /// Create a directory, including any missing parents.
     ///

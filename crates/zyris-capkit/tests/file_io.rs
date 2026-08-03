@@ -202,3 +202,89 @@ async fn writes_to_an_absolute_path() {
     assert_eq!(stat.path, absolute);
     assert_eq!(std::fs::read(&target).unwrap(), b"written absolutely");
 }
+
+// ── v3: edit / recursive remove ─────────────────────────────────────────
+
+/// `edit`은 정확한 부분 문자열을 바꾸고, 바꾼 횟수와 새 stat을 돌려준다.
+#[tokio::test]
+async fn edit_replaces_the_first_occurrence() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "one two three").unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    let edited = fs.edit("f.txt".into(), "two".into(), "2".into(), false).await.unwrap();
+    assert_eq!(edited.replaced, 1);
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "one 2 three");
+}
+
+/// 여러 번 나오는 `old_string`은 `replace_all` 없이는 거부한다 — 컴퓨터_file_edit과 같은 규칙.
+#[tokio::test]
+async fn edit_requires_replace_all_for_multiple_occurrences() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "one one one").unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    let err = fs.edit("f.txt".into(), "one".into(), "1".into(), false).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidParams);
+    assert!(err.message.contains("replace_all"), "본 메시지: {}", err.message);
+
+    let edited = fs.edit("f.txt".into(), "one".into(), "1".into(), true).await.unwrap();
+    assert_eq!(edited.replaced, 3);
+    assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "1 1 1");
+}
+
+/// 없는 문자열은 오류, 빈 `old_string`도 오류.
+#[tokio::test]
+async fn edit_not_found_and_empty_needle_are_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "hello").unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    let err = fs.edit("f.txt".into(), "zzz".into(), "x".into(), true).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidParams);
+    assert!(err.message.contains("not found"), "본 메시지: {}", err.message);
+
+    let err = fs.edit("f.txt".into(), "".into(), "x".into(), true).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidParams);
+}
+
+/// 바이너리 파일은 UTF-8 텍스트가 아니므로 편집을 거부한다 — 대체 문자로 내용을 망치지 않도록.
+#[tokio::test]
+async fn edit_rejects_binary_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bin"), [0xffu8, 0x00, 0xfe, 0x41]).unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    let err = fs.edit("bin".into(), "A".into(), "B".into(), true).await.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidParams);
+}
+
+/// `recursive: true`는 디렉터리 트리 전체를 지운다 — `computer_file_delete`와 같은 동작.
+#[tokio::test]
+async fn remove_recursively_deletes_a_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("tree/sub")).unwrap();
+    std::fs::write(dir.path().join("tree/root.txt"), "r").unwrap();
+    std::fs::write(dir.path().join("tree/sub/deep.txt"), "d").unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    // 비어 있지 않은 디렉터리는 recursive 없이 거부된다.
+    let err = fs.remove("tree".into(), None).await.unwrap_err();
+    assert!(err.to_string().contains("not empty"), "본 오류: {err:?}");
+    assert!(dir.path().join("tree").exists(), "실패한 remove가 트리를 지웠다");
+
+    let ok = fs.remove("tree".into(), Some(true)).await;
+    assert!(ok.is_ok(), "본 오류: {ok:?}");
+    assert!(!dir.path().join("tree").exists());
+}
+
+/// 파일은 `recursive`와 무관하게 지워진다.
+#[tokio::test]
+async fn remove_deletes_a_plain_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+    let fs = file_io_rooted_at(dir.path()).await;
+
+    fs.remove("f.txt".into(), None).await.unwrap();
+    assert!(!dir.path().join("f.txt").exists());
+}

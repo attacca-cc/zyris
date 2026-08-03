@@ -33,7 +33,10 @@ async fn connect(term: PtyTerminal) -> TerminalClient {
 async fn exec_runs_a_command() {
     let term = connect(PtyTerminal::default()).await;
 
-    let out: ExecOutput = term.exec("echo hello-zyris".into(), None, Some(5000)).await.unwrap();
+    let out: ExecOutput = term
+        .exec(Some("echo hello-zyris".into()), None, None, Some(5000), None, None, None)
+        .await
+        .unwrap();
     assert_eq!(out.exit_code, 0);
     assert!(out.stdout.contains("hello-zyris"));
     assert!(!out.timed_out);
@@ -49,7 +52,10 @@ async fn exec_resolves_cwd() {
     let term = connect(PtyTerminal::rooted(&root_path)).await;
 
     async fn pwd(term: &TerminalClient, cwd: Option<&str>) -> String {
-        let out = term.exec("pwd".into(), cwd.map(str::to_string), Some(5000)).await.unwrap();
+        let out = term
+            .exec(Some("pwd".into()), None, cwd.map(str::to_string), Some(5000), None, None, None)
+            .await
+            .unwrap();
         assert_eq!(out.exit_code, 0);
         out.stdout.trim().to_string()
     }
@@ -60,6 +66,157 @@ async fn exec_resolves_cwd() {
         pwd(&term, Some("/tmp")).await,
         std::path::Path::new("/tmp").canonicalize().unwrap().to_string_lossy()
     );
+}
+
+// ── exec v3: argv / stdin / env / cap / timeout ──────────────────────────
+
+/// argv 모드의 요점: 셸을 거치지 않으므로 공백·따옴표·`$`·백틱·`*`가 전부 그대로
+/// 프로그램에 닿는다. 셸이 개입했다면 `$HOME`은 확장되고 백틱은 실행되고 `*`는 글롭된다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_argv_passes_arguments_unmangled() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let out = term
+        .exec(
+            None,
+            Some(vec![
+                "/bin/echo".into(),
+                "a b".into(),
+                "c\"d".into(),
+                "$HOME".into(),
+                "`ls`".into(),
+                "*".into(),
+            ]),
+            None,
+            Some(5000),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, "a b c\"d $HOME `ls` *\n");
+    assert!(!out.timed_out);
+}
+
+/// PowerShell의 `-Command -` 패턴과 같은 모양 — 스크립트를 stdin으로 넣으면 인용이
+/// 필요 없다. 여기서는 유닉스에서 `/bin/sh -s`로 같은 길을 검증한다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_reads_a_script_from_stdin() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let script = "echo FROM-STDIN\nprintf 'x=%s\\n' 'a b'\n";
+    let out = term
+        .exec(
+            None,
+            Some(vec!["/bin/sh".into(), "-s".into()]),
+            None,
+            Some(5000),
+            Some(script.into()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.exit_code, 0);
+    assert!(out.stdout.contains("FROM-STDIN"), "본 것: {:?}", out.stdout);
+    assert!(out.stdout.contains("x=a b"), "본 것: {:?}", out.stdout);
+}
+
+/// `env` 항목은 노드 환경 위에 덮어써서 자식에 닿는다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_env_overrides_reach_the_child() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let out = term
+        .exec(
+            Some("printf '%s' \"$ZYRIS_TEST_VAR\"".into()),
+            None,
+            None,
+            Some(5000),
+            None,
+            Some(std::collections::HashMap::from([(
+                "ZYRIS_TEST_VAR".into(),
+                "from-env".into(),
+            )])),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout, "from-env");
+}
+
+/// 출력은 스트림당 cap에서 잘리고, 넘친 바이트는 버려진다(`stdout_truncated`).
+/// 자식은 끝까지 돌므로 exit code는 정상이다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_caps_output_and_reports_truncation() {
+    let term = connect(PtyTerminal::default()).await;
+
+    // EXEC_OUTPUT_CAP(1 MiB)를 넘는 stdout.
+    let out = term
+        .exec(Some("yes x | head -c 1500000".into()), None, None, Some(20_000), None, None, None)
+        .await
+        .unwrap();
+
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout.len(), 1024 * 1024, "cap보다 많이 돌려줬다");
+    assert!(out.stdout_truncated, "cap을 넘겼는데 truncated가 아니다");
+    assert!(!out.stderr_truncated);
+}
+
+/// 타임아웃이면 **프로세스 트리 전체**를 죽이고 부분 출력과 함께 돌아온다.
+///
+/// 예전 구현은 자식을 drop만 해서 `sleep 30`이 고아로 남았다. 여기서는 셸이 자기 pid를
+/// 파일에 남기게 한 뒤, 타임아웃 후 그 pid가 죽었는지(ESRCH) 확인한다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_timeout_kills_the_process_tree() {
+    let term = connect(PtyTerminal::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("pid");
+    let cmd = format!("echo $$ > {}; sleep 30", pidfile.display());
+
+    let out = term.exec(Some(cmd), None, None, Some(1500), None, None, None).await.unwrap();
+
+    assert!(out.timed_out, "본 것: {out:?}");
+    assert_eq!(out.exit_code, -1);
+
+    let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+    // SAFETY: 신호 0은 검사만 한다 — 프로세스가 살아 있으면 0, 없으면 -1(ESRCH).
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    assert!(!alive, "프로세스 그룹 {pid}이 타임아웃 킬 뒤에도 살아 있다");
+}
+
+/// `command`와 `argv`를 둘 다 주면 모호하므로 거부한다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_rejects_both_command_and_argv() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let err = term
+        .exec(Some("echo hi".into()), Some(vec!["echo".into()]), None, Some(5000), None, None, None)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("not both"), "본 오류: {err:?}");
+}
+
+/// 둘 다 빠지면 실행할 것이 없다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_rejects_neither_command_nor_argv() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let err = term.exec(None, None, None, Some(5000), None, None, None).await.unwrap_err();
+    assert!(format!("{err:?}").contains("not neither"), "본 오류: {err:?}");
 }
 
 // ── 리더 스레드가 소비자에 매이지 않는다 ────────────────────────────────
