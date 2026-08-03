@@ -25,7 +25,7 @@ pub mod http;
 #[cfg(feature = "persistence")]
 pub use file_store::{config_dir, FileCredentialStore, StoreError};
 #[cfg(feature = "enroll")]
-pub use http::{EnrollError, Enroller};
+pub use http::{EnrollError, Enroller, EnrollmentUi};
 pub use store::{
     CredentialStore, CredentialStoreError, MemoryCredentialStore, StoredCredential,
 };
