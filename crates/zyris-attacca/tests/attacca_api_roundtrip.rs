@@ -8,10 +8,10 @@ use futures_util::StreamExt;
 use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
-    ZHistoryQuery, ZJob, ZJobFilter, ZJobState, ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewProject,
-    ZNewSession, ZNewWork, ZProject, ZProjectUpdate, ZScope, ZSession, ZSessionEvent,
-    ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame, ZTurnStatus, ZUsage, ZWork,
-    ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate, ATTACCA_API_CAPABILITY,
+    ZHistoryQuery, ZJob, ZJobFilter, ZJobState, ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewNode,
+    ZNewProject, ZNewSession, ZNewWork, ZNode, ZProject, ZProjectUpdate, ZScope, ZSession,
+    ZSessionEvent, ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame, ZTurnStatus, ZUsage,
+    ZWork, ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate, ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
@@ -387,6 +387,34 @@ impl AttaccaApi for StubApi {
         ];
         Ok(Streaming::new(head, futures_util::stream::iter(frames)))
     }
+
+    async fn register_node(&self, request: ZNewNode) -> zyris::Result<ZNode> {
+        Ok(ZNode {
+            node_id: "sibling-1".into(),
+            name: request.name,
+            slug: "sibling-1".into(),
+            platform: request.platform.unwrap_or_else(|| "linux".into()),
+            scopes: request.scopes,
+            connected: false,
+            token: Some("znt_sibling-one-time".into()),
+            last_seen_at: None,
+            created_at: Some("2026-08-03T00:00:00Z".into()),
+        })
+    }
+
+    async fn list_nodes(&self) -> zyris::Result<Vec<ZNode>> {
+        Ok(vec![ZNode {
+            node_id: "sibling-1".into(),
+            name: "coder-a".into(),
+            slug: "sibling-1".into(),
+            platform: "linux".into(),
+            scopes: vec![],
+            connected: true,
+            token: None,
+            last_seen_at: Some("2026-08-03T00:00:01Z".into()),
+            created_at: Some("2026-08-03T00:00:00Z".into()),
+        }])
+    }
 }
 
 fn server_node() -> Node {
@@ -409,7 +437,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 32);
+    assert_eq!(descriptor.tools.len(), 34);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
