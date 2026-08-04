@@ -12,9 +12,17 @@ pub const PROTOCOL_MINOR: u16 = 0;
 /// that received an attachment reference would hand its caller a datum whose bytes never arrive.
 pub const FEATURE_ATTACHMENTS: &str = "attachments";
 pub const FEATURE_CANCEL: &str = "cancel";
+/// The peer will send `zyris.heartbeat` notes at the negotiated cadence, and expects the same, so a
+/// half-open connection (Wi-Fi blip, NAT timeout, sleep) is detected and torn down instead of
+/// wedging both ends forever. Gated like every other feature: enforcement starts only when both
+/// sides list it, so a peer that never sends heartbeats is not lapse-closed by a new one.
+pub const FEATURE_HEARTBEAT: &str = "heartbeat";
 
 pub const METHOD_ANNOUNCE: &str = "zyris.announce";
 pub const METHOD_CLOSING: &str = "zyris.closing";
+/// The liveness note. Empty payload — its mere arrival is the point. Any received frame counts as
+/// liveness, so this is also what an otherwise idle-but-healthy connection exchanges.
+pub const METHOD_HEARTBEAT: &str = "zyris.heartbeat";
 pub const METHOD_WEBRTC_SIGNAL: &str = "webrtc.signal";
 pub const METHOD_WEBRTC_CLOSE: &str = "webrtc.close";
 

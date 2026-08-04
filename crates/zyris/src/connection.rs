@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
@@ -14,7 +14,8 @@ use zyris_proto::{
     AttachmentTrailer, ClosingParams, Envelope, ErrorCode, HeartbeatConfig, Hello, HelloAck, HelloProtocol,
     IncomingFrame, Limits, Payload, RejectedCapability, Serialization, StreamDecl, WireError,
     WireMessage, CLOSE_NORMAL, CLOSE_UNSUPPORTED_VERSION, FEATURE_ATTACHMENTS, FEATURE_CANCEL,
-    INLINE_BLOB_MAX, METHOD_ANNOUNCE, METHOD_CLOSING, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    FEATURE_HEARTBEAT, INLINE_BLOB_MAX, METHOD_ANNOUNCE, METHOD_CLOSING, METHOD_HEARTBEAT,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
 
 use crate::capabilities::CapabilitySet;
@@ -26,6 +27,10 @@ use crate::transport::{Transport, WireSink, WireStream};
 /// than any plausible gap between reading a response and deciding what to do with its bytes, short
 /// enough that a caller which never looks does not pin the sender for the life of the connection.
 const ATTACHMENT_CLAIM_GRACE: Duration = Duration::from_secs(120);
+
+/// How often the heartbeat watchdog re-checks staleness. Well under the negotiated timeout (45s by
+/// default), so a lapsed peer is caught within a tick of the deadline.
+const HEARTBEAT_WATCHDOG_TICK: Duration = Duration::from_millis(250);
 
 enum WriterCmd {
     Send(WireMessage),
@@ -145,7 +150,11 @@ impl Default for AcceptOptions {
             limits: Limits::default(),
             heartbeat: HeartbeatConfig::default(),
             reserved_capabilities: Vec::new(),
-            features: vec![FEATURE_CANCEL.into(), FEATURE_ATTACHMENTS.into()],
+            features: vec![
+                FEATURE_CANCEL.into(),
+                FEATURE_ATTACHMENTS.into(),
+                FEATURE_HEARTBEAT.into(),
+            ],
         }
     }
 }
@@ -169,6 +178,10 @@ pub(crate) struct Shared {
     graceful: Mutex<Option<String>>,
     close_tx: watch::Sender<Option<CloseReason>>,
     info: ConnectionInfo,
+    /// The liveness parameters this connection was negotiated with.
+    heartbeat: HeartbeatConfig,
+    /// When the reader last saw any frame, the input the heartbeat watchdog judges staleness from.
+    last_frame: Mutex<Instant>,
 }
 
 impl Shared {
@@ -621,9 +634,13 @@ pub(crate) async fn establish(
 ) -> Result<Connection> {
     let (mut sink, mut stream) = transport.split();
 
-    let (serialization, limits, info, reserved, features) = match role {
+    let (serialization, limits, info, reserved, features, heartbeat) = match role {
         Role::Dial { agent } => {
-            let local = vec![FEATURE_CANCEL.to_string(), FEATURE_ATTACHMENTS.to_string()];
+            let local = vec![
+                FEATURE_CANCEL.to_string(),
+                FEATURE_ATTACHMENTS.to_string(),
+                FEATURE_HEARTBEAT.to_string(),
+            ];
             let hello = Envelope::Hello(Hello {
                 protocol: HelloProtocol { major: PROTOCOL_MAJOR, minors_supported: vec![PROTOCOL_MINOR] },
                 serialization: vec![Serialization::Msgpack, Serialization::Json],
@@ -656,7 +673,14 @@ pub(crate) async fn establish(
                 serialization: ack.serialization,
                 peer_agent: None,
             };
-            (ack.serialization, ack.limits, info, Vec::new(), Features { local, peer: ack.features })
+            (
+                ack.serialization,
+                ack.limits,
+                info,
+                Vec::new(),
+                Features { local, peer: ack.features },
+                ack.heartbeat,
+            )
         }
         Role::Accept { options } => {
             let hello = match read_handshake(&mut stream).await? {
@@ -711,8 +735,16 @@ pub(crate) async fn establish(
                 info,
                 options.reserved_capabilities,
                 Features { local: options.features, peer: hello.features },
+                options.heartbeat,
             )
         }
+    };
+
+    // A timeout no longer than the interval would lapse a healthy idle connection whose heartbeat
+    // simply has not arrived yet, so the effective timeout is at least one interval plus a second.
+    let heartbeat = HeartbeatConfig {
+        interval_s: heartbeat.interval_s,
+        timeout_s: heartbeat.timeout_s.max(heartbeat.interval_s.saturating_add(1)),
     };
 
     let side = match info.peer_agent {
@@ -744,14 +776,21 @@ pub(crate) async fn establish(
         graceful: Mutex::new(None),
         close_tx,
         info,
+        heartbeat,
+        last_frame: Mutex::new(Instant::now()),
     });
 
     // Registered before anything can be announced, so a capability change racing the handshake
     // reaches this connection rather than being announced only to the ones that came before it.
     capabilities.register(&shared);
 
-    tokio::spawn(run_writer(out_rx, sink));
+    tokio::spawn(run_writer(shared.clone(), out_rx, sink));
     tokio::spawn(run_reader(shared.clone(), stream));
+
+    if features.agreed(FEATURE_HEARTBEAT) {
+        spawn_heartbeat(shared.clone());
+        spawn_watchdog(shared.clone());
+    }
 
     let conn = Connection { shared };
     if !conn.shared.caps.is_empty() {
@@ -786,20 +825,75 @@ async fn read_handshake(stream: &mut Box<dyn WireStream>) -> Result<Envelope> {
     }
 }
 
-async fn run_writer(mut rx: mpsc::UnboundedReceiver<WriterCmd>, mut sink: Box<dyn WireSink>) {
+async fn run_writer(
+    shared: Arc<Shared>,
+    mut rx: mpsc::UnboundedReceiver<WriterCmd>,
+    mut sink: Box<dyn WireSink>,
+) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             WriterCmd::Send(msg) => {
-                if sink.send(msg).await.is_err() {
-                    break;
+                if let Err(e) = sink.send(msg).await {
+                    // The socket failed on the write side while the reader has not noticed yet —
+                    // the half-open case. Shut the connection down so `closed()` resolves and the
+                    // reconnect loop can run instead of wedging on a reader that never errors.
+                    shutdown(&shared, CloseReason::Transport(format!("write failed: {e}")));
+                    return;
                 }
             }
             WriterCmd::Close { code, reason } => {
                 let _ = sink.close(code, reason).await;
-                break;
+                return;
             }
         }
     }
+}
+
+/// Send `zyris.heartbeat` notes at the negotiated interval, so an idle-but-healthy connection still
+/// moves frames and a peer that went silent can be told apart from one that merely has nothing to
+/// say. Exits when the connection is closed or the writer is gone.
+fn spawn_heartbeat(shared: Arc<Shared>) {
+    let interval = Duration::from_secs(shared.heartbeat.interval_s as u64);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            if shared.close_tx.subscribe().borrow().is_some() {
+                return;
+            }
+            let note = Envelope::Note {
+                method: METHOD_HEARTBEAT.to_string(),
+                params: Payload::default(),
+            };
+            if shared.send_envelope(&note).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Enforce liveness: if no frame of any kind arrived within the negotiated `timeout_s`, the peer is
+/// presumed gone (a half-open socket never errors) and the connection is shut down, so both the
+/// node's reconnect loop and the server's teardown run promptly instead of holding a zombie.
+fn spawn_watchdog(shared: Arc<Shared>) {
+    let timeout = Duration::from_secs(shared.heartbeat.timeout_s as u64);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(HEARTBEAT_WATCHDOG_TICK).await;
+            if shared.close_tx.subscribe().borrow().is_some() {
+                return;
+            }
+            let last = *shared.last_frame.lock().unwrap();
+            if last.elapsed() > timeout {
+                shutdown(
+                    &shared,
+                    CloseReason::Heartbeat(
+                        "no frame from peer within the negotiated timeout".into(),
+                    ),
+                );
+                return;
+            }
+        }
+    });
 }
 
 async fn run_reader(shared: Arc<Shared>, mut stream: Box<dyn WireStream>) {
@@ -808,6 +902,7 @@ async fn run_reader(shared: Arc<Shared>, mut stream: Box<dyn WireStream>) {
             None => break CloseReason::Transport("connection closed".into()),
             Some(Err(e)) => break CloseReason::Transport(e.to_string()),
             Some(Ok(msg)) => {
+                *shared.last_frame.lock().unwrap() = Instant::now();
                 let frame = match msg {
                     WireMessage::Binary(bytes) => match decode_binary(bytes) {
                         Ok(frame) => frame,
@@ -843,7 +938,15 @@ fn shutdown(shared: &Arc<Shared>, reason: CloseReason) {
     for (_, call) in shared.inflight.lock().unwrap().drain() {
         call.abort.abort();
     }
-    shared.close_tx.send_replace(Some(reason.clone()));
+    // The first shutdown wins the reason. `shutdown` is called from several places — the reader
+    // seeing the socket close, the writer hitting a dead socket, the heartbeat watchdog — and the
+    // teardown they trigger can itself make the transport error (a close frame sent, a peer's
+    // socket dying in response), so a later call would otherwise clobber the root cause with its
+    // symptom.
+    let closed = shared.close_tx.subscribe();
+    if closed.borrow().is_none() {
+        shared.close_tx.send_replace(Some(reason.clone()));
+    }
     let _ = shared.out.send(WriterCmd::Close {
         code: CLOSE_NORMAL,
         reason: reason.to_string(),
