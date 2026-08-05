@@ -81,4 +81,4 @@ mod input;
 #[cfg(feature = "input")]
 pub use enigo;
 #[cfg(feature = "input")]
-pub use input::EnigoInput;
+pub use input::{settings_for_session, EnigoInput};

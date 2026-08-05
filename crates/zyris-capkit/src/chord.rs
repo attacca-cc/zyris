@@ -44,6 +44,10 @@ pub(crate) fn parse_chord(chord: &str) -> zyris::Result<(Vec<Key>, Key)> {
 
     match key {
         Some(key) => Ok((modifiers, key)),
+        // A lone modifier is a tap of that modifier — Super alone opens the overview, Alt alone
+        // focuses the menu bar, and so on. Several modifiers with no key still has no single
+        // press to make, so that stays an error.
+        None if modifiers.len() == 1 => Ok((Vec::new(), modifiers[0])),
         None => Err(WireError::invalid_params(format!(
             "chord `{chord}` is all modifiers and has no key to press"
         ))),
@@ -177,8 +181,15 @@ mod tests {
     }
 
     #[test]
-    fn a_chord_needs_exactly_one_non_modifier() {
-        assert!(parse_chord("ctrl").is_err());
+    fn a_lone_modifier_is_a_tap_of_that_modifier() {
+        assert_eq!(parse("Super"), (vec![], Key::Meta));
+        assert_eq!(parse("ctrl"), (vec![], Key::Control));
+        assert_eq!(parse("alt"), (vec![], Key::Alt));
+        assert_eq!(parse("shift"), (vec![], Key::Shift));
+    }
+
+    #[test]
+    fn a_chord_needs_exactly_one_key() {
         assert!(parse_chord("ctrl+shift").is_err());
         assert!(parse_chord("a+b").is_err());
     }
