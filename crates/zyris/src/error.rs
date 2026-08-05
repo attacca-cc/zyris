@@ -27,6 +27,9 @@ pub enum CloseReason {
     Graceful(String),
     Transport(String),
     Protocol(String),
+    /// The negotiated heartbeat lapsed: no frame of any kind arrived within `timeout_s`, so the
+    /// peer is presumed gone even though the socket never errored (half-open).
+    Heartbeat(String),
 }
 
 impl std::fmt::Display for CloseReason {
@@ -35,6 +38,7 @@ impl std::fmt::Display for CloseReason {
             CloseReason::Graceful(r) => write!(f, "graceful close: {r}"),
             CloseReason::Transport(r) => write!(f, "transport closed: {r}"),
             CloseReason::Protocol(r) => write!(f, "protocol error: {r}"),
+            CloseReason::Heartbeat(r) => write!(f, "heartbeat lapsed: {r}"),
         }
     }
 }
