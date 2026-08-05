@@ -1,0 +1,36 @@
+#!/bin/sh
+# commit-msg — Enforce Conventional Commits message format
+#
+# Installed automatically by cargo-husky into `.git/hooks/` the first time
+# `cargo test` runs; the source of truth is this file in `.cargo-husky/hooks/`.
+#
+# Skip installation with CARGO_HUSKY_DONT_INSTALL_HOOKS=true, or bypass once
+# with `git commit --no-verify` (not recommended).
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 0
+
+# Drop comment lines, then check only the first line (the subject)
+subject=$(sed -e '/^#/d' "$msg_file" | sed -n '1p')
+
+# Empty message (e.g. auto-generated merge commits) passes
+[ -n "$subject" ] || exit 0
+
+# Auto/special commits pass
+case "$subject" in
+  Merge* | Revert* | fixup!* | squash!* | release:*) exit 0 ;;
+esac
+
+# Conventional Commits: type(optional scope)!: description
+if ! printf '%s\n' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_.-]+\))?!?: .+'; then
+  echo "Not a Conventional Commits message:" >&2
+  echo "    $subject" >&2
+  echo "  Format: type(optional scope)!: description" >&2
+  echo "  Types: feat fix docs style refactor perf test build ci chore revert" >&2
+  echo "  Examples: feat: add enrollment retry" >&2
+  echo "            fix(proto): close stream on EOF" >&2
+  echo "            feat(api)!: drop v1 handshake" >&2
+  exit 1
+fi
+
+exit 0
