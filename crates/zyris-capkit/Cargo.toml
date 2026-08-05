@@ -39,6 +39,10 @@ terminal = ["dep:portable-pty", "dep:tokio", "dep:bytes", "dep:futures-util", "d
 screen = ["dep:xcap", "dep:image", "dep:tokio", "dep:libwayshot"]
 input = ["dep:enigo", "dep:tokio"]
 input-wayland = ["input", "enigo/wayland", "enigo/platform_specific"]
+# libei(RemoteDesktop portal) 백엔드: GNOME/KDE Wayland에서 XTEST가 mutter에
+# 무시되므로, 그 세션들의 유일하게 동작하는 입력 경로다. Windows/macOS 빌드에는
+# 영향 없음 — reis/ashpd 의존성은 enigo 쪽에서 unix 전용으로 선언돼 있다.
+input-libei = ["input", "enigo/libei", "enigo/smol", "enigo/platform_specific"]
 desktop = ["screen", "input"]
 
 [dev-dependencies]

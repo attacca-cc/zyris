@@ -50,6 +50,25 @@ pub struct EnigoInput {
     displays: Arc<dyn Displays>,
 }
 
+/// 세션에 맞는 [`Settings`].
+///
+/// Linux Wayland 세션에서 `input-libei`로 빌드되면 X11 백엔드를 끈다:
+/// Xwayland의 XTEST 입력은 GNOME/KDE(mutter/kwin)에서 조용히 버려지므로, X11을
+/// 켜 두면 enigo가 libei 대신 X11을 골라 모든 입력이 no-op이 된다. X11을
+/// 꺼 두면 wlroots 컴포지터에서는 Wayland 백엔드가, GNOME/KDE에서는 libei
+/// (RemoteDesktop 포털)가 선택된다. X11 세션이나 `input-libei` 없는 빌드에서는
+/// 기본값 그대로다.
+#[cfg(feature = "input")]
+pub fn settings_for_session(restore_token: Option<String>) -> Settings {
+    let mut settings = Settings::default();
+    #[cfg(all(feature = "input-libei", target_os = "linux"))]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        settings.x11_display = Some(String::new());
+    }
+    settings.restore_token = restore_token;
+    settings
+}
+
 impl EnigoInput {
     /// Connect to the display server.
     ///
@@ -59,7 +78,7 @@ impl EnigoInput {
     /// `displays` is what [`Input::move_to`] resolves its `display` argument against —
     /// [`HostDisplays`](crate::HostDisplays) with the `screen` feature, or any [`Displays`].
     pub fn new(displays: impl Displays) -> zyris::Result<Self> {
-        Self::with_settings(&Settings::default(), displays)
+        Self::with_settings(&settings_for_session(None), displays)
     }
 
     pub fn with_settings(settings: &Settings, displays: impl Displays) -> zyris::Result<Self> {
@@ -73,6 +92,16 @@ impl EnigoInput {
             enigo: Arc::new(Mutex::new(enigo)),
             displays: Arc::new(displays),
         })
+    }
+
+    /// 마지막 RemoteDesktop 포털 연결의 restore token.
+    ///
+    /// 첫 연결에서 사용자가 포털 허용 다이얼로그를 승인하면 enigo가 이 토큰을
+    /// 돌려준다. 저장해 두고 다음 연결에서 [`settings_for_session`]로 넘기면
+    /// 다이얼로그 없이 재사용된다. `input-libei` 없이 빌드되면 존재하지 않는다.
+    #[cfg(feature = "input-libei")]
+    pub fn restore_token(&self) -> Option<String> {
+        self.enigo.lock().ok()?.restore_token()
     }
 
     async fn with<F>(&self, f: F) -> zyris::Result<()>
@@ -193,15 +222,6 @@ fn move_on_output(enigo: &mut Enigo, display: &Display, x: i32, y: i32) -> zyris
     }
 }
 
-/// The session enigo is driving, not the one the screen backend picked. Compiling the
-/// `wlr-virtual-*` path in is half the answer; there also has to be a compositor to talk to, since
-/// the same build falls back to XTEST under X11. Same probe
-/// [`ScreenBackend::detect`](crate::ScreenBackend::detect) uses.
-#[cfg(feature = "input-wayland")]
-fn on_wayland() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
-}
-
 #[zyris::async_trait]
 impl Input for EnigoInput {
     async fn type_text(&self, text: String) -> zyris::Result<()> {
@@ -243,7 +263,12 @@ impl Input for EnigoInput {
         self.with(move |enigo| {
             let layout = displays.displays()?;
             #[cfg(feature = "input-wayland")]
-            if on_wayland() {
+            // enigo opens its Wayland connection only when the compositor actually offers the
+            // `wlr-virtual-*` protocols (wlroots sessions). GNOME/mutter does not, so the
+            // connection is `None` there and `outputs()` is empty — gate on the real connection,
+            // not on `WAYLAND_DISPLAY` being set, or `move_on_output` fails with "no wayland
+            // connection" while the XTEST fallback below would have worked fine.
+            if !enigo.outputs().is_empty() {
                 return move_on_output(enigo, local(&layout, &display, x, y)?, x, y);
             }
             let (x, y) = target(&layout, &display, x, y)?;
