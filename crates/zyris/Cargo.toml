@@ -49,3 +49,8 @@ persistence = []
 
 [dev-dependencies]
 tempfile.workspace = true
+# Installs the commit hook into `.git/hooks` the first time `cargo test` runs
+# (Rust counterpart of simple-git-hooks). Hook scripts live in `.cargo-husky/hooks/`;
+# the `commit-msg` one enforces Conventional Commits. Set
+# CARGO_HUSKY_DONT_INSTALL_HOOKS=true to skip installation.
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
