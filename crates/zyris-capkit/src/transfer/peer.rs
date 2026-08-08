@@ -1,8 +1,9 @@
-//! `peer_transfer`의 참조 구현. 한 타입이 양쪽 역할을 다 한다 — 보내는 쪽은 `pull`에 답하고,
-//! 받는 쪽은 `push_offer`에 답한다.
+//! Reference implementation of `peer_transfer`. One type plays both roles — the sending side
+//! answers `pull`, the receiving side answers `push_offer`.
 //!
-//! **무결성은 여기서 한다.** 엔진의 `s_end.trailer.sha256`은 받는 쪽이 버리므로(connection.rs가
-//! `Envelope::SEnd { stream, .. }`로 구조분해한다) 믿을 수 없다.
+//! **Integrity is verified here.** The engine's `s_end.trailer.sha256` is discarded by the
+//! receiving side (`connection.rs` destructures `Envelope::SEnd { stream, .. }`), so it cannot be
+//! trusted.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,11 +52,12 @@ struct 보낼_것 {
     sha256: String,
 }
 
-/// **손잡이는 나중에 꽂는다.** 받는 쪽이 `pull`을 되부르려면 `PeerTransferClient`가 있어야
-/// 하는데, 그것은 `Node::accept`가 끝나고 상대가 capability를 announce한 뒤에야 생긴다.
-/// 그런데 `Node`를 만들려면 이 구조체가 **먼저** 있어야 한다 — 순환이다. 그래서 `peer`는
-/// 내부 가변이고 `set_peer`가 나중에 채운다. 이 순서를 모르고 생성자 인자로 만들려 하면
-/// 컴파일이 안 되는 것이 아니라 배선이 불가능하다.
+/// **The handle is plugged in later.** For the receiving side to call `pull` back, it needs a
+/// `PeerTransferClient` — but that only exists after `Node::accept` returns and the peer
+/// announces its capability. Building the `Node`, though, requires this struct to exist
+/// **first** — a cycle. So `peer` is interior-mutable and `set_peer` fills it in afterward. Get
+/// this ordering wrong and try to take it as a constructor argument instead, and the problem
+/// isn't a compile error — the wiring is simply impossible.
 #[derive(Clone)]
 pub struct LocalPeerTransfer {
     config: TransferConfig,
@@ -67,7 +69,7 @@ pub struct LocalPeerTransfer {
 }
 
 impl LocalPeerTransfer {
-    /// 받는 쪽. 손잡이는 `set_peer`로 나중에 꽂는다.
+    /// The receiving side. The handle is plugged in later via `set_peer`.
     pub fn receiver_pending(config: TransferConfig, peer_slug: String) -> LocalPeerTransfer {
         LocalPeerTransfer {
             config,
@@ -77,8 +79,9 @@ impl LocalPeerTransfer {
         }
     }
 
-    /// 상대에게 `pull`을 부를 손잡이를 꽂는다. 두 번째 호출은 조용히 무시된다 — 한 연결에
-    /// 손잡이는 하나뿐이고, 덮어쓸 수 있으면 그것이 곧 갈아 끼우는 자리가 된다.
+    /// Plugs in the handle used to call `pull` on the peer. A second call is silently ignored —
+    /// a connection has exactly one handle, and if it could be overwritten that would just
+    /// become the slot swapped in instead.
     pub fn set_peer(&self, client: PeerTransferClient) {
         let _ = self.peer.set(client);
     }
@@ -92,7 +95,8 @@ impl LocalPeerTransfer {
         }
     }
 
-    /// 보내는 쪽이 무엇을 내줄지 예약한다. `send_to`가 `push_offer` 직전에 부른다.
+    /// Reserves what the sending side will hand out. `send_to` calls this right before
+    /// `push_offer`.
     pub async fn offer_file(&self, transfer_id: String, path: PathBuf, size: u64, sha256: String) {
         self.pending.lock().await.push(보낼_것 { transfer_id, path, size, sha256 });
     }
@@ -130,8 +134,20 @@ impl PeerTransfer for LocalPeerTransfer {
             .retriable(false));
         }
 
-        // 임시 파일은 같은 디렉터리 안이어야 rename이 원자적이다.
-        let 임시 = 목적지.with_extension("part");
+        // 임시 파일은 같은 디렉터리 안이어야 rename이 원자적이다. `with_extension`은 확장자를
+        // **바꾸는** 것이라 여기 쓰면 안 된다 — `a.txt`와 `a.bin`이 같은 `a.part`를 공유하고,
+        // 제안된 이름이 이미 `.part`로 끝나면(`x.part`) 임시 경로가 목적지 자신과 같아진다.
+        // 파일 이름 뒤에 `.part`를 **덧붙인다.** `file_name()`이 `None`일 일은 없다 —
+        // `목적지`는 `Inbox::resolve`가 `safe_name`을 거쳐 만든 경로라 항상 마지막 조각이
+        // 있지만, 혹시라도 없다면 패닉 대신 "file"로 대체한다.
+        let 임시 = {
+            let mut 이름 = 목적지
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_else(|| std::ffi::OsString::from("file"));
+            이름.push(".part");
+            목적지.with_file_name(이름)
+        };
         // `Inbox::resolve`가 확인한 것은 `목적지`뿐이다 — `.part`는 그 확인을 거치지 않은
         // 별도 경로다. 부모 디렉터리는 `resolve`가 이미 걸어서 심링크가 아님을 확인했으니
         // 안전하고(실제_부모), 마지막 조각인 `임시` 자체만 여기서 다시 본다. 확인하지 않고
@@ -145,8 +161,13 @@ impl PeerTransfer for LocalPeerTransfer {
                 .retriable(false));
             }
         }
-        let 받은_offset = tokio::fs::metadata(&임시).await.map(|m| m.len()).unwrap_or(0);
-        let 받은_offset = if 받은_offset > offer.size { 0 } else { 받은_offset };
+        let 파일_길이 = tokio::fs::metadata(&임시).await.map(|m| m.len()).unwrap_or(0);
+        // 부스러기가 이번 offer보다 크면 이어받을 수 없다 — 처음부터 다시 받는다. 되돌리는
+        // 것은 이 판단(오프셋)뿐이면 안 된다. 파일 자체를 비우지 않고 `.append(true)`로 열면
+        // 새 바이트가 부스러기 **뒤에** 그대로 붙는다 — 해시기는 새로 받은 바이트만 보므로
+        // sha256 대조는 통과하는데 디스크에는 검증한 것과 다른 파일이 남는다. 그래서 오프셋을
+        // 0으로 되돌리는 자리에서 열기 모드도 함께 truncate로 바꾼다(아래).
+        let 받은_offset = if 파일_길이 > offer.size { 0 } else { 파일_길이 };
 
         let mut 스트림 = peer.pull(offer.transfer_id.clone(), 받은_offset).await?;
         if 스트림.head.sha256 != offer.sha256 || 스트림.head.size != offer.size {
@@ -157,16 +178,31 @@ impl PeerTransfer for LocalPeerTransfer {
 
         let mut 해시기 = Sha256::new();
         if 받은_offset > 0 {
-            // 이어받기라면 이미 받아 둔 부분을 다시 읽어 해시에 넣는다.
-            let 앞부분 = tokio::fs::read(&임시).await.map_err(io_오류)?;
-            해시기.update(&앞부분);
+            // 이어받기라면 이미 받아 둔 부분을 다시 읽어 해시에 넣는다. 통째로 `Vec`에
+            // 올리면 상한(기본 8 GiB)까지 그대로 할당된다 — 고정 크기 버퍼로 반복 read하며
+            // 해시에만 먹인다.
+            use tokio::io::AsyncReadExt as _;
+            let mut 이미_받은 =
+                임시_열기_바탕().read(true).open(&임시).await.map_err(io_오류)?;
+            let mut 버퍼 = vec![0u8; 청크];
+            loop {
+                let n = 이미_받은.read(&mut 버퍼).await.map_err(io_오류)?;
+                if n == 0 {
+                    break;
+                }
+                해시기.update(&버퍼[..n]);
+            }
         }
-        let mut 파일 = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&임시)
-            .await
-            .map_err(io_오류)?;
+        let mut 열기 = 임시_열기_바탕();
+        열기.create(true);
+        if 받은_offset > 0 {
+            열기.append(true);
+        } else {
+            // 이어받는 게 아니면 있던 내용은 부스러기다 — 비우고 새로 쓴다. `append`로 열면
+            // 그 부스러기가 그대로 남아 새 바이트 앞에 눌러앉는다.
+            열기.write(true).truncate(true);
+        }
+        let mut 파일 = 열기.open(&임시).await.map_err(io_오류)?;
 
         use tokio::io::AsyncWriteExt;
         let mut 쓴_바이트 = 받은_offset;
@@ -276,6 +312,17 @@ impl PeerTransfer for LocalPeerTransfer {
 
 fn io_오류(e: std::io::Error) -> WireError {
     WireError::new(ErrorCode::Internal, e.to_string())
+}
+
+/// `임시`(`.part`)를 열 때 쓰는 `OpenOptions` 바탕. unix에서는 `O_NOFOLLOW`를 얹어 마지막
+/// 조각이 심링크면 열기 자체가 실패하게 한다. 앞선 `symlink_metadata` 사전 검사와 이 열기
+/// 사이에는 여전히 좁은 창이 있다(검사 뒤·열기 전에 누가 심링크를 심으면) — 이 플래그가
+/// 그 창을 마저 닫는다. windows에는 상응하는 플래그가 없어 사전 검사만으로 방어한다.
+fn 임시_열기_바탕() -> tokio::fs::OpenOptions {
+    let mut 옵션 = tokio::fs::OpenOptions::new();
+    #[cfg(unix)]
+    옵션.custom_flags(libc::O_NOFOLLOW);
+    옵션
 }
 
 fn 지금_ms() -> u64 {
