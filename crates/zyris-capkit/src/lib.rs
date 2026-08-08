@@ -74,6 +74,9 @@ pub use screen::{HostDisplays, HostScreenCapture, ScreenBackend};
 #[cfg(feature = "screen")]
 pub use xcap::{self, image};
 
+#[cfg(feature = "transfer")]
+pub mod transfer;
+
 #[cfg(feature = "input")]
 mod chord;
 #[cfg(feature = "input")]
