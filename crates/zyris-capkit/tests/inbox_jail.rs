@@ -47,6 +47,23 @@ async fn 부모가_심링크면_거부한다() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn 루트의_조상이_심링크여도_통과한다() {
+    // macOS의 /var → /private/var, 심링크로 된 홈 디렉터리처럼 inbox 자체나 그 조상이
+    // 심링크인 것은 받는 사람의 설정이지 공격이 아니다. 걷기가 canonicalize한 기준으로
+    // 시작하면 strip_prefix가 실패해 파일시스템 루트부터 다시 걷게 되고, 그 과정에서
+    // inbox 바깥의 심링크 조상까지 걸려 정상 요청이 거부된다 — 그걸 여기서 막는다.
+    let 진짜 = tempfile::tempdir().unwrap();
+    let 링크_담을_곳 = tempfile::tempdir().unwrap();
+    let 링크 = 링크_담을_곳.path().join("inbox-link");
+    std::os::unix::fs::symlink(진짜.path(), &링크).unwrap();
+
+    let inbox = Inbox::new(&링크);
+    let 결과 = inbox.resolve("peer", "a.txt").await;
+    assert!(결과.is_ok(), "실제: {결과:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn 목적지_자체가_심링크여도_거부한다() {
     let (자리, inbox) = 임시_inbox();
     let 밖 = tempfile::tempdir().unwrap();
