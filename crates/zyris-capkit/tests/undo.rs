@@ -103,3 +103,47 @@ async fn 심링크는_rename이_안_되면_복사하지_않고_포기한다() {
     assert!(결과.is_none(), "심링크는 copy로 옮기면 가리키는 내용이 새어 나간다");
     assert!(희생자.exists(), "포기했으면 심링크는 그대로 남아 있어야 한다");
 }
+
+#[tokio::test]
+async fn 자리가_이미_있으면_다음_순번으로_넘어간다() {
+    // 순번(`AtomicU64`)은 프로세스 안에서만 유일하다 — 다른 프로세스가 같은 undo 루트에
+    // 같은 밀리초·같은 순번으로 이미 자리를 만들어 둔 상황은 같은 프로세스 안에서 순번을
+    // 미리 소진시키는 식으로는 재현되지 않는다(카운터가 계속 앞으로 갈 뿐이다). 대신 "다른
+    // 프로세스"가 이미 자리를 차지해 둔 것을 디렉터리로 직접 흉내 낸다: store를 한 번 먼저
+    // 돌려 실제로 쓸 자리 이름을 알아낸 뒤, 바로 다음 자리를 미리 만들어 둔다.
+    let 보관 = tempfile::tempdir().unwrap();
+    let 작업 = tempfile::tempdir().unwrap();
+    let now_ms = 20_260_809_000; // 이 파일의 다른 테스트와 안 겹치는 임의의 값.
+
+    let 미끼_희생자 = 작업.path().join("미끼.pdf");
+    tokio::fs::write(&미끼_희생자, "미끼".as_bytes()).await.unwrap();
+    let store = UndoStore::new(보관.path());
+    let 미끼_자리 = store.stash(&미끼_희생자, now_ms).await.unwrap();
+
+    // 미끼가 실제로 쓴 자리 바로 다음 이름을, "다른 프로세스가 이미 써 둔 백업"처럼
+    // 미리 만들어 둔다.
+    let 미끼_부모 = 미끼_자리.parent().unwrap();
+    let 미끼_부모_이름 = 미끼_부모.file_name().unwrap().to_str().unwrap();
+    let (ms_부분, 순번_부분) = 미끼_부모_이름.rsplit_once('-').unwrap();
+    let 다음_순번: u64 = 순번_부분.parse().unwrap();
+    let 남의_자리 = 보관.path().join(format!("{ms_부분}-{}", 다음_순번 + 1));
+    tokio::fs::create_dir_all(&남의_자리).await.unwrap();
+    let 남의_파일 = 남의_자리.join("이미있음.txt");
+    tokio::fs::write(&남의_파일, "다른 프로세스의 백업".as_bytes()).await.unwrap();
+
+    let 진짜_희생자 = 작업.path().join("진짜.pdf");
+    tokio::fs::write(&진짜_희생자, "진짜 내용".as_bytes()).await.unwrap();
+    let 진짜_자리 = store.stash(&진짜_희생자, now_ms).await.unwrap();
+
+    assert_ne!(
+        진짜_자리.parent().unwrap(),
+        남의_자리,
+        "이미 있는 자리를 그대로 밀고 들어가면 안 된다 — 다음 순번으로 넘어가야 한다"
+    );
+    assert_eq!(
+        tokio::fs::read(&남의_파일).await.unwrap(),
+        "다른 프로세스의 백업".as_bytes(),
+        "남의 백업이 지워지거나 덮이면 안 된다"
+    );
+    assert_eq!(tokio::fs::read(&진짜_자리).await.unwrap(), "진짜 내용".as_bytes());
+}

@@ -284,3 +284,190 @@ async fn audit이_설정되면_전송_한_줄이_남는다() {
         serde_json::from_str(줄들[0]).expect("감사 줄이 파싱 가능한 JSON이어야 한다");
     assert_eq!(파싱["written"], 결과.written);
 }
+
+/// 리뷰 F2: `with_extension("part")`는 확장자를 **바꾼다** — 제안된 이름이 이미 `.part`로
+/// 끝나면 임시 경로와 목적지가 같은 자리가 된다. 그러면 이미 있던 파일이 "이어받기 부스러기"로
+/// 오인되고, 실패 정리(`remove_file`)가 곧 목적지 자체를 지운다.
+#[tokio::test]
+async fn 이름이_이미_part로_끝나도_임시_경로가_목적지와_안_겹친다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 새_내용 = "BRAND-NEW-CONTENT".as_bytes().to_vec();
+    let 원본 = 원본_자리.path().join("x.part");
+    tokio::fs::write(&원본, &새_내용).await.unwrap();
+
+    // 받는 쪽에 같은 이름의 파일이 이미 있다 — 이번 전송과는 무관한 옛 내용이다.
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    tokio::fs::write(받는_자리.path().join("a").join("x.part"), "OLD-ORIGINAL".as_bytes())
+        .await
+        .unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("t7", &원본, 새_내용.len() as u64, &해시(&새_내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "t7".into(),
+            name: "x.part".into(),
+            size: 새_내용.len() as u64,
+            sha256: 해시(&새_내용),
+            overwrite: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 새_내용);
+    assert_eq!(결과.sha256, 해시(&새_내용));
+    assert!(결과.replaced);
+    let 되돌릴_것 = 결과.undo.expect("덮었으면 되돌림 자리가 있어야 한다 — 임시가 목적지와 겹치면 안 생긴다");
+    assert_eq!(tokio::fs::read(&되돌릴_것).await.unwrap(), "OLD-ORIGINAL".as_bytes());
+}
+
+/// 리뷰 F1(Critical): 남은 `.part`가 이번 offer의 크기보다 크면 offset은 0으로 되돌리면서도
+/// 파일 자체는 지우지도 자르지도 않았다 — `.append(true)`로 열어서 새 바이트를 부스러기
+/// **뒤에** 이어 붙였다. 해시기는 새로 받은 바이트만 보므로 sha256 대조는 통과하고, 디스크에는
+/// 검증한 것과 다른 파일이 남는다.
+#[tokio::test]
+async fn 이어받기_부스러기가_offer보다_크면_지우고_처음부터_받는다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 내용 = "NEW".as_bytes().to_vec();
+    let 원본 = 원본_자리.path().join("data.txt");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    // 받는 쪽에 이번 전송과 무관한, offer.size(3바이트)보다 훨씬 큰 부스러기 `.part`가
+    // 이미 있다 — 예를 들어 예전의 큰 전송이 끊긴 자리다.
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    tokio::fs::write(
+        받는_자리.path().join("a").join("data.txt.part"),
+        "STALE-GARBAGE-LONGER-THAN-NEW".as_bytes(),
+    )
+    .await
+    .unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("t8", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "t8".into(),
+            name: "data.txt".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(결과.bytes, 내용.len() as u64);
+    assert_eq!(결과.sha256, 해시(&내용));
+    assert_eq!(
+        tokio::fs::read(&결과.written).await.unwrap(),
+        내용,
+        "부스러기가 앞에 그대로 남아 다른 파일이 되면 안 된다"
+    );
+}
+
+/// 리뷰 F4: 이어받기 앞부분을 통째로 메모리에 올리면 상한(기본 8 GiB)까지 그대로 할당된다 —
+/// 이 머신(RAM 3.6GB)에서는 재개 한 번이 OOM이다. 정확성만으로는 통짜 읽기와 청크 재해시를
+/// 구분할 수 없으니(둘 다 같은 바이트를 같은 순서로 해시에 넣는다), 이 테스트는 "결과가
+/// 옳다"만 본다 — 메모리 사용량 자체은 코드 리뷰(고정 크기 버퍼로 반복 read하는지)로 확인한다.
+/// F2가 고쳐지기 전에는 `.part` 이름이 달라 이 경로를 아예 타지 않았다(리뷰 F3) — 지금은
+/// `resume.bin.part`가 실제로 이어받기 시작점으로 쓰인다.
+#[tokio::test]
+async fn 이어받기_앞부분과_나머지가_합쳐져_원본과_같아진다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 내용 = "가나다라마바사아자차카타파하".repeat(50).into_bytes();
+    let 원본 = 원본_자리.path().join("resume.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    let 이미_받은_길이 = 내용.len() / 3;
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    tokio::fs::write(받는_자리.path().join("a").join("resume.bin.part"), &내용[..이미_받은_길이])
+        .await
+        .unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("t9", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "t9".into(),
+            name: "resume.bin".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(결과.bytes, 내용.len() as u64);
+    assert_eq!(결과.sha256, 해시(&내용));
+    assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
+}
+
+/// 리뷰 3-2: `.part` 자리는 `Inbox::resolve`의 확인 밖이다(그건 `목적지`만 본다). 거기 미리
+/// 심어 둔, 감옥 밖 표적을 가리키는 심링크를 push_offer가 거부해야 하고 표적은 손대지 않아야
+/// 한다. 사전 검사(`symlink_metadata`)와 `O_NOFOLLOW`(unix) 두 겹이 이걸 막는다.
+#[cfg(unix)]
+#[tokio::test]
+async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건드린다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 표적_자리 = tempfile::tempdir().unwrap();
+    let 표적 = 표적_자리.path().join("victim.txt");
+    tokio::fs::write(&표적, "UNTOUCHED").await.unwrap();
+
+    let 내용 = "payload".as_bytes().to_vec();
+    let 원본 = 원본_자리.path().join("linked.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    // `.part` 자리에 감옥 밖(표적)을 가리키는 심링크를 미리 심어 둔다.
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    std::os::unix::fs::symlink(&표적, 받는_자리.path().join("a").join("linked.bin.part")).unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("t10", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "t10".into(),
+            name: "linked.bin".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        })
+        .await;
+
+    assert!(결과.is_err(), "임시 자리가 심링크인데 성공했다");
+    assert_eq!(tokio::fs::read(&표적).await.unwrap(), b"UNTOUCHED");
+}
