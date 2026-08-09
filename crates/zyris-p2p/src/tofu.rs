@@ -102,7 +102,11 @@ impl TofuStore {
     /// cost (the default is 5s) on every run; production callers should leave this alone.
     #[doc(hidden)]
     pub fn with_lock_timeout(mut self, timeout: Duration) -> TofuStore {
-        self.lock_acquire_timeout = timeout;
+        // Clamped, not passed through as-is: `tokio::time::Instant::now() + timeout` panics
+        // for something like `Duration::MAX`. This is `#[doc(hidden)]`, but it is still `pub`
+        // — a bad argument from a caller (test or otherwise) should get a store with a very
+        // long timeout, not a panic. An hour is far past anything a real wait should need.
+        self.lock_acquire_timeout = timeout.min(Duration::from_secs(3600));
         self
     }
 
@@ -473,6 +477,10 @@ thread_local! {
 }
 
 fn current_nanos() -> u32 {
+    // Gated on `#[cfg(test)]`, same as `TEST_NANOS_OVERRIDE`'s declaration above: this branch
+    // does not exist in a release build, so outside `cargo test` this function is always the
+    // real `SystemTime` read below — including for the lock nonce in `acquire_lock_file`,
+    // which calls this same function. There is no seam in the production nonce path.
     #[cfg(test)]
     if let Some(nanos) = TEST_NANOS_OVERRIDE.with(|cell| cell.get()) {
         return nanos;
@@ -489,27 +497,43 @@ mod tests {
 
     /// `acquire_lock_file` must not return until the nonce it wrote is actually readable back
     /// off disk — `tokio::fs::File::write_all` alone does not guarantee that (see the comment
-    /// at its call site). Without the `flush()` there, this failed 3 of 400 real pins measured
-    /// through the public API; here it is deterministic: the nonce is either there or it
-    /// is not, no repetition needed.
+    /// at its call site).
+    ///
+    /// **This is a repeated sample, not a deterministic assertion, on purpose.** Any single
+    /// iteration only has roughly even odds of catching the missing flush: measured at 30/30
+    /// in isolation but 18/30 (60%) under full-suite contention for one earlier version of
+    /// this test, and independently reproduced at 29/30 and 16/30 by a reviewer. A *reliably
+    /// deterministic* single-shot reproduction would need the blocking pool starved between
+    /// the lock file's `open` and its `write` inside `acquire_lock_file` — reachable only
+    /// through a production seam (none exists, and none should just for this) or by coupling
+    /// this test to tokio's undocumented internal queue behavior. Neither is worth it. Looping
+    /// over enough independent attempts instead makes the aggregate catch rate the guarantee:
+    /// at even a pessimistic 50% per-iteration rate, missing all of many dozen in a row is
+    /// astronomically unlikely, and 0 misses out of many dozen is the expected result once the
+    /// flush actually makes the guarantee synchronous instead of probabilistic. Each iteration
+    /// uses its own fresh directory and path — a loop over one shared lock file would just
+    /// serialize the iterations against each other instead of independently resampling the
+    /// same race.
     #[tokio::test]
     async fn the_lock_nonce_is_readable_immediately_after_acquiring() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("peers.json");
-        let store = TofuStore::new(&path);
-        store.ensure_parent_dir().await.unwrap();
+        for i in 0..64 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("peers.json");
+            let store = TofuStore::new(&path);
+            store.ensure_parent_dir().await.unwrap();
 
-        let lock = store.acquire_lock_file().await.unwrap();
-        // A synchronous read on this same thread, not `tokio::fs::read`: dispatching a
-        // second task to the blocking pool for the read gives the write's own already
-        // in-flight blocking-pool task incidental extra time to finish first, which was
-        // masking the race in earlier testing. This is what actually exposes it reliably.
-        let on_disk = std::fs::read(&lock.path).unwrap();
-        assert_eq!(
-            on_disk,
-            lock.nonce.as_bytes(),
-            "the nonce was not on disk immediately after acquire_lock_file returned"
-        );
+            let lock = store.acquire_lock_file().await.unwrap();
+            // A synchronous read on this same thread, not `tokio::fs::read`: dispatching a
+            // second task to the blocking pool for the read gives the write's own already
+            // in-flight blocking-pool task incidental extra time to finish first, which was
+            // masking the race in earlier testing.
+            let on_disk = std::fs::read(&lock.path).unwrap();
+            assert_eq!(
+                on_disk,
+                lock.nonce.as_bytes(),
+                "iteration {i}: the nonce was not on disk immediately after acquire_lock_file returned"
+            );
+        }
     }
 
     /// `LockFile::drop` must only remove the lock file if it still holds this guard's own
