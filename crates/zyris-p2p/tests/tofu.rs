@@ -1,7 +1,15 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use zyris_p2p::fingerprint::PeerConfirmer;
+use zyris_p2p::fingerprint::{fingerprint, PeerConfirmer};
 use zyris_p2p::tofu::{TofuError, TofuStore};
+
+/// A fresh, genuinely valid `EndpointId` string. Needed anywhere a test drives `authorize`
+/// down the unknown-peer path, since that path calls `fingerprint`, which (correctly) rejects
+/// anything that does not parse as a real key — placeholder strings like `"key-1"` are fine for
+/// `check`/`pin_preapproved` (which never parse their `endpoint_id`) but not here.
+fn fresh_endpoint_id() -> String {
+    iroh::SecretKey::generate().public().to_string()
+}
 
 #[tokio::test]
 async fn an_unknown_peer_passes() {
@@ -14,7 +22,7 @@ async fn an_unknown_peer_passes() {
 async fn the_same_key_passes_after_pinning() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
     assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
@@ -22,7 +30,7 @@ async fn the_same_key_passes_after_pinning() {
 async fn a_changed_key_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
     match store.check("kitchen-pi", "key-2").await {
         Err(TofuError::Changed { pinned, offered }) => {
@@ -37,7 +45,7 @@ async fn a_changed_key_is_refused() {
 async fn the_pin_survives_a_new_store_instance() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peers.json");
-    TofuStore::new(&path).pin("kitchen-pi", "key-1").await.unwrap();
+    TofuStore::new(&path).pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
     // A fresh instance: this has to come off disk.
     let result = TofuStore::new(&path).check("kitchen-pi", "key-2").await;
@@ -48,13 +56,13 @@ async fn the_pin_survives_a_new_store_instance() {
 async fn pinning_twice_keeps_the_first_key() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
-    // `pin` keeps the first value. If a later call could overwrite it, pinning would
-    // mean nothing — the substitution we are trying to catch would pin itself. The second
-    // call must also *report* the mismatch, not just refuse to act on it — a caller that
-    // pins without calling `check` first must still learn a substitution was attempted.
-    let result = store.pin("kitchen-pi", "key-2").await;
+    // `pin_preapproved` keeps the first value. If a later call could overwrite it, pinning
+    // would mean nothing — the substitution we are trying to catch would pin itself. The
+    // second call must also *report* the mismatch, not just refuse to act on it — a caller
+    // that pins without calling `check` first must still learn a substitution was attempted.
+    let result = store.pin_preapproved("kitchen-pi", "key-2").await;
     match result {
         Err(TofuError::Changed { pinned, offered }) => {
             assert_eq!(pinned, "key-1");
@@ -70,11 +78,11 @@ async fn pinning_twice_keeps_the_first_key() {
 async fn re_pinning_the_identical_key_is_a_silent_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
     // Only a re-pin of the *same* key is a true no-op — this is not a substitution attempt,
     // so it must not be reported as one.
-    assert!(store.pin("kitchen-pi", "key-1").await.is_ok());
+    assert!(store.pin_preapproved("kitchen-pi", "key-1").await.is_ok());
     assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
@@ -102,7 +110,7 @@ async fn a_corrupt_pin_file_fails_closed() {
 
     for (name, content) in bad_contents {
         let store = TofuStore::new(&path);
-        store.pin("kitchen-pi", "key-1").await.unwrap();
+        store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
         tokio::fs::write(&path, content).await.unwrap();
 
         // Treating an unreadable ledger as "nothing is pinned" would let anyone erase every
@@ -122,8 +130,8 @@ async fn a_corrupt_pin_file_fails_closed() {
 async fn pinning_a_second_peer_keeps_the_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("garage-cam", "key-a").await.unwrap();
-    store.pin("kitchen-pi", "key-b").await.unwrap();
+    store.pin_preapproved("garage-cam", "key-a").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-b").await.unwrap();
 
     assert!(matches!(store.check("garage-cam", "other").await, Err(TofuError::Changed { .. })));
     assert!(matches!(store.check("kitchen-pi", "other").await, Err(TofuError::Changed { .. })));
@@ -148,7 +156,7 @@ async fn concurrent_pins_all_survive() {
             // mutex.
             let store = TofuStore::new(&path);
             tasks.push(tokio::spawn(async move {
-                store.pin(&format!("gadget-{i}"), &format!("key-{i}")).await.unwrap();
+                store.pin_preapproved(&format!("gadget-{i}"), &format!("key-{i}")).await.unwrap();
             }));
         }
         for t in tasks {
@@ -173,7 +181,7 @@ async fn pinning_into_a_missing_parent_directory_creates_it() {
     let path = dir.path().join("nested").join("deeper").join("peers.json");
     let store = TofuStore::new(&path);
 
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
     assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 
     #[cfg(unix)]
@@ -213,7 +221,7 @@ async fn a_stale_lock_file_is_broken_and_the_pin_succeeds() {
     // A lock left behind by a dead writer (killed, crashed, OOM-reaped) must not block every
     // later pin forever — this machine runs earlyoom and systemd-oomd for exactly that
     // reason, so it is not hypothetical here.
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
     assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
@@ -231,7 +239,7 @@ async fn a_fresh_lock_file_is_not_broken_and_the_pin_fails() {
     let store = TofuStore::new(&path).with_lock_timeout(std::time::Duration::from_millis(100));
     // A live writer's lock must never be stolen: this has to fail loudly, not proceed as if
     // no one held it and not silently drop the pin.
-    let result = store.pin("kitchen-pi", "key-1").await;
+    let result = store.pin_preapproved("kitchen-pi", "key-1").await;
     assert!(matches!(result, Err(TofuError::Io(_))), "got {result:?}");
 }
 
@@ -261,7 +269,7 @@ impl PeerConfirmer for StubConfirmer {
 async fn authorize_passes_a_known_matching_key_without_asking() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
     let confirmer = StubConfirmer::answering(true);
     let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
@@ -278,7 +286,7 @@ async fn authorize_passes_a_known_matching_key_without_asking() {
 async fn authorize_refuses_a_known_changed_key_without_asking() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("kitchen-pi", "key-1").await.unwrap();
+    store.pin_preapproved("kitchen-pi", "key-1").await.unwrap();
 
     // Answers `true` on purpose: even a confirmer that would say yes to anything must never
     // be given the chance here. A changed key on an already-pinned slug is exactly the
@@ -304,9 +312,10 @@ async fn authorize_refuses_a_known_changed_key_without_asking() {
 async fn authorize_asks_once_for_an_unknown_peer_and_does_not_pin_on_refusal() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
+    let offered = fresh_endpoint_id();
 
     let confirmer = StubConfirmer::answering(false);
-    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+    let result = store.authorize(&confirmer, "kitchen-pi", &offered).await;
 
     assert!(matches!(result, Err(TofuError::Refused { .. })), "got {result:?}");
     assert_eq!(confirmer.calls.load(Ordering::SeqCst), 1, "an unknown peer must be asked");
@@ -321,26 +330,119 @@ async fn authorize_asks_once_for_an_unknown_peer_and_does_not_pin_on_refusal() {
 async fn authorize_pins_an_unknown_peer_on_acceptance() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
+    let offered = fresh_endpoint_id();
 
     let confirmer = StubConfirmer::answering(true);
-    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+    let result = store.authorize(&confirmer, "kitchen-pi", &offered).await;
 
     assert!(result.is_ok(), "got {result:?}");
     assert_eq!(confirmer.calls.load(Ordering::SeqCst), 1);
-    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
+    assert!(store.check("kitchen-pi", &offered).await.is_ok());
     assert!(matches!(
-        store.check("kitchen-pi", "key-2").await,
+        store.check("kitchen-pi", "some-other-key").await,
         Err(TofuError::Changed { .. })
     ));
+}
+
+#[tokio::test]
+async fn authorize_with_deny_unknown_refuses_every_unknown_peer() {
+    // The carrying-item version of the above two: `DenyUnknown` is the fail-closed default a
+    // node with no human uses, and it should behave exactly like a `StubConfirmer` that always
+    // says no — refused, and nothing pinned.
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    let offered = fresh_endpoint_id();
+
+    let result = store.authorize(&zyris_p2p::fingerprint::DenyUnknown, "kitchen-pi", &offered).await;
+
+    assert!(matches!(result, Err(TofuError::Refused { .. })), "got {result:?}");
+    assert!(store.check("kitchen-pi", "anything-at-all").await.is_ok());
+}
+
+/// Captures exactly what `authorize` hands to `confirm` — the coverage gap the review round 1
+/// found: every other `authorize` test only checks *whether* the confirmer was called, never
+/// *what it was shown*. `fingerprint(peer_slug)` in place of `fingerprint(endpoint_id)`, or a
+/// hardcoded constant label, would have passed every test above without this one — a person
+/// would be shown a fingerprint that matches nothing about the actual offered key, compare it
+/// against itself, and approve a pin that vouches for nothing.
+struct RecordingConfirmer {
+    seen: std::sync::Mutex<Option<(String, String)>>,
+    answer: bool,
+}
+
+impl RecordingConfirmer {
+    fn answering(answer: bool) -> RecordingConfirmer {
+        RecordingConfirmer { seen: std::sync::Mutex::new(None), answer }
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerConfirmer for RecordingConfirmer {
+    async fn confirm(&self, label: &str, fingerprint: &str) -> bool {
+        *self.seen.lock().unwrap() = Some((label.to_string(), fingerprint.to_string()));
+        self.answer
+    }
+}
+
+#[tokio::test]
+async fn authorize_shows_the_confirmer_the_offered_keys_fingerprint_and_the_slug_as_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    let offered = fresh_endpoint_id();
+
+    let confirmer = RecordingConfirmer::answering(true);
+    store.authorize(&confirmer, "kitchen-pi", &offered).await.unwrap();
+
+    let (label, shown_fingerprint) =
+        confirmer.seen.lock().unwrap().clone().expect("confirm was never called");
+    assert_eq!(
+        label, "kitchen-pi",
+        "the label shown to a person must be the peer_slug, not anything else"
+    );
+    // Computed independently of whatever `authorize` did internally -- this is what actually
+    // pins down that the *offered key*, not the slug or a constant, is what got hashed.
+    assert_eq!(
+        shown_fingerprint,
+        fingerprint(&offered).unwrap(),
+        "the fingerprint shown to a person must be derived from the offered endpoint_id"
+    );
+}
+
+#[tokio::test]
+async fn authorize_fails_closed_on_a_corrupt_ledger_instead_of_prompting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.json");
+    let store = TofuStore::new(&path);
+    let pinned_key = fresh_endpoint_id();
+    let offered_key = fresh_endpoint_id();
+    store.pin_preapproved("kitchen-pi", &pinned_key).await.unwrap();
+
+    // The scenario the review flagged directly: an already-pinned slug, a corrupt ledger, and
+    // a different offered key. Treating an unreadable ledger as "no pins ever taken" here would
+    // turn a changed key on an already-pinned slug into a *prompt* -- exactly the substitution
+    // TOFU exists to refuse outright, turned into something a confused or rushed human could
+    // wave through.
+    tokio::fs::write(&path, b"{ this is not json").await.unwrap();
+
+    let confirmer = StubConfirmer::answering(true);
+    let result = store.authorize(&confirmer, "kitchen-pi", &offered_key).await;
+
+    assert!(matches!(result, Err(TofuError::Malformed { .. })), "got {result:?}");
+    assert_eq!(
+        confirmer.calls.load(Ordering::SeqCst),
+        0,
+        "a corrupt ledger must fail closed, never fall through to asking a human"
+    );
 }
 
 /// The confirmer itself pins a *different* key for the same slug while it is being asked —
 /// standing in for a second connection winning a race against a human still reading a
 /// fingerprint. This is only possible at all if `authorize` is not holding the in-process
-/// write lock while `confirm` runs: `TofuStore::pin` takes that same lock (via the shared
-/// `store.clone()` below), and `tokio::sync::Mutex` is not reentrant, so a lock held across
-/// `confirm` would make this nested `pin` call hang forever rather than complete — which the
-/// outer `timeout` turns into a clean test failure instead of a wedged test suite.
+/// write lock while `confirm` runs: `TofuStore::pin_preapproved` takes that same lock (via the
+/// shared `store.clone()` below), and `tokio::sync::Mutex` is not reentrant, so a lock held
+/// across `confirm` would make this nested `pin_preapproved` call hang forever rather than
+/// complete — which the outer `timeout` turns into a clean test failure instead of a wedged
+/// test suite.
 #[tokio::test]
 async fn authorize_does_not_hold_the_lock_while_waiting_on_a_confirmer() {
     struct RacingConfirmer {
@@ -350,7 +452,7 @@ async fn authorize_does_not_hold_the_lock_while_waiting_on_a_confirmer() {
     #[async_trait::async_trait]
     impl PeerConfirmer for RacingConfirmer {
         async fn confirm(&self, _label: &str, _fingerprint: &str) -> bool {
-            self.store.pin("kitchen-pi", "key-2").await.unwrap();
+            self.store.pin_preapproved("kitchen-pi", "key-2").await.unwrap();
             true
         }
     }
@@ -358,18 +460,20 @@ async fn authorize_does_not_hold_the_lock_while_waiting_on_a_confirmer() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
     let confirmer = RacingConfirmer { store: store.clone() };
+    let offered = fresh_endpoint_id();
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        store.authorize(&confirmer, "kitchen-pi", "key-1"),
+        store.authorize(&confirmer, "kitchen-pi", &offered),
     )
     .await
     .expect(
         "authorize hung waiting on its own lock — confirm must not run while a lock is held",
     );
 
-    // Our key lost the race: the confirmer's own pin landed key-2 first, so `pin`'s re-check
-    // inside `authorize` must catch the mismatch instead of overwriting it.
+    // Our key lost the race: the confirmer's own pin landed key-2 first, so
+    // `pin_preapproved`'s re-check inside `authorize` must catch the mismatch instead of
+    // overwriting it.
     assert!(matches!(result, Err(TofuError::Changed { ref pinned, .. }) if pinned == "key-2"), "got {result:?}");
 }
 
@@ -390,7 +494,7 @@ async fn authorize_does_not_hold_the_file_lock_while_waiting_on_a_confirmer() {
         async fn confirm(&self, _label: &str, _fingerprint: &str) -> bool {
             let racer = TofuStore::new(&self.path)
                 .with_lock_timeout(std::time::Duration::from_millis(500));
-            racer.pin("kitchen-pi", "key-2").await.unwrap_or_else(|e| {
+            racer.pin_preapproved("kitchen-pi", "key-2").await.unwrap_or_else(|e| {
                 panic!("a concurrent pin from a second process could not take the lock file: {e}")
             });
             true
@@ -401,7 +505,8 @@ async fn authorize_does_not_hold_the_file_lock_while_waiting_on_a_confirmer() {
     let path = dir.path().join("peers.json");
     let store = TofuStore::new(&path);
     let confirmer = RacingConfirmer { path };
+    let offered = fresh_endpoint_id();
 
-    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+    let result = store.authorize(&confirmer, "kitchen-pi", &offered).await;
     assert!(matches!(result, Err(TofuError::Changed { ref pinned, .. }) if pinned == "key-2"), "got {result:?}");
 }

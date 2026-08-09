@@ -5,10 +5,20 @@
 //! **once, never twice, and leaves a mark** — but only if the ledger is keyed on something
 //! attacca itself cannot re-mint.
 //!
-//! **The rule for the key `check`/`pin` take (`peer_slug`): it must be a name the *user*
-//! chose, and one that no server can re-issue.** That is the actual property — not a list of
-//! specific fields to avoid, because any string attacca hands us, however it is spelled, fails
-//! it the same way. Two are worth naming anyway, since they are the ones most likely to end up
+//! **`TofuStore::authorize` is the entry point.** `check` and `pin_preapproved` are the
+//! primitives it is built from — a read-only lookup and a write that never asks anyone — kept
+//! `pub` because a handful of callers legitimately need one without the other (see
+//! `pin_preapproved`'s own doc for exactly which). Reaching for them together instead of
+//! `authorize` silently rebuilds the pre-2.7 flow this module used to have, where an unknown
+//! peer got pinned on its first successful connection with no human ever asked. Nothing in this
+//! module can stop that at compile time — `check` then `pin_preapproved` typechecks fine — so
+//! the defense here is naming: `pin_preapproved` says out loud what the caller is asserting.
+//!
+//! **The rule for the key `check`/`pin_preapproved`/`authorize` all take (`peer_slug`): it
+//! must be a name the *user* chose, and one that no server can re-issue.** That is the actual
+//! property — not a list of specific fields to avoid, because any string attacca hands us,
+//! however it is spelled, fails it the same way. Two are worth naming anyway, since they are
+//! the ones most likely to end up
 //! here by a well-meaning mistake: attacca's own `node_id` (see `ConnectionInfo` in
 //! `zyris/src/connection.rs`), and `TokenResponse.node_name` (`zyris/src/enroll/protocol.rs`),
 //! which gets persisted as `StoredCredential.node_name` (`zyris/src/enroll/store.rs`) and looks
@@ -28,9 +38,9 @@
 //!
 //! Two writers can be two `tokio::task`s in this process or two entirely separate
 //! processes sharing the same path — both are possible once a node runs more than one
-//! connection. An in-process `tokio::sync::Mutex` only ever sees the first kind, so `pin`
-//! also takes a `<ledger>.lock` file: the one thing every writer, in any process, actually
-//! shares.
+//! connection. An in-process `tokio::sync::Mutex` only ever sees the first kind, so
+//! `pin_preapproved` also takes a `<ledger>.lock` file: the one thing every writer, in any
+//! process, actually shares.
 //!
 //! **This defends against a remote peer substituting itself, not against local tampering.**
 //! `{"peers":{}}` is a perfectly valid, empty ledger; writing it over the real one erases
@@ -59,11 +69,18 @@ pub enum TofuError {
     #[error("{0}")]
     Io(String),
     /// The person asked to confirm `label`'s fingerprint said no. Nothing was pinned —
-    /// `TofuStore::authorize` returns this before ever calling `pin`, so an attacker who gets
-    /// refused once does not get a second, quieter attempt under the same slug: the peer stays
-    /// unknown, exactly as if the connection had never happened.
+    /// `TofuStore::authorize` returns this before ever calling `pin_preapproved`, so an
+    /// attacker who gets refused once does not get a second, quieter attempt under the same
+    /// slug: the peer stays unknown, exactly as if the connection had never happened.
     #[error("peer confirmation for {label} was refused (fingerprint {fingerprint}); not pinned")]
     Refused { label: String, fingerprint: String },
+    /// `authorize` could not even compute a fingerprint to show a person, because the offered
+    /// `endpoint_id` does not parse as a key at all. Returned before `confirmer` is ever
+    /// called — a person must never be asked to eyeball a fingerprint derived from something
+    /// that was not a real key in the first place, since there is nothing genuine for it to
+    /// match against.
+    #[error("{0}")]
+    InvalidEndpointId(#[from] crate::fingerprint::InvalidEndpointId),
 }
 
 /// The on-disk ledger. `deny_unknown_fields` and requiring `peers` (no `#[serde(default)]`)
@@ -87,8 +104,8 @@ struct Entry {
     first_seen_ms: u64,
 }
 
-/// Default for how long `pin` waits for another writer holding `<ledger>.lock` before giving
-/// up. Overridable per store via `TofuStore::with_lock_timeout` (tests only).
+/// Default for how long `pin_preapproved` waits for another writer holding `<ledger>.lock`
+/// before giving up. Overridable per store via `TofuStore::with_lock_timeout` (tests only).
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to sleep between attempts to take the lock file.
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
@@ -96,9 +113,9 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 /// critical section it guards is milliseconds of I/O, so anything within shouting distance of
 /// this means the writer that created it is gone — killed, crashed, OOM-reaped — not slow.
 /// Deliberately far above `LOCK_ACQUIRE_TIMEOUT`: a lock still held after 5s of retrying is
-/// most likely a live writer taking a while, not a dead one, so `pin` gives up loudly there
-/// instead of guessing. A lock only crosses this threshold across separate `pin` calls, once
-/// nothing has retried it in a while.
+/// most likely a live writer taking a while, not a dead one, so `pin_preapproved` gives up
+/// loudly there instead of guessing. A lock only crosses this threshold across separate
+/// `pin_preapproved` calls, once nothing has retried it in a while.
 const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(60);
 /// How many names to try if a temp-file name collides with one already on disk.
 const TEMP_CREATE_ATTEMPTS: u32 = 8;
@@ -107,7 +124,7 @@ const TEMP_CREATE_ATTEMPTS: u32 = 8;
 /// rebuilding a store from its path for same-process callers — it keeps them off the lock-file
 /// retry loop below entirely. That in-process lock cannot help across processes, though: two
 /// separate `TofuStore`s over the same path, cloned or not, in this process or another, still
-/// have to serialize through the `<ledger>.lock` file that `pin` takes.
+/// have to serialize through the `<ledger>.lock` file that `pin_preapproved` takes.
 #[derive(Clone)]
 pub struct TofuStore {
     path: Arc<PathBuf>,
@@ -124,9 +141,10 @@ impl TofuStore {
         }
     }
 
-    /// Overrides how long `pin` waits for `<ledger>.lock` before giving up. Exists for tests
-    /// that need to exercise the "never gets the lock" path without paying its real-world
-    /// cost (the default is 5s) on every run; production callers should leave this alone.
+    /// Overrides how long `pin_preapproved` waits for `<ledger>.lock` before giving up. Exists
+    /// for tests that need to exercise the "never gets the lock" path without paying its
+    /// real-world cost (the default is 5s) on every run; production callers should leave this
+    /// alone.
     #[doc(hidden)]
     pub fn with_lock_timeout(mut self, timeout: Duration) -> TofuStore {
         // Clamped, not passed through as-is: `tokio::time::Instant::now() + timeout` panics
@@ -137,8 +155,15 @@ impl TofuStore {
         self
     }
 
-    /// Checks the offered key against what is pinned. An unknown peer passes — pinning
-    /// happens **after** a connection succeeds, not here.
+    /// Checks the offered key against what is pinned. An unknown peer passes — this method
+    /// alone never pins anything, for an unknown peer or otherwise.
+    ///
+    /// **Most callers want [`Self::authorize`], not this.** `check` is the read-only half of
+    /// what `authorize` composes; calling `check` and then [`Self::pin_preapproved`] yourself
+    /// reimplements `authorize` minus the one thing that makes it safe — a human confirming an
+    /// unknown peer's fingerprint before it gets pinned. `check` on its own is for a caller that
+    /// genuinely only wants to *read* the ledger (e.g. before deciding whether to dial at all)
+    /// without triggering any confirmation or write.
     ///
     /// `peer_slug` **must be a name the user chose, and one that no server can re-issue** —
     /// that is the property, not a specific field to avoid. It must never be attacca's
@@ -169,22 +194,22 @@ impl TofuStore {
     ///    attacker a second, quieter attempt at the same slug.
     /// 2. **Only an unknown peer reaches `confirmer.confirm`.** This is deliberately the one
     ///    step in `authorize` that can take longer than a filesystem call — a person has to
-    ///    read a fingerprint and decide. Nothing here holds `pin`'s file lock (or even the
-    ///    in-process one `pin` also takes) while that happens: the lock is designed to be
-    ///    broken as stale after 60 seconds (see the module docs and `LOCK_STALE_THRESHOLD`)
-    ///    because the only legitimate way to hold it that long is a dead writer, and a person
-    ///    thinking it over is not dead, just slower than a lock built for crash recovery can
-    ///    tell apart from one.
+    ///    read a fingerprint and decide. Nothing here holds `pin_preapproved`'s file lock (or
+    ///    even the in-process one `pin_preapproved` also takes) while that happens: the lock is
+    ///    designed to be broken as stale after 60 seconds (see the module docs and
+    ///    `LOCK_STALE_THRESHOLD`) because the only legitimate way to hold it that long is a dead
+    ///    writer, and a person thinking it over is not dead, just slower than a lock built for
+    ///    crash recovery can tell apart from one.
     /// 3. **A refusal returns `Err(Refused)` and pins nothing.** An acceptance calls
-    ///    [`Self::pin`], which takes the lock and *re-checks* before writing. That re-check is
-    ///    what makes step 1's lock-free lookup safe despite the gap a slow human opens up: if
-    ///    another connection pinned a different key for this same `peer_slug` while this one
-    ///    was waiting on an answer, `pin` reports `Changed` instead of overwriting it — the
-    ///    exact protection `pin`'s own doc comment describes, inherited here for free rather
-    ///    than re-implemented.
+    ///    [`Self::pin_preapproved`], which takes the lock and *re-checks* before writing. That
+    ///    re-check is what makes step 1's lock-free lookup safe despite the gap a slow human
+    ///    opens up: if another connection pinned a different key for this same `peer_slug`
+    ///    while this one was waiting on an answer, `pin_preapproved` reports `Changed` instead
+    ///    of overwriting it — the exact protection its own doc comment describes, inherited
+    ///    here for free rather than re-implemented.
     ///
-    /// `peer_slug` carries the same requirement as `check` and `pin`: a name the user chose,
-    /// never a string attacca minted. See the module docs.
+    /// `peer_slug` carries the same requirement as `check` and `pin_preapproved`: a name the
+    /// user chose, never a string attacca minted. See the module docs.
     pub async fn authorize(
         &self,
         confirmer: &dyn PeerConfirmer,
@@ -202,25 +227,36 @@ impl TofuStore {
             None => {}
         }
 
-        let fp = fingerprint(endpoint_id);
+        let fp = fingerprint(endpoint_id)?;
         if !confirmer.confirm(peer_slug, &fp).await {
             return Err(TofuError::Refused { label: peer_slug.to_string(), fingerprint: fp });
         }
 
-        self.pin(peer_slug, endpoint_id).await
+        self.pin_preapproved(peer_slug, endpoint_id).await
     }
 
     /// Reads the ledger and returns this peer's pinned entry, if any — no lock, since a read
-    /// races nothing that matters (only concurrent *writes* need `pin`'s lock). The one piece
-    /// of lookup logic `check` and `authorize` both need: whether `peer_slug` is pinned at all,
-    /// and to what. Kept as its own method rather than inlined in both, since `authorize` needs
-    /// to tell "known and matching" apart from "never seen" — something `check`'s `Result<(),
-    /// _>` alone cannot express, but the `Option<Entry>` this returns can.
+    /// races nothing that matters (only concurrent *writes* need `pin_preapproved`'s lock). The
+    /// one piece of lookup logic `check` and `authorize` both need: whether `peer_slug` is
+    /// pinned at all, and to what. Kept as its own method rather than inlined in both, since
+    /// `authorize` needs to tell "known and matching" apart from "never seen" — something
+    /// `check`'s `Result<(), _>` alone cannot express, but the `Option<Entry>` this returns can.
     async fn lookup(&self, peer_slug: &str) -> Result<Option<Entry>, TofuError> {
         let ledger = self.read().await?;
         Ok(ledger.peers.get(peer_slug).cloned())
     }
 
+    /// Pins a key **without asking anyone.** Named `pin_preapproved`, not `pin`, on purpose:
+    /// the plain name reads as a safe, obvious thing to reach for, and it is not — calling this
+    /// directly for a peer nobody has confirmed is exactly the silent-TOFU behavior this module
+    /// no longer has by default (see the module docs). The name is the guard rail, since
+    /// nothing in the type system stops `check` then `pin_preapproved` from typechecking as a
+    /// substitute for `authorize`. Reach for this directly only when "preapproved" is
+    /// genuinely true by construction — e.g. a provisioning step recording a fingerprint an
+    /// operator already verified out of band, or a headless node's own `PeerConfirmer`
+    /// consulting an allowlist it trusts and calling this itself once satisfied. `authorize` is
+    /// what every other caller wants.
+    ///
     /// Pins the key of the first connection that succeeded. **Never overwrites a pin** — but a
     /// second call offering a *different* key for an already-pinned `peer_slug` is reported as
     /// `Err(TofuError::Changed)`, not silently swallowed as `Ok`. A caller that pins without
@@ -230,7 +266,7 @@ impl TofuStore {
     ///
     /// `peer_slug` **must be a name the user chose, and one that no server can re-issue** —
     /// see [`Self::check`] and the module docs.
-    pub async fn pin(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
+    pub async fn pin_preapproved(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
         // Keeps same-process tasks that share this instance (via clone) off the lock-file
         // retry loop entirely: they serialize here first, so at most one of them ever
         // touches the lock file at a time.
@@ -539,10 +575,10 @@ impl TofuStore {
     }
 }
 
-/// Holds the `<ledger>.lock` file for the lifetime of one `pin` call. Removing it on drop is
-/// the only cleanup that reliably runs on an early return through `?`, which is why this is
-/// sync `std::fs::remove_file` in `Drop` rather than an async method someone has to remember
-/// to call.
+/// Holds the `<ledger>.lock` file for the lifetime of one `pin_preapproved` call. Removing it
+/// on drop is the only cleanup that reliably runs on an early return through `?`, which is why
+/// this is sync `std::fs::remove_file` in `Drop` rather than an async method someone has to
+/// remember to call.
 struct LockFile {
     path: PathBuf,
     /// Written into the lock file at creation and re-checked by `verify_lock_still_held`
@@ -679,10 +715,10 @@ mod tests {
     /// have renamed anything into place. This is the "someone broke our lock as stale and
     /// took over" case from the module docs, driven by calling `write` directly (private, but
     /// reachable from this inline module) with a pre-corrupted lock, since reproducing it
-    /// through the public API racing a real second writer would need a timing seam in `pin`
-    /// itself. Going through `write` rather than calling `verify_lock_still_held` in isolation
-    /// also covers that `write` actually calls it at the right point, not just that the check
-    /// itself is correct.
+    /// through the public API racing a real second writer would need a timing seam in
+    /// `pin_preapproved` itself. Going through `write` rather than calling
+    /// `verify_lock_still_held` in isolation also covers that `write` actually calls it at the
+    /// right point, not just that the check itself is correct.
     #[tokio::test]
     async fn a_lock_that_changed_hands_refuses_to_publish() {
         let dir = tempfile::tempdir().unwrap();
@@ -747,7 +783,7 @@ mod tests {
             tokio::fs::write(p, b"PLANTED").await.unwrap();
         }
 
-        let result = store.pin("kitchen-pi", "key-1").await;
+        let result = store.pin_preapproved("kitchen-pi", "key-1").await;
         TEST_NANOS_OVERRIDE.with(|cell| cell.set(None));
         result.unwrap();
 
