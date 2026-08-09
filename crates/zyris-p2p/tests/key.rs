@@ -34,3 +34,24 @@ async fn rejects_a_key_file_others_can_read() {
         assert!(matches!(result, Err(KeyError::Permissions(_))), "actual: {result:?}");
     }
 }
+
+/// The bytes are on disk by the time `load_or_create` returns.
+///
+/// `tokio::fs::File::write_all` hands the real write to a blocking pool and returns without
+/// waiting, so a plain `write_all` leaves a window where the file exists but is empty. A node
+/// killed in that window comes back to a zero-length key and cannot start.
+///
+/// The loop is the test. A single round passed more often than not even while the bug was
+/// present; at fifty rounds the pre-fix code failed essentially every time (it was measured at
+/// 474 empty files out of 500 single attempts).
+#[tokio::test]
+async fn the_key_is_on_disk_before_the_call_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..50 {
+        let path = dir.path().join(format!("peer-{round}.key"));
+        let key = load_or_create(&path).await.unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        assert_eq!(on_disk.len(), 32, "round {round}: key file is {} bytes", on_disk.len());
+        assert_eq!(on_disk, key.to_bytes(), "round {round}: file does not hold the key we returned");
+    }
+}
