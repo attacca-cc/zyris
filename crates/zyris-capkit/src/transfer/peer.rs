@@ -28,7 +28,13 @@ use super::undo::UndoStore;
 /// 청크를 못 받았으니 credit을 돌려줄 수 없다 — 양쪽이 서로를 기다리며 영원히 멈춘다.
 /// 256 KiB로 뒀을 때 실제로 그랬다(262,144는 정지, 262,080은 통과).
 ///
-/// 64 KiB면 감싸는 몫이 남고 창 하나에 네 항목이 함께 흐른다.
+/// 감싸는 몫은 크기와 무관한 상수다(msgpack `bin32` 헤더 5바이트). 64 KiB면 항목 하나가
+/// 65,541바이트라 창 하나에 셋이 함께 흐른다.
+///
+/// **여백이 아니라 상수인 것이 약점이다.** `initial_stream_credit`은 받는 쪽이
+/// `AcceptOptions::limits`로 정하는 협상값인데 `pull`은 그 값을 볼 수 없다. 누가 창을
+/// 65,541보다 작게(예: 딱 64 KiB) 잡으면 같은 영구 정지가 돌아온다. 협상값에서 유도하도록
+/// 고치는 것이 옳다 — 지금은 기본값이 256 KiB라 네 배 여유가 있어 미뤄 둔다.
 const 청크: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -326,7 +332,10 @@ fn io_오류(e: std::io::Error) -> WireError {
 /// `임시`(`.part`)를 열 때 쓰는 `OpenOptions` 바탕. unix에서는 `O_NOFOLLOW`를 얹어 마지막
 /// 조각이 심링크면 열기 자체가 실패하게 한다. 앞선 `symlink_metadata` 사전 검사와 이 열기
 /// 사이에는 여전히 좁은 창이 있다(검사 뒤·열기 전에 누가 심링크를 심으면) — 이 플래그가
-/// 그 창을 마저 닫는다. windows에는 상응하는 플래그가 없어 사전 검사만으로 방어한다.
+/// 그 창을 마저 닫는다. windows에도 `FILE_FLAG_OPEN_REPARSE_POINT`가 있기는 하지만 그것은
+/// "따라가지 말고 열어라"라 의미가 반대다(실패시키는 것이 아니라 링크 자체를 연다). 그래서
+/// 저쪽에서는 사전 검사만으로 방어하고 창이 남는다.
+#[cfg_attr(not(unix), allow(unused_mut))]
 fn 임시_열기_바탕() -> tokio::fs::OpenOptions {
     let mut 옵션 = tokio::fs::OpenOptions::new();
     #[cfg(unix)]
