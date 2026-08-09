@@ -19,5 +19,8 @@ zyris = { version = "0.1.0", path = "../zyris" }
 zyris-proto = { version = "0.1.0", path = "../zyris-proto" }
 
 [dev-dependencies]
+async-trait.workspace = true
+schemars.workspace = true
+serde.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full"] }

@@ -7,4 +7,6 @@
 
 pub mod frame;
 pub mod key;
+pub mod peer;
 pub mod tofu;
+pub mod transport;
