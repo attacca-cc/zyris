@@ -62,11 +62,15 @@ async fn a_corrupt_pin_file_fails_closed() {
     // One input passing this test (the garbage string alone, before) is exactly what let
     // `{}`, `[]`, and a renamed `peers` key all fail open — one test case gives one input's
     // worth of confidence, not the property's.
-    let bad_contents: [(&str, &[u8]); 6] = [
+    let bad_contents: [(&str, &[u8]); 7] = [
         ("empty object", &b"{}"[..]),
         ("json array", &b"[]"[..]),
         ("wrong-shaped object", &br#"{"nope": {}}"#[..]),
         ("null peers", &br#"{"peers": null}"#[..]),
+        // `peers` is present and well-formed here, so this shape only fails because of
+        // `deny_unknown_fields` — every other case above would already fail on a missing or
+        // mistyped `peers` field alone, so none of them actually exercise that attribute.
+        ("unexpected extra field", &br#"{"peers":{},"x":1}"#[..]),
         ("zero-length file", &b""[..]),
         ("garbage", &b"{ this is not json"[..]),
     ];
@@ -102,29 +106,103 @@ async fn pinning_a_second_peer_keeps_the_first() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pins_all_survive() {
+    // Multiple independent rounds, each wider than the original 8 tasks: measured against
+    // the missing-lock-file mutation, one round of 8 caught it 11/12 runs, not reliably
+    // enough. More tasks raise the odds any one round hits the race, and more rounds mean a
+    // single `cargo test` invocation gets more than one chance to.
+    for round in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.json");
+
+        let mut tasks = Vec::new();
+        for i in 0..16 {
+            // A fresh `TofuStore` per task, not a clone. Cloning shares the in-process
+            // mutex, which would serialize these writes on its own and hide exactly the loss
+            // this test exists to catch — the pin file has to be what keeps two independent
+            // stores (as separate processes would be) from stepping on each other, not the
+            // mutex.
+            let store = TofuStore::new(&path);
+            tasks.push(tokio::spawn(async move {
+                store.pin(&format!("node-{i}"), &format!("key-{i}")).await.unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        let store = TofuStore::new(&path);
+        // A lost pin is not a lost log line: that peer is "unknown" again, so the next key
+        // change for it passes unnoticed.
+        for i in 0..16 {
+            let result = store.check(&format!("node-{i}"), "someone-else").await;
+            assert!(matches!(result, Err(TofuError::Changed { .. })), "round {round}: node-{i} lost its pin");
+        }
+    }
+}
+
+#[tokio::test]
+async fn pinning_into_a_missing_parent_directory_creates_it() {
+    let dir = tempfile::tempdir().unwrap();
+    // Nothing under `dir` exists yet beyond `dir` itself — this is what a node's very first
+    // run looks like, before its config directory has ever been created.
+    let path = dir.path().join("nested").join("deeper").join("peers.json");
+    let store = TofuStore::new(&path);
+
+    store.pin("node-b", "key-1").await.unwrap();
+    assert!(store.check("node-b", "key-1").await.is_ok());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path.parent().unwrap()).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "the created parent directory must be 0700, not the default umask"
+        );
+    }
+}
+
+/// Mirrors `TofuStore`'s private `lock_path` derivation so the test can find and manipulate
+/// the lock file through only the public API's notion of where the ledger lives.
+fn lock_path_for(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    std::path::PathBuf::from(name)
+}
+
+#[tokio::test]
+async fn a_stale_lock_file_is_broken_and_the_pin_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peers.json");
+    let lock_path = lock_path_for(&path);
+    tokio::fs::write(&lock_path, b"stale-nonce").await.unwrap();
 
-    let mut tasks = Vec::new();
-    for i in 0..8 {
-        // A fresh `TofuStore` per task, not a clone. Cloning shares the in-process mutex,
-        // which would serialize these writes on its own and hide exactly the loss this test
-        // exists to catch — the pin file has to be what keeps two independent stores (as
-        // separate processes would be) from stepping on each other, not the mutex.
-        let store = TofuStore::new(&path);
-        tasks.push(tokio::spawn(async move {
-            store.pin(&format!("node-{i}"), &format!("key-{i}")).await.unwrap();
-        }));
-    }
-    for t in tasks {
-        t.await.unwrap();
-    }
+    // Backdate instead of sleeping for the real threshold: `set_times` is stable std, no new
+    // dependency needed.
+    let file = std::fs::OpenOptions::new().write(true).open(&lock_path).unwrap();
+    let ancient = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    file.set_times(std::fs::FileTimes::new().set_modified(ancient)).unwrap();
 
     let store = TofuStore::new(&path);
-    // A lost pin is not a lost log line: that peer is "unknown" again, so the next key
-    // change for it passes unnoticed.
-    for i in 0..8 {
-        let result = store.check(&format!("node-{i}"), "someone-else").await;
-        assert!(matches!(result, Err(TofuError::Changed { .. })), "node-{i} lost its pin");
-    }
+    // A lock left behind by a dead writer (killed, crashed, OOM-reaped) must not block every
+    // later pin forever — this machine runs earlyoom and systemd-oomd for exactly that
+    // reason, so it is not hypothetical here.
+    store.pin("node-b", "key-1").await.unwrap();
+    assert!(store.check("node-b", "key-1").await.is_ok());
+}
+
+#[tokio::test]
+async fn a_fresh_lock_file_is_not_broken_and_the_pin_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.json");
+    let lock_path = lock_path_for(&path);
+    // Freshly written: its mtime is "now", nowhere near the staleness threshold.
+    tokio::fs::write(&lock_path, b"fresh-nonce").await.unwrap();
+
+    let store = TofuStore::new(&path);
+    // A live writer's lock must never be stolen: this has to fail loudly, not proceed as if
+    // no one held it and not silently drop the pin.
+    let result = store.pin("node-b", "key-1").await;
+    assert!(matches!(result, Err(TofuError::Io(_))), "got {result:?}");
 }

@@ -12,6 +12,14 @@
 //! connection. An in-process `tokio::sync::Mutex` only ever sees the first kind, so `pin`
 //! also takes a `<ledger>.lock` file: the one thing every writer, in any process, actually
 //! shares.
+//!
+//! **This defends against a remote peer substituting itself, not against local tampering.**
+//! `{"peers":{}}` is a perfectly valid, empty ledger; writing it over the real one erases
+//! every pin and no shape check can tell the difference from a node that has genuinely never
+//! connected to anyone. Anyone who can write this file can just as easily delete it, or
+//! replace the node's own key outright (see `key.rs`) — local write access to our config
+//! directory is game over by construction, for this store and for the node's identity both.
+//! That is not a gap in this design; it is outside what a TOFU pin can ever claim to cover.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,6 +64,14 @@ struct Entry {
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long to sleep between attempts to take the lock file.
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+/// How old a lock file's last modification has to be before it is treated as abandoned. The
+/// critical section it guards is milliseconds of I/O, so anything within shouting distance of
+/// this means the writer that created it is gone — killed, crashed, OOM-reaped — not slow.
+/// Deliberately far above `LOCK_ACQUIRE_TIMEOUT`: a lock still held after 5s of retrying is
+/// most likely a live writer taking a while, not a dead one, so `pin` gives up loudly there
+/// instead of guessing. A lock only crosses this threshold across separate `pin` calls, once
+/// nothing has retried it in a while.
+const LOCK_STALE_THRESHOLD: Duration = Duration::from_secs(60);
 /// How many names to try if a temp-file name collides with one already on disk.
 const TEMP_CREATE_ATTEMPTS: u32 = 8;
 
@@ -97,10 +113,15 @@ impl TofuStore {
         // retry loop entirely: they serialize here first, so at most one of them ever
         // touches the lock file at a time.
         let _guard = self.write_lock.lock().await;
+        // The lock file lives next to the ledger, so the directory has to exist before we
+        // can even attempt to create it — this has to run before `acquire_lock_file`, not
+        // just before `write`. A node's first ever run, writing into a directory nobody has
+        // created yet, is the most common way to hit this, not an edge case.
+        self.ensure_parent_dir().await?;
         // The mutex above is per-process and, without a clone, per-instance. Two separate
         // `TofuStore`s over the same path do not share it, so the read-modify-write below
         // still races without a lock every writer actually sees: the filesystem.
-        let _file_lock = self.acquire_lock_file().await?;
+        let file_lock = self.acquire_lock_file().await?;
         let mut ledger = self.read().await?;
         if ledger.peers.contains_key(node_id) {
             return Ok(());
@@ -109,16 +130,28 @@ impl TofuStore {
             node_id.to_string(),
             Entry { endpoint_id: endpoint_id.to_string(), first_seen_ms: now_ms() },
         );
-        self.write(&ledger).await
+        self.write(&ledger, &file_lock).await
+    }
+
+    /// The lock file's path. Appends a suffix rather than replacing the extension
+    /// (`with_extension`) — a ledger that itself happened to end in `.lock` would make the
+    /// lock and the ledger the same file, the same class of bug Phase 1 hit when a temp file
+    /// named via `with_extension("part")` collided with its own destination.
+    fn lock_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        PathBuf::from(name)
     }
 
     /// Waits for exclusive access to the ledger via a `<ledger>.lock` file, created with
-    /// `create_new` so two writers can never both believe they hold it. A lock file already
-    /// held by someone else is never removed here — stealing it is the exact failure this
-    /// exists to prevent — so `pin` either waits it out or fails loudly.
+    /// `create_new` so two writers can never both believe they hold it. A lock file held by a
+    /// live writer is never removed here — stealing it from someone still working would
+    /// reintroduce the exact lost-pin bug the lock exists to close — but one whose age crosses
+    /// `LOCK_STALE_THRESHOLD` almost certainly has no live owner, so that one gets broken.
     async fn acquire_lock_file(&self) -> Result<LockFile, TofuError> {
-        let lock_path = self.path.with_extension("lock");
+        let lock_path = self.lock_path();
         let deadline = tokio::time::Instant::now() + LOCK_ACQUIRE_TIMEOUT;
+        static LOCK_SEQ: AtomicU64 = AtomicU64::new(0);
         loop {
             let opened = {
                 #[cfg(unix)]
@@ -136,21 +169,80 @@ impl TofuStore {
                 }
             };
             match opened {
-                Ok(_file) => return Ok(LockFile { path: lock_path }),
+                Ok(mut file) => {
+                    // A nonce identifies *this* acquisition. `write` reads it back right
+                    // before publishing: if it does not match, someone else's stale-lock
+                    // break raced ours, and the write must not go out under a lock we no
+                    // longer hold.
+                    let nonce = format!(
+                        "{}-{}-{}",
+                        std::process::id(),
+                        now_ms(),
+                        LOCK_SEQ.fetch_add(1, Ordering::Relaxed)
+                    );
+                    use tokio::io::AsyncWriteExt;
+                    file.write_all(nonce.as_bytes()).await.map_err(|e| TofuError::Io(e.to_string()))?;
+                    return Ok(LockFile { path: lock_path, nonce });
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(TofuError::Io(format!(
-                            "timed out after {}s waiting for the pin file lock at {} \
-                             (held by another writer)",
-                            LOCK_ACQUIRE_TIMEOUT.as_secs(),
-                            lock_path.display()
+                            "the pin file lock at {} still exists after {}s of retrying and \
+                             could not be taken. If the process that created it is gone, \
+                             delete this file and try again.",
+                            lock_path.display(),
+                            LOCK_ACQUIRE_TIMEOUT.as_secs()
                         )));
+                    }
+                    if self.break_if_stale(&lock_path).await {
+                        // Likely just cleared a dead holder's lock: retry `create_new`
+                        // immediately rather than sleeping first.
+                        continue;
                     }
                     tokio::time::sleep(LOCK_RETRY_INTERVAL).await;
                 }
                 Err(e) => return Err(TofuError::Io(e.to_string())),
             }
         }
+    }
+
+    /// Removes `lock_path` if its last modification is older than `LOCK_STALE_THRESHOLD`.
+    /// Returns whether it did. A lock whose age cannot be determined (metadata error, e.g. it
+    /// was already removed by whoever else noticed it was stale) is left alone rather than
+    /// guessed about; the caller's normal retry loop covers that case either way.
+    async fn break_if_stale(&self, lock_path: &Path) -> bool {
+        let Ok(meta) = tokio::fs::metadata(lock_path).await else { return false };
+        let Ok(modified) = meta.modified() else { return false };
+        let Ok(age) = std::time::SystemTime::now().duration_since(modified) else { return false };
+        if age < LOCK_STALE_THRESHOLD {
+            return false;
+        }
+        tokio::fs::remove_file(lock_path).await.is_ok()
+    }
+
+    /// Re-reads the lock file right before publishing and confirms it still holds the nonce
+    /// this call was handed when it acquired the lock. This is what makes breaking a stale
+    /// lock safe: two writers can briefly both believe they hold it (one genuine, one that
+    /// broke a lock it thought was abandoned), but only the one whose nonce is still there
+    /// when it goes to publish is allowed to. Without this check, breaking a stale lock would
+    /// just reintroduce the lost-pin race the lock exists to close.
+    async fn verify_lock_still_held(&self, lock: &LockFile) -> Result<(), TofuError> {
+        let current = tokio::fs::read(&lock.path).await.map_err(|e| {
+            TofuError::Io(format!(
+                "could not confirm the pin file lock at {} was still ours before publishing \
+                 ({e}); refusing to write",
+                lock.path.display()
+            ))
+        })?;
+        if current != lock.nonce.as_bytes() {
+            return Err(TofuError::Io(format!(
+                "the pin file lock at {} no longer holds our nonce — someone else took over \
+                 while we were writing, most likely by breaking it as stale; refusing to \
+                 publish a write that could race theirs",
+                lock.path.display()
+            )));
+        }
+        Ok(())
     }
 
     async fn read(&self) -> Result<Ledger, TofuError> {
@@ -165,21 +257,15 @@ impl TofuStore {
         }
     }
 
-    async fn write(&self, ledger: &Ledger) -> Result<(), TofuError> {
-        if let Some(parent) = self.parent_dir() {
-            // `.mode(0o700)` instead of the default umask: the ledger's integrity depends on
-            // nobody else being able to write into this directory. `key.rs` makes the same
-            // call for the key file itself.
-            let mut builder = tokio::fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            builder.mode(0o700);
-            builder.create(parent).await.map_err(|e| TofuError::Io(e.to_string()))?;
-        }
+    async fn write(&self, ledger: &Ledger, lock: &LockFile) -> Result<(), TofuError> {
         let text = serde_json::to_vec_pretty(ledger)
             .map_err(|e| TofuError::Io(format!("could not serialize the pin file: {e}")))?;
 
         let temp = self.create_temp(&text).await?;
+        if let Err(e) = self.verify_lock_still_held(lock).await {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(e);
+        }
         if let Err(e) = tokio::fs::rename(&temp, self.path.as_path()).await {
             // `create_temp` only ever hands back a path it created itself, so a failed
             // rename here is still ours to clean up.
@@ -187,9 +273,20 @@ impl TofuStore {
             return Err(TofuError::Io(e.to_string()));
         }
         // The rename itself has to survive a crash, or the newest pin comes back as
-        // "never seen" — a peer we already pinned would be trusted fresh.
+        // "never seen" — a peer we already pinned would be trusted fresh. But the pin is
+        // already durable at this point (the rename above completed), so a failure here is
+        // not a failure to pin — it is a failure to guarantee that pin survives a crash
+        // before the next successful sync. Reporting it as `Err` would tell a caller "no pin
+        // exists" when one plainly does; that is the wrong direction to be wrong in.
         #[cfg(unix)]
-        self.fsync_parent_dir().await?;
+        if let Err(e) = self.fsync_parent_dir().await {
+            tracing::warn!(
+                error = %e,
+                path = %self.path.display(),
+                "pin landed but syncing its parent directory failed; it may not survive a crash \
+                 before the next successful sync"
+            );
+        }
         Ok(())
     }
 
@@ -205,10 +302,7 @@ impl TofuStore {
             // two independent processes both start at a low pid and the same counter value.
             // Nanoseconds on top mean a collision needs a genuine coincidence, and on top of
             // that, a collision here is a *retry with a new name*, never a deletion.
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
+            let nanos = current_nanos();
             let temp = self.path.with_extension(format!(
                 "{}.{}.{}.tmp",
                 std::process::id(),
@@ -267,6 +361,23 @@ impl TofuStore {
         self.path.parent().filter(|p| !p.as_os_str().is_empty())
     }
 
+    /// Creates the ledger's parent directory if it does not exist yet, at `0700` instead of
+    /// the default umask — the ledger's integrity depends on nobody else being able to write
+    /// into this directory. `key.rs` makes the same call for the key file itself. Has to run
+    /// before anything else touches this directory, including the lock file in
+    /// `acquire_lock_file`: a node's first run, before this directory has ever been created,
+    /// is the common case, not a corner one.
+    async fn ensure_parent_dir(&self) -> Result<(), TofuError> {
+        if let Some(parent) = self.parent_dir() {
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            builder.mode(0o700);
+            builder.create(parent).await.map_err(|e| TofuError::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// fsyncs the ledger's parent directory so the rename in `write` survives a crash.
     /// Errors are propagated, not swallowed: a bare relative path (`"peers.json"`) has a
     /// parent of `Some("")`, which does not open, so that case falls back to `"."`.
@@ -284,6 +395,9 @@ impl TofuStore {
 /// to call.
 struct LockFile {
     path: PathBuf,
+    /// Written into the lock file at creation and re-checked by `verify_lock_still_held`
+    /// before publishing. See that method for why this matters.
+    nonce: String,
 }
 
 impl Drop for LockFile {
@@ -297,4 +411,114 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets `create_temp`'s tests make its candidate name predictable without changing what
+    /// a real build does — `current_nanos` only ever consults this under `#[cfg(test)]`, and
+    /// only when a test has actually set it.
+    static TEST_NANOS_OVERRIDE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+fn current_nanos() -> u32 {
+    #[cfg(test)]
+    if let Some(nanos) = TEST_NANOS_OVERRIDE.with(|cell| cell.get()) {
+        return nanos;
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercises the path that gates `write`'s rename: if the lock file's contents no longer
+    /// match the nonce this call was handed, the write must refuse to publish and must not
+    /// have renamed anything into place. This is the "someone broke our lock as stale and
+    /// took over" case from the module docs, driven by calling `write` directly (private, but
+    /// reachable from this inline module) with a pre-corrupted lock, since reproducing it
+    /// through the public API racing a real second writer would need a timing seam in `pin`
+    /// itself. Going through `write` rather than calling `verify_lock_still_held` in isolation
+    /// also covers that `write` actually calls it at the right point, not just that the check
+    /// itself is correct.
+    #[tokio::test]
+    async fn a_lock_that_changed_hands_refuses_to_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.json");
+        let store = TofuStore::new(&path);
+        store.ensure_parent_dir().await.unwrap();
+
+        let lock = store.acquire_lock_file().await.unwrap();
+        // Simulate another writer deciding our lock was abandoned, breaking it, and taking
+        // over: the file now holds a different nonce than the one we were handed.
+        tokio::fs::write(&lock.path, b"someone-elses-nonce").await.unwrap();
+
+        let mut ledger = Ledger::default();
+        ledger.peers.insert(
+            "node-b".to_string(),
+            Entry { endpoint_id: "key-1".to_string(), first_seen_ms: 0 },
+        );
+        let result = store.write(&ledger, &lock).await;
+        assert!(matches!(result, Err(TofuError::Io(_))), "got {result:?}");
+        // Nothing must have been published: a caller must never see this pin as landed when
+        // the lock guarding it was not ours anymore by the time we tried to publish.
+        assert!(
+            !tokio::fs::try_exists(&path).await.unwrap(),
+            "the ledger was written despite the stolen lock"
+        );
+    }
+
+    /// A ledger that happens to already end in `.lock` is the pathological case:
+    /// `with_extension("lock")` would leave such a path unchanged, making the lock file and
+    /// the ledger the very same file — the same class of bug as `with_extension("part")`
+    /// making a temp file collide with its own destination. No existing black-box test
+    /// constructs a ledger path shaped like this, so this checks the property directly.
+    #[test]
+    fn lock_path_never_collides_with_the_ledger_path() {
+        let store = TofuStore::new(PathBuf::from("/tmp/example/peers.lock"));
+        assert_ne!(store.lock_path().as_path(), store.path.as_path());
+    }
+
+    /// `create_temp` never deletes a file it did not create, retrying under a new name
+    /// instead. `nanos` is pinned via `TEST_NANOS_OVERRIDE` so the candidate names are
+    /// predictable up to the `SEQ` counter's exact starting value — which this test does not
+    /// assume is 0, since `SEQ` is shared process-wide with every other call to `create_temp`
+    /// in this test binary (including `a_lock_that_changed_hands_refuses_to_publish`, whose
+    /// execution order relative to this test is not guaranteed under parallel test
+    /// execution). Planting a short run of consecutive candidate names instead of one exact
+    /// name means the real collision is still exercised regardless of exactly where `SEQ`
+    /// happens to be, as long as it has not drifted past this run — implausible given at most
+    /// one other test increments it, by exactly one, before this one might run. This must
+    /// stay on the default (single-threaded) `#[tokio::test]` runtime, since the thread-local
+    /// override would not be visible if the task migrated to another worker thread.
+    #[tokio::test]
+    async fn a_temp_name_collision_retries_instead_of_deleting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peers.json");
+        let store = TofuStore::new(&path);
+
+        TEST_NANOS_OVERRIDE.with(|cell| cell.set(Some(0)));
+        let planted: Vec<PathBuf> = (0..4)
+            .map(|seq| path.with_extension(format!("{}.0.{seq}.tmp", std::process::id())))
+            .collect();
+        for p in &planted {
+            tokio::fs::write(p, b"PLANTED").await.unwrap();
+        }
+
+        let result = store.pin("node-b", "key-1").await;
+        TEST_NANOS_OVERRIDE.with(|cell| cell.set(None));
+        result.unwrap();
+
+        // Every planted file must survive untouched: a collision has to be resolved by
+        // trying a new name, never by deleting a file this call did not create.
+        for p in &planted {
+            let survived = tokio::fs::read(p).await.unwrap();
+            assert_eq!(survived, b"PLANTED", "a planted file was touched by the retry: {p:?}");
+        }
+        assert!(store.check("node-b", "key-1").await.is_ok(), "pin did not survive the collision");
+    }
 }
