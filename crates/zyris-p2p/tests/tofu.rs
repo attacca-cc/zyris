@@ -4,24 +4,24 @@ use zyris_p2p::tofu::{TofuError, TofuStore};
 async fn an_unknown_peer_passes() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    assert!(store.check("node-b", "key-1").await.is_ok());
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
 #[tokio::test]
 async fn the_same_key_passes_after_pinning() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("node-b", "key-1").await.unwrap();
-    assert!(store.check("node-b", "key-1").await.is_ok());
+    store.pin("kitchen-pi", "key-1").await.unwrap();
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
 #[tokio::test]
 async fn a_changed_key_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("node-b", "key-1").await.unwrap();
+    store.pin("kitchen-pi", "key-1").await.unwrap();
 
-    match store.check("node-b", "key-2").await {
+    match store.check("kitchen-pi", "key-2").await {
         Err(TofuError::Changed { pinned, offered }) => {
             assert_eq!(pinned, "key-1");
             assert_eq!(offered, "key-2");
@@ -34,10 +34,10 @@ async fn a_changed_key_is_refused() {
 async fn the_pin_survives_a_new_store_instance() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("peers.json");
-    TofuStore::new(&path).pin("node-b", "key-1").await.unwrap();
+    TofuStore::new(&path).pin("kitchen-pi", "key-1").await.unwrap();
 
     // A fresh instance: this has to come off disk.
-    let result = TofuStore::new(&path).check("node-b", "key-2").await;
+    let result = TofuStore::new(&path).check("kitchen-pi", "key-2").await;
     assert!(matches!(result, Err(TofuError::Changed { .. })));
 }
 
@@ -45,13 +45,13 @@ async fn the_pin_survives_a_new_store_instance() {
 async fn pinning_twice_keeps_the_first_key() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("node-b", "key-1").await.unwrap();
+    store.pin("kitchen-pi", "key-1").await.unwrap();
 
     // `pin` keeps the first value. If a later call could overwrite it, pinning would
     // mean nothing — the substitution we are trying to catch would pin itself. The second
     // call must also *report* the mismatch, not just refuse to act on it — a caller that
     // pins without calling `check` first must still learn a substitution was attempted.
-    let result = store.pin("node-b", "key-2").await;
+    let result = store.pin("kitchen-pi", "key-2").await;
     match result {
         Err(TofuError::Changed { pinned, offered }) => {
             assert_eq!(pinned, "key-1");
@@ -60,19 +60,19 @@ async fn pinning_twice_keeps_the_first_key() {
         other => panic!("a re-pin with a different key must be reported, got {other:?}"),
     }
 
-    assert!(matches!(store.check("node-b", "key-2").await, Err(TofuError::Changed { .. })));
+    assert!(matches!(store.check("kitchen-pi", "key-2").await, Err(TofuError::Changed { .. })));
 }
 
 #[tokio::test]
 async fn re_pinning_the_identical_key_is_a_silent_no_op() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("node-b", "key-1").await.unwrap();
+    store.pin("kitchen-pi", "key-1").await.unwrap();
 
     // Only a re-pin of the *same* key is a true no-op — this is not a substitution attempt,
     // so it must not be reported as one.
-    assert!(store.pin("node-b", "key-1").await.is_ok());
-    assert!(store.check("node-b", "key-1").await.is_ok());
+    assert!(store.pin("kitchen-pi", "key-1").await.is_ok());
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
 #[tokio::test]
@@ -99,16 +99,16 @@ async fn a_corrupt_pin_file_fails_closed() {
 
     for (name, content) in bad_contents {
         let store = TofuStore::new(&path);
-        store.pin("node-b", "key-1").await.unwrap();
+        store.pin("kitchen-pi", "key-1").await.unwrap();
         tokio::fs::write(&path, content).await.unwrap();
 
         // Treating an unreadable ledger as "nothing is pinned" would let anyone erase every
         // pin by corrupting one file — which is exactly what you would do right before
         // swapping a key.
-        let result = store.check("node-b", "key-2").await;
+        let result = store.check("kitchen-pi", "key-2").await;
         assert!(matches!(result, Err(TofuError::Malformed { .. })), "{name}: got {result:?}");
         // Even the peer that IS pinned correctly must not slip through while we cannot read.
-        let same = store.check("node-b", "key-1").await;
+        let same = store.check("kitchen-pi", "key-1").await;
         assert!(matches!(same, Err(TofuError::Malformed { .. })), "{name}: got {same:?}");
 
         tokio::fs::remove_file(&path).await.unwrap();
@@ -119,11 +119,11 @@ async fn a_corrupt_pin_file_fails_closed() {
 async fn pinning_a_second_peer_keeps_the_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
-    store.pin("node-a", "key-a").await.unwrap();
-    store.pin("node-b", "key-b").await.unwrap();
+    store.pin("garage-cam", "key-a").await.unwrap();
+    store.pin("kitchen-pi", "key-b").await.unwrap();
 
-    assert!(matches!(store.check("node-a", "other").await, Err(TofuError::Changed { .. })));
-    assert!(matches!(store.check("node-b", "other").await, Err(TofuError::Changed { .. })));
+    assert!(matches!(store.check("garage-cam", "other").await, Err(TofuError::Changed { .. })));
+    assert!(matches!(store.check("kitchen-pi", "other").await, Err(TofuError::Changed { .. })));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -145,7 +145,7 @@ async fn concurrent_pins_all_survive() {
             // mutex.
             let store = TofuStore::new(&path);
             tasks.push(tokio::spawn(async move {
-                store.pin(&format!("node-{i}"), &format!("key-{i}")).await.unwrap();
+                store.pin(&format!("gadget-{i}"), &format!("key-{i}")).await.unwrap();
             }));
         }
         for t in tasks {
@@ -156,8 +156,8 @@ async fn concurrent_pins_all_survive() {
         // A lost pin is not a lost log line: that peer is "unknown" again, so the next key
         // change for it passes unnoticed.
         for i in 0..16 {
-            let result = store.check(&format!("node-{i}"), "someone-else").await;
-            assert!(matches!(result, Err(TofuError::Changed { .. })), "round {round}: node-{i} lost its pin");
+            let result = store.check(&format!("gadget-{i}"), "someone-else").await;
+            assert!(matches!(result, Err(TofuError::Changed { .. })), "round {round}: gadget-{i} lost its pin");
         }
     }
 }
@@ -170,8 +170,8 @@ async fn pinning_into_a_missing_parent_directory_creates_it() {
     let path = dir.path().join("nested").join("deeper").join("peers.json");
     let store = TofuStore::new(&path);
 
-    store.pin("node-b", "key-1").await.unwrap();
-    assert!(store.check("node-b", "key-1").await.is_ok());
+    store.pin("kitchen-pi", "key-1").await.unwrap();
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 
     #[cfg(unix)]
     {
@@ -210,8 +210,8 @@ async fn a_stale_lock_file_is_broken_and_the_pin_succeeds() {
     // A lock left behind by a dead writer (killed, crashed, OOM-reaped) must not block every
     // later pin forever — this machine runs earlyoom and systemd-oomd for exactly that
     // reason, so it is not hypothetical here.
-    store.pin("node-b", "key-1").await.unwrap();
-    assert!(store.check("node-b", "key-1").await.is_ok());
+    store.pin("kitchen-pi", "key-1").await.unwrap();
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
 }
 
 #[tokio::test]
@@ -228,6 +228,6 @@ async fn a_fresh_lock_file_is_not_broken_and_the_pin_fails() {
     let store = TofuStore::new(&path).with_lock_timeout(std::time::Duration::from_millis(100));
     // A live writer's lock must never be stolen: this has to fail loudly, not proceed as if
     // no one held it and not silently drop the pin.
-    let result = store.pin("node-b", "key-1").await;
+    let result = store.pin("kitchen-pi", "key-1").await;
     assert!(matches!(result, Err(TofuError::Io(_))), "got {result:?}");
 }

@@ -5,16 +5,23 @@
 //! **once, never twice, and leaves a mark** — but only if the ledger is keyed on something
 //! attacca itself cannot re-mint.
 //!
-//! **The key `check`/`pin` take (`peer_slug`) must be a stable name the user chose, and must
-//! never be a server-issued identifier.** An earlier version of this store keyed the ledger on
-//! attacca's own `node_id`. That does not defend against the substitution this module exists
-//! for: attacca mints `node_id`, so introducing a fake B is as simple as minting it a *new*
-//! `node_id` with the same human-facing slug. The fake arrives as an unknown peer, passes
-//! `check` (nothing is pinned under a `node_id` nobody has seen before), and gets pinned —
-//! every time, with no mark left anywhere. Keying on a name the *user* picked and attacca has
-//! no channel to silently change is what actually makes the substitution visible: attacca can
-//! mint as many `node_id`s as it wants, but it cannot make a second one answer to the slug the
-//! user already pinned without `check` catching the mismatch.
+//! **The rule for the key `check`/`pin` take (`peer_slug`): it must be a name the *user*
+//! chose, and one that no server can re-issue.** That is the actual property — not a list of
+//! specific fields to avoid, because any string attacca hands us, however it is spelled, fails
+//! it the same way. Two are worth naming anyway, since they are the ones most likely to end up
+//! here by a well-meaning mistake: attacca's own `node_id` (see `ConnectionInfo` in
+//! `zyris/src/connection.rs`), and `TokenResponse.node_name` (`zyris/src/enroll/protocol.rs`),
+//! which gets persisted as `StoredCredential.node_name` (`zyris/src/enroll/store.rs`) and looks
+//! enough like a user-facing label to be mistaken for one. It is not: attacca supplies it,
+//! unverified, exactly like `node_id`, and reports it fresh for every node — nothing stops a
+//! fake B from arriving with a *new* `node_id` and the *same* `node_name` as the real one, or a
+//! `node_name` chosen to look however it likes. Whichever server-issued string ends up in this
+//! slot, the fake arrives as an unknown peer, passes `check` (nothing is pinned under an
+//! identifier nobody has seen before), and gets pinned — every time, with no mark left
+//! anywhere. Keying on a name the user picked, that attacca has no channel to silently
+//! reassign, is what actually makes the substitution visible: attacca can mint or report as
+//! many identifiers as it wants, but it cannot make a second one answer to the slug the user
+//! already pinned without `check` catching the mismatch.
 //!
 //! **There is no automatic way out.** A human has to edit the file. Accepting a changed key
 //! quietly would make the pin worth nothing.
@@ -125,9 +132,10 @@ impl TofuStore {
     /// Checks the offered key against what is pinned. An unknown peer passes — pinning
     /// happens **after** a connection succeeds, not here.
     ///
-    /// `peer_slug` **must be a stable name the user chose** (e.g. the slug they gave this
-    /// peer) **and must never be a server-issued identifier** such as attacca's `node_id` —
-    /// see the module docs for why keying on the latter defeats the whole point of pinning.
+    /// `peer_slug` **must be a name the user chose, and one that no server can re-issue** —
+    /// that is the property, not a specific field to avoid. It must never be attacca's
+    /// `node_id`, `TokenResponse.node_name`, or any other string attacca supplies — see the
+    /// module docs for why keying on any of those defeats the whole point of pinning.
     ///
     /// A ledger we cannot read is an error, not an empty ledger. See the module docs.
     pub async fn check(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
@@ -149,8 +157,8 @@ impl TofuStore {
     /// `Ok` there would hide the exact event this store exists to surface. Only a re-pin of the
     /// identical key — a true no-op — returns `Ok(())`.
     ///
-    /// `peer_slug` **must be a stable name the user chose, and must never be a server-issued
-    /// identifier.** See [`Self::check`] and the module docs.
+    /// `peer_slug` **must be a name the user chose, and one that no server can re-issue** —
+    /// see [`Self::check`] and the module docs.
     pub async fn pin(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
         // Keeps same-process tasks that share this instance (via clone) off the lock-file
         // retry loop entirely: they serialize here first, so at most one of them ever
@@ -618,7 +626,7 @@ mod tests {
 
         let mut ledger = Ledger::default();
         ledger.peers.insert(
-            "node-b".to_string(),
+            "kitchen-pi".to_string(),
             Entry { endpoint_id: "key-1".to_string(), first_seen_ms: 0 },
         );
         let result = store.write(&ledger, &lock).await;
@@ -668,7 +676,7 @@ mod tests {
             tokio::fs::write(p, b"PLANTED").await.unwrap();
         }
 
-        let result = store.pin("node-b", "key-1").await;
+        let result = store.pin("kitchen-pi", "key-1").await;
         TEST_NANOS_OVERRIDE.with(|cell| cell.set(None));
         result.unwrap();
 
@@ -678,6 +686,6 @@ mod tests {
             let survived = tokio::fs::read(p).await.unwrap();
             assert_eq!(survived, b"PLANTED", "a planted file was touched by the retry: {p:?}");
         }
-        assert!(store.check("node-b", "key-1").await.is_ok(), "pin did not survive the collision");
+        assert!(store.check("kitchen-pi", "key-1").await.is_ok(), "pin did not survive the collision");
     }
 }

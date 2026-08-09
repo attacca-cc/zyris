@@ -513,6 +513,80 @@ async fn a_peer_that_stalls_after_one_byte_does_not_hang_the_first_read() {
 }
 
 #[tokio::test]
+async fn a_read_after_the_first_still_waits_past_the_first_message_deadline() {
+    // Regression for NEW-1: `first_read` must actually flip to `false` once the first read
+    // resolves, or `FIRST_MESSAGE_DEADLINE` (10s) would apply to *every* read, not just the
+    // first — and zyris's own heartbeat interval is 20s (`HeartbeatConfig::default` in
+    // `zyris-proto/src/envelope.rs`), so an idle-but-healthy connection legitimately waiting on
+    // its second message would be wrongly killed at 10s, well before the heartbeat ever gets a
+    // say. Deleting `self.first_read = false;` leaves every other test in this crate green —
+    // nothing else waits this long between messages — so this test exists specifically to make
+    // a *second* read wait past 10s and prove it is not cut off.
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let b_key = iroh::SecretKey::generate();
+        let b_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(b_key)
+            .alpns(vec![zyris_p2p::transport::ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let b_addr = b_ep.addr();
+
+        let b_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            let (_peer, b_transport) =
+                zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await.unwrap();
+            let (_b_sink, mut b_read) = Box::new(b_transport).split();
+            let first = b_read.next().await.unwrap().unwrap();
+            (b_read, first)
+        });
+
+        let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let a_transport = zyris_p2p::peer::dial(&a_ep, b_addr).await.unwrap();
+        let (mut a_sink, _a_read) = Box::new(a_transport).split();
+
+        a_sink.send(WireMessage::Text("first".into())).await.unwrap();
+
+        let (mut b_read, first) = b_task.await.unwrap();
+        assert_eq!(first, WireMessage::Text("first".into()), "the first message must arrive intact");
+
+        // Starts waiting *before* anything else is sent — this is what actually exercises the
+        // codepath under test: a read that genuinely has to sit idle, not one that happens to
+        // find a message already buffered.
+        let second_read = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let result = b_read.next().await;
+            (result, started.elapsed())
+        });
+
+        // Idle for longer than FIRST_MESSAGE_DEADLINE (10s) before sending the second message —
+        // exactly the "idle connection" case that belongs to zyris's own 20s heartbeat, not to
+        // this transport-level deadline.
+        tokio::time::sleep(Duration::from_secs(11)).await;
+        a_sink.send(WireMessage::Text("second".into())).await.unwrap();
+
+        let (result, elapsed) = second_read.await.unwrap();
+        match result {
+            Some(Ok(WireMessage::Text(text))) => assert_eq!(text, "second"),
+            other => {
+                panic!("the second read must succeed once the message arrives, got {other:?}")
+            }
+        }
+        assert!(
+            elapsed > Duration::from_secs(10),
+            "the second read must not be cut off at FIRST_MESSAGE_DEADLINE: only waited {elapsed:?}"
+        );
+    })
+    .await
+    .expect("test exceeded its deadline");
+}
+
+#[tokio::test]
 async fn establish_rejects_a_connection_that_negotiated_a_different_alpn() {
     // Regression for F2: `establish` never checked the negotiated ALPN. Measured: bind the
     // endpoint with two ALPNs, connect on the *other* one, write a few bytes, and `establish`
