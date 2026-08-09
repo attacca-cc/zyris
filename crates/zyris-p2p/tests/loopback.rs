@@ -73,9 +73,9 @@ async fn connect_pair(
     // connection attempt; `establish` is the part with a deadline that can actually block on
     // the peer, matching how a real accept loop would spawn it per connection.
     let b_task = tokio::spawn(async move {
-        let accepting = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+        let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
         let (peer, transport) =
-            zyris_p2p::peer::establish(accepting, ESTABLISH_DEADLINE).await.unwrap();
+            zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await.unwrap();
         let node = Node::builder()
             .name("b")
             .kind(NodeKind::Cli)
@@ -196,8 +196,8 @@ async fn close_after_send_does_not_drop_the_last_message() {
         let b_addr = b_ep.addr();
 
         let b_task = tokio::spawn(async move {
-            let accepting = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
-            zyris_p2p::peer::establish(accepting, ESTABLISH_DEADLINE).await.unwrap()
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await.unwrap()
         });
 
         let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -234,6 +234,67 @@ async fn close_after_send_does_not_drop_the_last_message() {
 }
 
 #[tokio::test]
+async fn close_does_not_hang_when_the_peer_vanishes_without_closing() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        // Regression for N1: the `tokio::time::timeout` around `stopped()` in `IrohSink::close`
+        // had zero coverage — deleting it left all 33 tests green. It is reachable: a peer that
+        // reads a frame and then simply disappears (crash, `kill -9`, a dropped process — not
+        // the same as calling our own `close()`, which always sends a real `CONNECTION_CLOSE`)
+        // never acknowledges the stream, so an unbounded `stopped()` would wait forever. Here B
+        // reads A's message and then has every local handle to the connection *and* its
+        // endpoint dropped without either side calling `close`/`finish` — there is nothing left
+        // on B's side to ever send A anything, implicit or otherwise.
+        let b_key = iroh::SecretKey::generate();
+        let b_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(b_key)
+            .alpns(vec![zyris_p2p::transport::ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let b_addr = b_ep.addr();
+
+        let b_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            let (_peer, b_transport) =
+                zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await.unwrap();
+            let (b_sink, mut b_read) = Box::new(b_transport).split();
+            let received = b_read.next().await.unwrap().unwrap();
+            // B vanishes here: both halves — and with them B's only remaining `Endpoint`
+            // clones — drop at the end of this task without either side calling `close`.
+            drop(b_sink);
+            drop(b_read);
+            received
+        });
+
+        let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let a_transport = zyris_p2p::peer::dial(&a_ep, b_addr).await.unwrap();
+        let (mut a_sink, _a_read) = Box::new(a_transport).split();
+
+        a_sink.send(WireMessage::Text("one frame, then silence".into())).await.unwrap();
+        // Wait for B to have actually read it and fully vanished (the task's own return,
+        // including every endpoint clone it held, is dropped by the time `.await` resolves)
+        // before measuring `close`, so the test is not racing B's teardown.
+        b_task.await.unwrap();
+
+        let started = std::time::Instant::now();
+        a_sink.close(0, "bye".into()).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "close must be bounded by CLOSE_STOPPED_WAIT even when the peer never \
+             acknowledges, not hang indefinitely: took {elapsed:?}"
+        );
+    })
+    .await
+    .expect("test exceeded its deadline");
+}
+
+#[tokio::test]
 async fn a_silent_peer_cannot_block_the_accept_loop() {
     tokio::time::timeout(TEST_DEADLINE, async {
         // Regression for the C2 fix in `peer.rs`: the original `accept_next` did the QUIC
@@ -259,11 +320,11 @@ async fn a_silent_peer_cannot_block_the_accept_loop() {
         let accept_loop = tokio::spawn(async move {
             let mut established = Vec::new();
             for _ in 0..2u8 {
-                let accepting = zyris_p2p::peer::accept_next(&b_ep_for_loop).await.unwrap();
+                let pending = zyris_p2p::peer::accept_next(&b_ep_for_loop).await.unwrap();
                 established.push(tokio::spawn(async move {
                     let started = std::time::Instant::now();
                     let result =
-                        zyris_p2p::peer::establish(accepting, Duration::from_millis(300)).await;
+                        zyris_p2p::peer::establish(pending, Duration::from_millis(300)).await;
                     (result, started.elapsed())
                 }));
             }
@@ -276,7 +337,7 @@ async fn a_silent_peer_cannot_block_the_accept_loop() {
             .bind()
             .await
             .unwrap();
-        let _silent_conn =
+        let silent_conn =
             silent_ep.connect(b_addr.clone(), zyris_p2p::transport::ALPN).await.unwrap();
 
         // Peer 2: a well-behaved peer that dials right after the silent one. If the accept loop
@@ -318,6 +379,71 @@ async fn a_silent_peer_cannot_block_the_accept_loop() {
             "establish must give up at its own deadline, not linger: took {silent_elapsed:?}"
         );
         assert!(good_result.is_ok(), "the well-behaved peer must still establish successfully");
+
+        // What happens on the wire once `establish` gives up on the silent peer: the timed-out
+        // future drops its `Connection`/`Endpoint` clones (they were local to the cancelled
+        // `establish_inner`), and `noq-1.1.1/src/connection.rs`'s `ConnectionRef::drop` — "If
+        // the driver is alive, it's just it and us, so we'd better shut it down" — turns that
+        // into `implicit_close(0, empty reason)`, i.e. a real `CONNECTION_CLOSE`, not a silent
+        // leak. This is the peer-observable proof: the silent peer's own connection handle
+        // must see it close, not linger unresolved.
+        let silent_close_reason = tokio::time::timeout(Duration::from_secs(2), silent_conn.closed())
+            .await
+            .expect("the silent peer's connection must actually close, not hang unresolved");
+        assert!(
+            matches!(
+                silent_close_reason,
+                iroh::endpoint::ConnectionError::ApplicationClosed(_)
+            ),
+            "expected the implicit close from the timed-out establish, got {silent_close_reason:?}"
+        );
+    })
+    .await
+    .expect("test exceeded its deadline");
+}
+
+#[tokio::test]
+async fn dropping_a_pending_connection_without_establishing_rejects_the_peer() {
+    tokio::time::timeout(TEST_DEADLINE, async {
+        // What happens to a connection whose `PendingConnection` is dropped without ever being
+        // passed to `establish` — e.g. a caller shedding load, or shutting down mid-accept.
+        // `noq-1.1.1/src/incoming.rs:111` documents this as deliberate, not a leak: dropping an
+        // un-awaited `Incoming` sends the peer an explicit refusal ("Implicit reject, similar
+        // to Connection's implicit close"). Proved from the connecting peer's side: `connect`
+        // must fail promptly, not hang waiting for a handshake response that will never come.
+        let b_key = iroh::SecretKey::generate();
+        let b_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(b_key)
+            .alpns(vec![zyris_p2p::transport::ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let b_addr = b_ep.addr();
+
+        // B accepts the connection attempt but declines it outright.
+        let accept_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            drop(pending);
+        });
+
+        let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            a_ep.connect(b_addr, zyris_p2p::transport::ALPN),
+        )
+        .await
+        .expect("connect must not hang once the acceptor declined it");
+        assert!(
+            result.is_err(),
+            "connect must fail once the acceptor dropped the pending connection, not succeed or hang"
+        );
+
+        accept_task.await.unwrap();
     })
     .await
     .expect("test exceeded its deadline");

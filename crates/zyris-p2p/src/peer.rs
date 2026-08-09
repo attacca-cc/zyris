@@ -27,7 +27,18 @@ pub async fn dial(
 /// A connection iroh has accepted, before the zyris-level handshake has happened. Waiting for
 /// one of these to arrive (`accept_next`) never blocks on anything the remote peer controls —
 /// only turning it into a usable connection (`establish`) can, which is why the two are split.
-pub struct Accepting {
+///
+/// Deliberately not named `Accepting` — `iroh::endpoint` already has a type by that name (the
+/// result of `Incoming::accept()`, a different stage of the same handshake), and this crate
+/// re-exports enough of `iroh` that the two would otherwise be genuinely ambiguous to a reader.
+///
+/// Dropping one of these without ever calling [`establish`] on it is a valid, deliberate way to
+/// decline a connection (e.g. shedding load, or shutting down): iroh's own `Incoming::drop`
+/// sends an explicit refusal to the peer rather than leaving the attempt to linger
+/// (`noq-1.1.1/src/incoming.rs:111`, "Implicit reject, similar to Connection's implicit close").
+/// See `dropping_a_pending_connection_without_establishing_rejects_the_peer` in
+/// `tests/loopback.rs` for the peer-observable proof.
+pub struct PendingConnection {
     incoming: iroh::endpoint::Incoming,
     endpoint: iroh::Endpoint,
 }
@@ -41,9 +52,9 @@ pub struct Accepting {
 /// every other connection waiting behind it in an accept loop would never get a turn. Call
 /// [`establish`] on the result — with its own deadline, and spawned per connection rather than
 /// awaited inline — to do the part that can actually block on the peer.
-pub async fn accept_next(endpoint: &iroh::Endpoint) -> Option<Accepting> {
+pub async fn accept_next(endpoint: &iroh::Endpoint) -> Option<PendingConnection> {
     let incoming = endpoint.accept().await?;
-    Some(Accepting { incoming, endpoint: endpoint.clone() })
+    Some(PendingConnection { incoming, endpoint: endpoint.clone() })
 }
 
 /// Completes the QUIC handshake and opens the zyris bi-stream for a connection `accept_next`
@@ -52,7 +63,7 @@ pub async fn accept_next(endpoint: &iroh::Endpoint) -> Option<Accepting> {
 /// then drop everything this held (which tears down the QUIC connection) instead of leaking a
 /// task on an attacker who just holds the socket open.
 pub async fn establish(
-    accepting: Accepting,
+    accepting: PendingConnection,
     deadline: Duration,
 ) -> Result<(iroh::EndpointId, IrohTransport), PeerError> {
     tokio::time::timeout(deadline, establish_inner(accepting))
@@ -61,9 +72,9 @@ pub async fn establish(
 }
 
 async fn establish_inner(
-    accepting: Accepting,
+    accepting: PendingConnection,
 ) -> Result<(iroh::EndpointId, IrohTransport), PeerError> {
-    let Accepting { incoming, endpoint } = accepting;
+    let PendingConnection { incoming, endpoint } = accepting;
     let conn = incoming.await.map_err(|e| PeerError::Connect(e.to_string()))?;
     // `Connection::remote_id` on an established connection returns the `EndpointId` directly
     // (no `Result`) — only the zero-RTT connection states return `Result<EndpointId, _>`.
