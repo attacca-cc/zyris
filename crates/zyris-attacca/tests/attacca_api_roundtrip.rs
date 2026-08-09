@@ -939,3 +939,64 @@ async fn peer_rendezvous_tools_round_trip() {
     assert_eq!(peers[0].slug, "laptop");
     assert_eq!(peers[0].endpoint_id, "ed25519:sibling-endpoint");
 }
+
+/// `ZPeerAddr` is exchanged between two independently-deployed systems, so its optionality is a
+/// wire contract, not an internal detail: a deployment that omits `addrs` or `relay_url` must still
+/// decode, with the field defaulting rather than the whole call failing.
+#[test]
+fn peer_addr_optional_fields_default_when_absent() {
+    let missing_both = serde_json::json!({
+        "node_id": "sibling-1",
+        "slug": "laptop",
+        "endpoint_id": "ed25519:sibling-endpoint",
+        "online": true,
+    });
+    let addr: ZPeerAddr = serde_json::from_value(missing_both).unwrap();
+    assert_eq!(addr.addrs, Vec::<String>::new());
+    assert_eq!(addr.relay_url, None);
+
+    // Checked with the other field present too, so each default is pinned to its own JSON key
+    // rather than both happening to pass only when both are absent together.
+    let missing_relay_only = serde_json::json!({
+        "node_id": "sibling-1",
+        "slug": "laptop",
+        "endpoint_id": "ed25519:sibling-endpoint",
+        "addrs": ["203.0.113.5:4433"],
+        "online": true,
+    });
+    let addr: ZPeerAddr = serde_json::from_value(missing_relay_only).unwrap();
+    assert_eq!(addr.addrs, vec!["203.0.113.5:4433".to_string()]);
+    assert_eq!(addr.relay_url, None);
+}
+
+/// The other half of the same contract: an unset `relay_url` must not appear in the JSON at all, on
+/// the same grounds as [`ZMe::credits`] and [`ZUsage`] — a deployment that does not have one sends
+/// nothing, not `null`, so a strict decoder on the other side never has to special-case it.
+#[test]
+fn peer_addr_relay_url_is_omitted_not_null_when_unset() {
+    let addr = ZPeerAddr {
+        node_id: "sibling-1".into(),
+        slug: "laptop".into(),
+        endpoint_id: "ed25519:sibling-endpoint".into(),
+        addrs: vec![],
+        relay_url: None,
+        online: true,
+    };
+    let json = serde_json::to_value(&addr).unwrap();
+    assert!(
+        !json.as_object().unwrap().contains_key("relay_url"),
+        "relay_url must be omitted rather than sent as null: {json}",
+    );
+}
+
+/// `ZPeerEntry` has no optional fields — unlike `ZPeerAddr`, every one of these is required, and a
+/// deployment that omits one must fail to decode rather than silently default it away.
+#[test]
+fn peer_entry_rejects_a_missing_required_field() {
+    let missing_endpoint_id = serde_json::json!({
+        "node_id": "sibling-1",
+        "slug": "laptop",
+        "online": true,
+    });
+    assert!(serde_json::from_value::<ZPeerEntry>(missing_endpoint_id).is_err());
+}
