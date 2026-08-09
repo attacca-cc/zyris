@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
-use zyris::{Node, NodeKind};
+use zyris::{Chunk, Node, NodeKind};
 use zyris_caps::peer_transfer::{PeerTransfer, PeerTransferClient, PeerTransferServer, TransferOffer};
 use zyris_capkit::transfer::{LocalPeerTransfer, TransferConfig};
 
@@ -516,4 +517,157 @@ async fn 청크_여러_개짜리_파일도_끝까지_도착한다() {
 
     assert_eq!(결과.bytes, 내용.len() as u64);
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
+}
+
+/// 받는 쪽이 **정말로 이어받는지**를 가른다.
+///
+/// 보내는 쪽 파일의 앞부분과 이미 받아 둔 앞부분이 서로 다르다(길이만 같다). 제안하는
+/// sha256은 `이미_받은_앞부분 ++ 뒷부분`의 것이다. 그래서:
+///
+/// - 이어받으면 → 앞부분을 그대로 두고 100_000부터 당긴다 → 해시가 맞는다 → 성공
+/// - 처음부터 받으면 → 보내는 쪽 앞부분(0xAA)이 온다 → 해시가 틀린다 → 실패
+///
+/// 보내는 쪽이 제안한 해시와 다른 내용을 갖고 있는 것은 현실에서 일어나지 않지만,
+/// 받는 쪽의 판단만 떼어 보려면 이 방법뿐이다.
+#[tokio::test]
+async fn 받다_만_파일을_이어받는다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+
+    let 이미_받은_앞부분: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    let 보내는_쪽_앞부분: Vec<u8> = vec![0xAAu8; 100_000];
+    let 뒷부분: Vec<u8> = (0..200_000u32).map(|i| ((i % 241) as u8) ^ 0x5A).collect();
+    assert_ne!(이미_받은_앞부분, 보내는_쪽_앞부분, "두 앞부분이 같으면 이 테스트는 아무것도 못 가른다");
+
+    let mut 보내는_쪽_내용 = 보내는_쪽_앞부분.clone();
+    보내는_쪽_내용.extend_from_slice(&뒷부분);
+    let 원본 = 원본_자리.path().join("a.bin");
+    tokio::fs::write(&원본, &보내는_쪽_내용).await.unwrap();
+
+    // 이어받았을 때에만 나올 수 있는 최종 내용.
+    let mut 기대 = 이미_받은_앞부분.clone();
+    기대.extend_from_slice(&뒷부분);
+
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    tokio::fs::write(받는_자리.path().join("a").join("a.bin.part"), &이미_받은_앞부분)
+        .await
+        .unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("resume", &원본, 기대.len() as u64, &해시(&기대), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "resume".into(),
+            name: "a.bin".into(),
+            size: 기대.len() as u64,
+            sha256: 해시(&기대),
+            overwrite: false,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(결과.bytes, 기대.len() as u64);
+    assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 기대);
+}
+
+#[tokio::test]
+async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 내용: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    let 원본 = 원본_자리.path().join("a.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    // 쓰레기 앞부분. 이어받으면 sha256이 안 맞아야 한다 — 그래야 버그가 조용히 안 지나간다.
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    tokio::fs::write(받는_자리.path().join("a").join("a.bin.part"), vec![0xFFu8; 10_000])
+        .await
+        .unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("bad-resume", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "bad-resume".into(),
+            name: "a.bin".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        })
+        .await;
+
+    // 첫 시도는 불일치로 실패하고 부분 파일을 지운다.
+    assert!(결과.is_err());
+    // 다시 부르면 처음부터 받아 성공해야 한다.
+    let 두_번째 = b
+        .push_offer(TransferOffer {
+            transfer_id: "bad-resume".into(),
+            name: "a.bin".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(&두_번째.written).await.unwrap(), 내용);
+}
+
+/// `pull`이 보내는 쪽에서 정말로 `offset`부터 흘리는지를 받는 쪽 판단과 떼어 본다.
+///
+/// 위 두 테스트는 **받는 쪽의 판단**(`받은_offset` 계산)만 가른다 — 보내는 쪽이 `offset`을
+/// 무시하고 항상 처음부터 흘려도, 받는 쪽이 이미 갖고 있던 앞부분과 흘러온 바이트를 잘 짜맞추면
+/// (혹은 우연히 같으면) 최종 결과가 맞아떨어질 수 있다. 그래서 `pull`을 직접 불러 보내는
+/// 쪽만 따로 본다.
+///
+/// `pull`은 보내는 쪽(A)이 답한다. `붙인다`가 돌려주는 `b_conn`(B의 연결)에서
+/// `wait_capability`를 기다리면 A가 announce한 손잡이가 나온다 — `a_conn`에서 기다리면
+/// 반대로 B(받는 쪽)의 손잡이가 나오는데, B는 `offer_file`을 받은 적이 없어 `pull`을 불러도
+/// "모르는 전송입니다"로 거절한다.
+#[tokio::test]
+async fn pull은_offset부터_흘린다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 내용: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    let 원본 = 원본_자리.path().join("straight.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (_a_conn, b_conn) =
+        붙인다("straight", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let a: PeerTransferClient = b_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let mut 스트림 = a.pull("straight".to_string(), 100_000).await.unwrap();
+    assert_eq!(
+        스트림.head.size,
+        내용.len() as u64,
+        "head.size는 offset을 뺀 값이 아니라 파일 전체 크기여야 한다"
+    );
+
+    let mut 받은: Vec<u8> = Vec::new();
+    while let Some(조각) = 스트림.items.next().await {
+        let Chunk(바이트) = 조각.unwrap();
+        받은.extend_from_slice(&바이트);
+    }
+    assert_eq!(받은, 내용[100_000..], "100_000부터 끝까지와 바이트가 같아야 한다");
 }
