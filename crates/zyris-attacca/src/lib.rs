@@ -703,18 +703,25 @@ pub struct ZPeerAddr {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ZPeerEntry {
     pub node_id: String,
-    /// **This is the TOFU pinning key.** Which is why it must be a **user-chosen name**, and never
-    /// something the server can quietly reissue.
+    /// The name a user refers to this peer by. **It is a label, not a trust anchor.**
     ///
-    /// What the final branch review caught: if the key were `node_id`, Attacca could introduce a
-    /// fake peer as a **new node** (a fresh `node_id`, the same slug) and it would arrive as "never
-    /// seen before," pass the check, and get pinned. It would work every time and leave no trace, so
-    /// pinning would stop nothing. `node_name` (`TokenResponse.node_name` in `enroll/protocol.rs`) is
-    /// ruled out for the same reason — it is also a value Attacca supplies, and unverified.
+    /// Do not key a peer-key pin on it, and do not key one on `node_id` or on `node_name`
+    /// (`TokenResponse.node_name` in `enroll/protocol.rs`) either. Every one of those is issued by
+    /// the server, and the server is precisely the party a pin exists to constrain: it can present
+    /// a substituted peer as a **new node**, which then arrives as "never seen before," passes any
+    /// check, and gets pinned — working every time and leaving no trace.
     ///
-    /// **To confirm in phase 3:** that Attacca only ever derives a slug from user input, and that
-    /// there is no path where a server-suggested value silently sticks unless the user overwrites
-    /// it. If there is, the same collapse comes back one layer up.
+    /// A slug looks user-chosen but is not. Measured against Attacca on 2026-08-10: it is derived
+    /// from the node's `name`, whose default on the device-grant path is the enrolling device's own
+    /// unverified self-report, and which the approval dialog pre-fills so a user can approve it
+    /// without typing anything. It is also neither unique nor stable — renames recompute it with no
+    /// collision check, no constraint backs it, and freeing a slug when a node is revoked so a new
+    /// node can take it is deliberate behaviour with a test asserting it. "Same name, different key"
+    /// is a supported workflow there, which is exactly the event a pin is supposed to catch.
+    ///
+    /// So the anchor cannot come from the server at all. It comes from a person: the peer's key
+    /// fingerprint is confirmed once, out of band, and the pin binds to the key that was confirmed.
+    /// The slug's job is to say which peer the user meant, and nothing more.
     pub slug: String,
     pub endpoint_id: String,
     pub online: bool,
