@@ -171,13 +171,16 @@ impl TofuStore {
     /// module docs for why keying on any of those defeats the whole point of pinning.
     ///
     /// A ledger we cannot read is an error, not an empty ledger. See the module docs.
+    ///
+    /// `endpoint_id` is parsed and compared in its canonical form — see
+    /// `canonical_endpoint_id` — so a peer offering the same key spelled differently than
+    /// whatever is on disk (lowercase hex vs. base32) reads as the same key, not a change.
     pub async fn check(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
+        let endpoint_id = canonical_endpoint_id(endpoint_id)?;
         match self.lookup(peer_slug).await? {
             None => Ok(()),
             Some(entry) if entry.endpoint_id == endpoint_id => Ok(()),
-            Some(entry) => {
-                Err(TofuError::Changed { pinned: entry.endpoint_id, offered: endpoint_id.to_string() })
-            }
+            Some(entry) => Err(TofuError::Changed { pinned: entry.endpoint_id, offered: endpoint_id }),
         }
     }
 
@@ -210,29 +213,33 @@ impl TofuStore {
     ///
     /// `peer_slug` carries the same requirement as `check` and `pin_preapproved`: a name the
     /// user chose, never a string attacca minted. See the module docs.
+    ///
+    /// `endpoint_id` is canonicalized before anything else happens — including before
+    /// `confirmer` is ever consulted. An `endpoint_id` that does not even parse as a key
+    /// returns `Err(TofuError::InvalidEndpointId)` immediately: a person must never be shown a
+    /// fingerprint (or asked to approve a pin) derived from something that was not a real key.
     pub async fn authorize(
         &self,
         confirmer: &dyn PeerConfirmer,
         peer_slug: &str,
         endpoint_id: &str,
     ) -> Result<(), TofuError> {
+        let endpoint_id = canonical_endpoint_id(endpoint_id)?;
+
         match self.lookup(peer_slug).await? {
             Some(entry) if entry.endpoint_id == endpoint_id => return Ok(()),
             Some(entry) => {
-                return Err(TofuError::Changed {
-                    pinned: entry.endpoint_id,
-                    offered: endpoint_id.to_string(),
-                });
+                return Err(TofuError::Changed { pinned: entry.endpoint_id, offered: endpoint_id });
             }
             None => {}
         }
 
-        let fp = fingerprint(endpoint_id)?;
+        let fp = fingerprint(&endpoint_id)?;
         if !confirmer.confirm(peer_slug, &fp).await {
             return Err(TofuError::Refused { label: peer_slug.to_string(), fingerprint: fp });
         }
 
-        self.pin_preapproved(peer_slug, endpoint_id).await
+        self.pin_preapproved(peer_slug, &endpoint_id).await
     }
 
     /// Reads the ledger and returns this peer's pinned entry, if any — no lock, since a read
@@ -266,7 +273,14 @@ impl TofuStore {
     ///
     /// `peer_slug` **must be a name the user chose, and one that no server can re-issue** —
     /// see [`Self::check`] and the module docs.
+    ///
+    /// `endpoint_id` is canonicalized before it is compared *or stored* — see
+    /// `canonical_endpoint_id`. Rejects anything that does not parse as a key at all, rather
+    /// than storing it verbatim: a garbage string in the ledger could never be matched back
+    /// against a real key offered later, which would make every future connection under this
+    /// slug read as `Changed` forever.
     pub async fn pin_preapproved(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
+        let endpoint_id = canonical_endpoint_id(endpoint_id)?;
         // Keeps same-process tasks that share this instance (via clone) off the lock-file
         // retry loop entirely: they serialize here first, so at most one of them ever
         // touches the lock file at a time.
@@ -285,16 +299,10 @@ impl TofuStore {
             return if entry.endpoint_id == endpoint_id {
                 Ok(())
             } else {
-                Err(TofuError::Changed {
-                    pinned: entry.endpoint_id.clone(),
-                    offered: endpoint_id.to_string(),
-                })
+                Err(TofuError::Changed { pinned: entry.endpoint_id.clone(), offered: endpoint_id })
             };
         }
-        ledger.peers.insert(
-            peer_slug.to_string(),
-            Entry { endpoint_id: endpoint_id.to_string(), first_seen_ms: now_ms() },
-        );
+        ledger.peers.insert(peer_slug.to_string(), Entry { endpoint_id, first_seen_ms: now_ms() });
         self.write(&ledger, &file_lock).await
     }
 
@@ -607,6 +615,19 @@ impl Drop for LockFile {
     }
 }
 
+/// Parses `endpoint_id` and returns its canonical form — `iroh::EndpointId`'s `Display`,
+/// always lowercase hex — never the caller's original spelling. `check`, `authorize`, and
+/// `pin_preapproved` all run this before doing anything else with an `endpoint_id`, so every
+/// comparison in this module and everything the ledger ever stores is in this one form. That
+/// is what makes two accepted spellings of the identical key (lowercase hex, and RFC 4648
+/// base32 in either case — see `fingerprint.rs`'s `parse`) compare equal instead of one
+/// surfacing as a spurious `Changed` against the other, and it is also the single gate that
+/// keeps unparseable garbage out of the ledger in the first place: nothing downstream of this
+/// call ever sees the original string again.
+fn canonical_endpoint_id(endpoint_id: &str) -> Result<String, TofuError> {
+    Ok(crate::fingerprint::parse(endpoint_id)?.to_string())
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -783,7 +804,8 @@ mod tests {
             tokio::fs::write(p, b"PLANTED").await.unwrap();
         }
 
-        let result = store.pin_preapproved("kitchen-pi", "key-1").await;
+        let key = iroh::SecretKey::generate().public().to_string();
+        let result = store.pin_preapproved("kitchen-pi", &key).await;
         TEST_NANOS_OVERRIDE.with(|cell| cell.set(None));
         result.unwrap();
 
@@ -793,6 +815,6 @@ mod tests {
             let survived = tokio::fs::read(p).await.unwrap();
             assert_eq!(survived, b"PLANTED", "a planted file was touched by the retry: {p:?}");
         }
-        assert!(store.check("kitchen-pi", "key-1").await.is_ok(), "pin did not survive the collision");
+        assert!(store.check("kitchen-pi", &key).await.is_ok(), "pin did not survive the collision");
     }
 }

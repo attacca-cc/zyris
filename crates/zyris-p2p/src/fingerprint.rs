@@ -47,26 +47,36 @@ pub struct InvalidEndpointId {
     reason: String,
 }
 
+/// Parses `endpoint_id` into the key it names, or [`InvalidEndpointId`] if it does not parse
+/// as one. Shared by [`fingerprint`] (which hashes the resulting key's raw bytes) and
+/// `tofu.rs`'s `canonical_endpoint_id` (which re-renders it via `Display`, always lowercase
+/// hex, so every accepted spelling of the same key collapses to one form before it is stored
+/// or compared) — one parse-and-wrap-the-error implementation instead of two.
+pub(crate) fn parse(endpoint_id: &str) -> Result<iroh::EndpointId, InvalidEndpointId> {
+    iroh::EndpointId::from_str(endpoint_id).map_err(|e| InvalidEndpointId {
+        endpoint_id: endpoint_id.to_string(),
+        reason: e.to_string(),
+    })
+}
+
 /// Renders `endpoint_id` as a 128-bit fingerprint a person can read aloud or compare
 /// side-by-side with what the peer displays on its own end — `9F2A 41C7 0E83 BB15 6D04 A97E
 /// 22C1 5FB8`, groups of two bytes so a mistyped or misheard group is easy to isolate.
 ///
 /// **This is a display value only. Nothing in this crate pins a fingerprint.** `TofuStore`
-/// pins the full `endpoint_id` string it was given — truncating to a fingerprint and pinning
-/// *that* would silently throw away the collision resistance the 128 bits above are paying for
-/// and pin something an attacker only needs to match in 16 bytes, not however long the real
-/// `EndpointId` is. The fingerprint exists solely so a human has something short enough to
-/// compare; the ledger never sees it.
+/// pins the full key — its canonical (lowercase hex) form, not necessarily the exact spelling
+/// a caller offered, but never truncated — and truncating *that* to a fingerprint instead
+/// would silently throw away the collision resistance the 128 bits above are paying for and
+/// pin something an attacker only needs to match in 16 bytes, not the real `EndpointId`'s full
+/// 32. The fingerprint exists solely so a human has something short enough to compare; the
+/// ledger never sees it.
 ///
 /// Parses `endpoint_id` first and hashes the resulting 32 key bytes, not the string — see
 /// [`InvalidEndpointId`] for why. `iroh::EndpointId::from_str` accepts both lowercase hex and
 /// RFC 4648 base32, so this also normalizes two valid spellings of the same key to the same
 /// fingerprint (see `two_spellings_of_the_same_key_yield_the_same_fingerprint` below).
 pub fn fingerprint(endpoint_id: &str) -> Result<String, InvalidEndpointId> {
-    let key = iroh::EndpointId::from_str(endpoint_id).map_err(|e| InvalidEndpointId {
-        endpoint_id: endpoint_id.to_string(),
-        reason: e.to_string(),
-    })?;
+    let key = parse(endpoint_id)?;
 
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
