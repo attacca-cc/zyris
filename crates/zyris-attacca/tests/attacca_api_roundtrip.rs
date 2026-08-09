@@ -9,9 +9,10 @@ use zyris::{Datum, Node, NodeKind, Streaming, Transfer};
 use zyris_attacca::{
     attacca_api_capability, AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZDeltaKind,
     ZHistoryQuery, ZJob, ZJobFilter, ZJobState, ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewNode,
-    ZNewProject, ZNewSession, ZNewWork, ZNode, ZProject, ZProjectUpdate, ZScope, ZSession,
-    ZSessionEvent, ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame, ZTurnStatus, ZUsage,
-    ZWork, ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate, ATTACCA_API_CAPABILITY,
+    ZNewProject, ZNewSession, ZNewWork, ZNode, ZPeerAddr, ZPeerEntry, ZProject, ZProjectUpdate,
+    ZScope, ZSession, ZSessionEvent, ZSessionFilter, ZTask, ZTaskDep, ZTaskState, ZTurnFrame,
+    ZTurnStatus, ZUsage, ZWork, ZWorkFilter, ZWorkState, ZWorkTasks, ZWorkUpdate,
+    ATTACCA_API_CAPABILITY,
 };
 
 struct StubApi;
@@ -415,6 +416,32 @@ impl AttaccaApi for StubApi {
             created_at: Some("2026-08-03T00:00:00Z".into()),
         }])
     }
+
+    async fn peer_publish(&self, _endpoint_id: String, _addrs: Vec<String>) -> zyris::Result<()> {
+        Ok(())
+    }
+
+    /// Echoes the requested slug back on the answer, which is what a node calling this with the
+    /// name a user typed should get: the same name it asked with, not one the server substituted.
+    async fn peer_lookup(&self, slug: String) -> zyris::Result<ZPeerAddr> {
+        Ok(ZPeerAddr {
+            node_id: "sibling-1".into(),
+            slug,
+            endpoint_id: "ed25519:sibling-endpoint".into(),
+            addrs: vec!["203.0.113.5:4433".into()],
+            relay_url: Some("https://relay.attacca.cc".into()),
+            online: true,
+        })
+    }
+
+    async fn peer_list(&self) -> zyris::Result<Vec<ZPeerEntry>> {
+        Ok(vec![ZPeerEntry {
+            node_id: "sibling-1".into(),
+            slug: "laptop".into(),
+            endpoint_id: "ed25519:sibling-endpoint".into(),
+            online: true,
+        }])
+    }
 }
 
 fn server_node() -> Node {
@@ -437,7 +464,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 34);
+    assert_eq!(descriptor.tools.len(), 37);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
@@ -456,6 +483,25 @@ fn descriptor_matches_the_reserved_name() {
     assert_eq!(descriptor.tool("work_tasks").unwrap().transfer, Transfer::Unary);
 
     // `turn_events` stays the only stream: everything added since answers once.
+    let streams: Vec<&str> = descriptor
+        .tools
+        .iter()
+        .filter(|tool| tool.transfer == Transfer::UniStream)
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(streams, ["turn_events"]);
+}
+
+/// The three rendezvous tools added for P2P peer discovery: all unary (a lookup is a single
+/// request/response, not a feed), and `turn_events` must still be the only streamed tool.
+#[test]
+fn rendezvous_tools_are_in_the_descriptor() {
+    let descriptor = attacca_api_capability();
+    for name in ["peer_publish", "peer_lookup", "peer_list"] {
+        let tool = descriptor.tool(name).unwrap_or_else(|| panic!("{name} is missing"));
+        assert_eq!(tool.transfer, Transfer::Unary, "{name}");
+    }
+
     let streams: Vec<&str> = descriptor
         .tools
         .iter()
@@ -861,4 +907,35 @@ async fn sibling_node_scope_is_spelled_the_way_the_wire_spells_it() {
     assert_eq!(ZScope::NodesWrite.as_str(), "nodes:write");
     assert_eq!(ZScope::from_str("nodes:write"), Some(ZScope::NodesWrite));
     assert!(ZScope::ALL.contains(&ZScope::NodesWrite));
+}
+
+/// The scope guarding the three rendezvous tools.
+#[test]
+fn peers_write_scope_exists() {
+    let scope: ZScope = serde_json::from_str("\"peers:write\"").unwrap();
+    assert_eq!(scope, ZScope::PeersWrite);
+    assert_eq!(scope.as_str(), "peers:write");
+    assert_eq!(ZScope::from_str("peers:write"), Some(ZScope::PeersWrite));
+    assert!(ZScope::ALL.contains(&ZScope::PeersWrite));
+}
+
+/// The lookup key is the slug, not `node_id`: this is what a node calling `peer_lookup("laptop")`
+/// gets back, and it must be the same name it asked with rather than one the server minted, since
+/// that name is what TOFU pinning in `zyris-p2p` keys on.
+#[tokio::test]
+async fn peer_rendezvous_tools_round_trip() {
+    let api = client().await;
+
+    api.peer_publish("ed25519:my-endpoint".into(), vec!["198.51.100.9:4433".into()]).await.unwrap();
+
+    let addr = api.peer_lookup("laptop".into()).await.unwrap();
+    assert_eq!(addr.slug, "laptop", "peer_lookup must answer under the slug it was asked for");
+    assert_eq!(addr.node_id, "sibling-1");
+    assert!(!addr.addrs.is_empty());
+    assert!(addr.online);
+
+    let peers = api.peer_list().await.unwrap();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].slug, "laptop");
+    assert_eq!(peers[0].endpoint_id, "ed25519:sibling-endpoint");
 }
