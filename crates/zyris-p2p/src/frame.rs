@@ -5,22 +5,28 @@
 //! [u8 kind][u32 BE len][payload …]      kind 0 = Binary, 1 = Text
 //! ```
 //!
-//! **The `len` cap bounds a declared length, not resident memory — it is not the memory
-//! defense it looks like.** `vec![0u8; len]` for a length up to `MAX_FRAME` costs only a few
-//! KB of RSS up front, not `len` bytes: glibc's `alloc_zeroed` hands back lazy, copy-on-write
-//! zero pages, and nothing is actually resident until the receiver writes into them one
-//! `read_exact` at a time. So a peer declaring an oversized length does not spike our memory
-//! the way this used to claim; what the cap actually buys is rejecting a peer that is not
-//! speaking real zyris (`decode_header` refuses the length before any payload byte is read),
-//! not bounding allocation cost.
+//! **Both a declared length and bytes actually delivered are real costs, at very different
+//! scales.** A header declaring `MAX_FRAME` (16 MiB) but never backed by payload bytes costs
+//! only a few hundred KB of RSS up front — glibc's `alloc_zeroed` hands `vec![0u8; len]` back
+//! as lazy, copy-on-write zero pages, and nothing is resident until `read_exact` actually
+//! writes into them (measured: ~496 KB RSS for a bare 16 MiB declaration). But bytes a peer
+//! *does* send are genuinely resident the moment `read_exact` places them: a peer that delivers
+//! 12 MiB of an in-flight frame and then stalls mid-body costs on the order of 12 MiB of real,
+//! held memory (measured: +14,388 KB), for as long as that read stays in flight — not a lazy
+//! page in sight. `decode_header` rejecting an oversized declaration before any payload byte
+//! is read still matters (it is the first line of defense against a peer not speaking real
+//! zyris), but it does not bound what a peer who *does* send bytes, and then stops, can hold
+//! open.
 //!
-//! **The real exposure is time, not memory.** The protocol's credit accounting only binds what
-//! the sender is allowed to send — the receiver keeps no ledger of its own (`CreditViolation`
-//! is defined but never used) — so it does nothing to stop a peer that ignores the protocol.
-//! A peer that opens a connection and then sends a handful of bytes, or none at all, holds a
-//! task, a connection, and a socket open indefinitely: iroh's own keepalives run regardless, so
-//! there is no idle timeout to fall back on. That is a deadline problem for whoever drives the
-//! read loop on top of this framing, not something a length cap can fix.
+//! **What bounds that held-open case is a deadline, not this cap.** The protocol's credit
+//! accounting only binds what the sender is allowed to send — the receiver keeps no ledger of
+//! its own (`CreditViolation` is defined but never used) — so nothing here stops a peer that
+//! ignores the protocol from delivering part of a frame and then going silent, holding that
+//! memory, a task, and a connection open indefinitely: iroh's own keepalives run regardless, so
+//! there is no idle timeout to fall back on. `IrohRead`'s `FIRST_MESSAGE_DEADLINE`
+//! (`transport.rs`) is what actually bounds this for a stream's first read; an established
+//! connection's own heartbeat bounds it afterward. A length cap was never going to be able to
+//! do either job.
 
 use zyris_proto::WireMessage;
 

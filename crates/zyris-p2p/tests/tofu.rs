@@ -46,11 +46,33 @@ async fn pinning_twice_keeps_the_first_key() {
     let dir = tempfile::tempdir().unwrap();
     let store = TofuStore::new(dir.path().join("peers.json"));
     store.pin("node-b", "key-1").await.unwrap();
-    store.pin("node-b", "key-2").await.unwrap();
 
     // `pin` keeps the first value. If a later call could overwrite it, pinning would
-    // mean nothing — the substitution we are trying to catch would pin itself.
+    // mean nothing — the substitution we are trying to catch would pin itself. The second
+    // call must also *report* the mismatch, not just refuse to act on it — a caller that
+    // pins without calling `check` first must still learn a substitution was attempted.
+    let result = store.pin("node-b", "key-2").await;
+    match result {
+        Err(TofuError::Changed { pinned, offered }) => {
+            assert_eq!(pinned, "key-1");
+            assert_eq!(offered, "key-2");
+        }
+        other => panic!("a re-pin with a different key must be reported, got {other:?}"),
+    }
+
     assert!(matches!(store.check("node-b", "key-2").await, Err(TofuError::Changed { .. })));
+}
+
+#[tokio::test]
+async fn re_pinning_the_identical_key_is_a_silent_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    store.pin("node-b", "key-1").await.unwrap();
+
+    // Only a re-pin of the *same* key is a true no-op — this is not a substitution attempt,
+    // so it must not be reported as one.
+    assert!(store.pin("node-b", "key-1").await.is_ok());
+    assert!(store.check("node-b", "key-1").await.is_ok());
 }
 
 #[tokio::test]

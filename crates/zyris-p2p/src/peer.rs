@@ -12,6 +12,8 @@ pub enum PeerError {
     Stream(String),
     #[error("peer did not complete the zyris handshake within the deadline")]
     Timeout,
+    #[error("peer negotiated ALPN {negotiated:?}, expected {expected:?}")]
+    AlpnMismatch { negotiated: Vec<u8>, expected: &'static [u8] },
 }
 
 pub async fn dial(
@@ -59,9 +61,17 @@ pub async fn accept_next(endpoint: &iroh::Endpoint) -> Option<PendingConnection>
 
 /// Completes the QUIC handshake and opens the zyris bi-stream for a connection `accept_next`
 /// handed back, bounded by `deadline` end to end. A peer that never finishes the handshake or
-/// never opens a stream gets exactly `deadline` before this gives up on it — the caller can
-/// then drop everything this held (which tears down the QUIC connection) instead of leaking a
-/// task on an attacker who just holds the socket open.
+/// never opens a stream gets exactly `deadline` before this returns `Err(PeerError::Timeout)`,
+/// at which point the caller drops everything this held, tearing down the QUIC connection.
+///
+/// **This deadline alone does not close the whole hole.** It stops once this function returns
+/// `Ok` — a peer that opens the bi-stream, writes one byte, and then stalls satisfies it and
+/// still leaves the caller with a live, unbounded read ahead of it (typically `Node::accept`'s
+/// `read_handshake`, whose own heartbeat watchdog does not start until *after* that first read
+/// succeeds). What actually closes that gap is one layer down: the returned `IrohTransport`'s
+/// first read carries its own `FIRST_MESSAGE_DEADLINE` (see `transport.rs`), so a peer that goes
+/// quiet at any point up through its first real message cannot pin a task regardless of what
+/// this function's own `deadline` was set to.
 pub async fn establish(
     accepting: PendingConnection,
     deadline: Duration,
@@ -76,6 +86,16 @@ async fn establish_inner(
 ) -> Result<(iroh::EndpointId, IrohTransport), PeerError> {
     let PendingConnection { incoming, endpoint } = accepting;
     let conn = incoming.await.map_err(|e| PeerError::Connect(e.to_string()))?;
+    // `endpoint.accept()` matches *any* ALPN the endpoint was configured with — if the same
+    // `iroh::Endpoint` is ever shared with another protocol, a peer that negotiated that other
+    // ALPN would otherwise sail straight through as if it were speaking zyris. Checked before
+    // `accept_bi()` so a mismatched peer is rejected without also having to open a stream first.
+    if conn.alpn() != ALPN {
+        return Err(PeerError::AlpnMismatch {
+            negotiated: conn.alpn().to_vec(),
+            expected: ALPN,
+        });
+    }
     // `Connection::remote_id` on an established connection returns the `EndpointId` directly
     // (no `Result`) — only the zero-RTT connection states return `Result<EndpointId, _>`.
     let peer = conn.remote_id();
