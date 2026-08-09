@@ -122,28 +122,39 @@ async fn 자리가_이미_있으면_다음_순번으로_넘어간다() {
 
     // 미끼가 실제로 쓴 자리 바로 다음 이름을, "다른 프로세스가 이미 써 둔 백업"처럼
     // 미리 만들어 둔다.
+    // **한 자리만 선점하면 이 테스트는 빗장이 되지 못한다.** 순번 카운터는 테스트 바이너리
+    // 전역이라 같은 파일의 다른 테스트가 동시에 `stash`를 부르면 카운터가 우리 예상보다 더
+    // 나아가고, 그러면 다음 `stash`가 선점해 둔 자리를 아예 안 밟는다 — 버그를 되돌려도
+    // `assert_ne!`가 그냥 성립해 초록이 난다(실제로 5회 중 1회 그랬다). 그래서 **띠로**
+    // 선점한다. 여덟 자리면 동시에 도는 테스트 몇 개로는 못 뛰어넘는다.
     let 미끼_부모 = 미끼_자리.parent().unwrap();
     let 미끼_부모_이름 = 미끼_부모.file_name().unwrap().to_str().unwrap();
     let (ms_부분, 순번_부분) = 미끼_부모_이름.rsplit_once('-').unwrap();
-    let 다음_순번: u64 = 순번_부분.parse().unwrap();
-    let 남의_자리 = 보관.path().join(format!("{ms_부분}-{}", 다음_순번 + 1));
-    tokio::fs::create_dir_all(&남의_자리).await.unwrap();
-    let 남의_파일 = 남의_자리.join("이미있음.txt");
-    tokio::fs::write(&남의_파일, "다른 프로세스의 백업".as_bytes()).await.unwrap();
+    let 미끼_순번: u64 = 순번_부분.parse().unwrap();
+    let mut 남의_자리들 = Vec::new();
+    for 순번 in 미끼_순번 + 1..=미끼_순번 + 8 {
+        let 자리 = 보관.path().join(format!("{ms_부분}-{순번}"));
+        tokio::fs::create_dir_all(&자리).await.unwrap();
+        let 파일 = 자리.join("이미있음.txt");
+        tokio::fs::write(&파일, "다른 프로세스의 백업".as_bytes()).await.unwrap();
+        남의_자리들.push((자리, 파일));
+    }
 
     let 진짜_희생자 = 작업.path().join("진짜.pdf");
     tokio::fs::write(&진짜_희생자, "진짜 내용".as_bytes()).await.unwrap();
     let 진짜_자리 = store.stash(&진짜_희생자, now_ms).await.unwrap();
 
-    assert_ne!(
-        진짜_자리.parent().unwrap(),
-        남의_자리,
-        "이미 있는 자리를 그대로 밀고 들어가면 안 된다 — 다음 순번으로 넘어가야 한다"
-    );
-    assert_eq!(
-        tokio::fs::read(&남의_파일).await.unwrap(),
-        "다른 프로세스의 백업".as_bytes(),
-        "남의 백업이 지워지거나 덮이면 안 된다"
-    );
+    for (자리, 파일) in &남의_자리들 {
+        assert_ne!(
+            진짜_자리.parent().unwrap(),
+            자리.as_path(),
+            "이미 있는 자리를 그대로 밀고 들어가면 안 된다 — 다음 순번으로 넘어가야 한다"
+        );
+        assert_eq!(
+            tokio::fs::read(파일).await.unwrap(),
+            "다른 프로세스의 백업".as_bytes(),
+            "남의 백업이 지워지거나 덮이면 안 된다"
+        );
+    }
     assert_eq!(tokio::fs::read(&진짜_자리).await.unwrap(), "진짜 내용".as_bytes());
 }
