@@ -439,10 +439,15 @@ impl TofuStore {
 
     async fn read(&self) -> Result<Ledger, TofuError> {
         match tokio::fs::read(self.path.as_path()).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| TofuError::Malformed {
-                path: self.path.display().to_string(),
-                reason: e.to_string(),
-            }),
+            Ok(bytes) => {
+                let mut ledger: Ledger =
+                    serde_json::from_slice(&bytes).map_err(|e| TofuError::Malformed {
+                        path: self.path.display().to_string(),
+                        reason: e.to_string(),
+                    })?;
+                canonicalize_ledger_entries(&mut ledger, &self.path)?;
+                Ok(ledger)
+            }
             // No file yet is the honest empty case: nothing has ever been pinned.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
             Err(e) => Err(TofuError::Io(e.to_string())),
@@ -626,6 +631,34 @@ impl Drop for LockFile {
 /// call ever sees the original string again.
 fn canonical_endpoint_id(endpoint_id: &str) -> Result<String, TofuError> {
     Ok(crate::fingerprint::parse(endpoint_id)?.to_string())
+}
+
+/// Re-canonicalizes every entry's `endpoint_id` in place, right after the ledger is
+/// deserialized — chosen over failing on a non-canonical (but validly parseable) spelling
+/// because **hand-editing this file is the only documented way to un-pin a peer** (see the
+/// module docs). A human recovering from a `Changed` error deletes the stale entry and pastes
+/// the real key back in from wherever they copied it, which has no reason to be in this
+/// store's own canonical (hex) form. Without this pass, a re-added entry pasted in as valid
+/// base32 would compare unequal, byte for byte, against the canonical hex string every future
+/// `check`/`authorize` call derives from the *same* key — turning the one recovery path this
+/// design offers into a permanent, unexplained `Changed` for anyone who does not happen to
+/// paste the exact spelling this code writes internally. Runs on every `read()`, not once at
+/// startup, since the file can be hand-edited again between calls.
+///
+/// Still fails closed on a `peer_slug` whose `endpoint_id` does not parse as a key **at all**
+/// — that is corruption, not a spelling choice, and the existing "a ledger we cannot read is
+/// an error" rule (see the module docs) covers it the same way a bad top-level JSON shape
+/// already does. The error names which slug is at fault, since a human fixing this by hand
+/// needs to know where to look.
+fn canonicalize_ledger_entries(ledger: &mut Ledger, path: &Path) -> Result<(), TofuError> {
+    for (peer_slug, entry) in ledger.peers.iter_mut() {
+        let key = crate::fingerprint::parse(&entry.endpoint_id).map_err(|e| TofuError::Malformed {
+            path: path.display().to_string(),
+            reason: format!("entry {peer_slug:?}: {e}"),
+        })?;
+        entry.endpoint_id = key.to_string();
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {

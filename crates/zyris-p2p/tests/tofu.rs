@@ -602,6 +602,85 @@ async fn pinning_in_one_spelling_and_authorizing_in_another_is_ok_but_a_differen
     ));
 }
 
+/// `pin_preapproved`'s own doc recommends calling it directly for a provisioning step that
+/// already trusts a fingerprint (no `authorize`/no confirmer in the loop at all) — so its own
+/// canonicalization gate has to hold on that path independent of `authorize`'s. Round 2's
+/// review found the review-round-1-style `authorize` test does not exercise this: deleting
+/// `pin_preapproved`'s own `canonical_endpoint_id` call left 58/58 green, because nothing called
+/// it directly with unparseable input.
+#[tokio::test]
+async fn pin_preapproved_rejects_unparseable_input_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+
+    let result = store.pin_preapproved("kitchen-pi", "not-a-key").await;
+    assert!(matches!(result, Err(TofuError::InvalidEndpointId(_))), "got {result:?}");
+
+    // Nothing pinned under this slug — a rejected pin must have no side effects.
+    let anything = fresh_endpoint_id();
+    assert!(store.check("kitchen-pi", &anything).await.is_ok(), "garbage must not have been pinned");
+}
+
+/// The other half of the same gate: `pin_preapproved` must canonicalize what it *does* accept,
+/// not just reject what it does not. Pins directly (not through `authorize`) using one
+/// accepted spelling and checks with another — this is the write-side mirror of
+/// `pinning_in_one_spelling_and_authorizing_in_another_is_ok_but_a_different_key_still_refuses`
+/// above, which only ever pins via the hex spelling.
+#[tokio::test]
+async fn pin_preapproved_canonicalizes_so_a_later_check_in_another_spelling_still_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+
+    let key = iroh::SecretKey::generate().public();
+    let base32_spelling = base32_nopad(key.as_bytes());
+    let hex_spelling = key.to_string();
+
+    store.pin_preapproved("kitchen-pi", &base32_spelling).await.unwrap();
+    assert!(store.check("kitchen-pi", &hex_spelling).await.is_ok());
+}
+
+/// **Hand-editing the ledger is the only documented way to un-pin a peer** (see `tofu.rs`'s
+/// module docs). A human doing exactly that — deleting a stale entry and pasting the real key
+/// back in from wherever they copied it — has no reason to paste it in this store's own
+/// canonical (hex) form. A ledger written by hand in a different, still-valid spelling must
+/// behave identically to one in canonical form: `check`ing or `authorize`ing with the
+/// canonical spelling of the same key must read as already pinned, not as an unknown peer and
+/// not as `Changed`. Constructs the ledger file directly (not via `pin_preapproved`) to
+/// simulate exactly this hand-edit, bypassing this store's own write path entirely.
+#[tokio::test]
+async fn a_hand_edited_ledger_in_a_non_canonical_spelling_reads_the_same_as_canonical() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.json");
+
+    let key = iroh::SecretKey::generate().public();
+    let base32_spelling = base32_nopad(key.as_bytes());
+    let hex_spelling = key.to_string();
+    assert_ne!(
+        base32_spelling, hex_spelling,
+        "test setup: need two textually different spellings of the same key"
+    );
+
+    let contents = format!(
+        r#"{{"peers":{{"kitchen-pi":{{"endpoint_id":"{base32_spelling}","first_seen_ms":0}}}}}}"#
+    );
+    tokio::fs::write(&path, contents).await.unwrap();
+
+    let store = TofuStore::new(&path);
+    assert!(
+        store.check("kitchen-pi", &hex_spelling).await.is_ok(),
+        "a hand-edited non-canonical entry must read as matching the same key in canonical form"
+    );
+
+    let confirmer = StubConfirmer::answering(true);
+    let result = store.authorize(&confirmer, "kitchen-pi", &hex_spelling).await;
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(
+        confirmer.calls.load(Ordering::SeqCst),
+        0,
+        "a hand-edited entry in a non-canonical spelling must read as already pinned, not unknown"
+    );
+}
+
 /// Minimal RFC 4648 base32 (no padding) encoder — just enough to construct a second, valid
 /// spelling of an `EndpointId` for the test above, matching what `iroh::EndpointId::from_str`'s
 /// non-hex branch actually decodes (`decode_base32_hex` in `iroh-base`, which uppercases before
