@@ -1,0 +1,23 @@
+[package]
+name = "zyris-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport that carries Zyris over a direct node-to-node connection"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+iroh = "1"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util", "fs"] }
+tracing.workspace = true
+zyris = { version = "0.1.0", path = "../zyris" }
+zyris-proto = { version = "0.1.0", path = "../zyris-proto" }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
