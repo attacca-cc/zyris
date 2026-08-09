@@ -1,10 +1,11 @@
-//! 보내는 쪽이 제안한 이름을 받는 쪽이 쓸 수 있는 경로 조각 하나로 씻는다.
+//! Washes the name the sending side proposed into a single path component the receiving side can
+//! use.
 //!
-//! 거부가 아니라 제거인 이유: 이름 하나 때문에 전송이 통째로 실패할 이유가 없다. 씻어도
-//! 남는 것이 없을 때만 기본 이름을 준다.
+//! Stripping rather than rejecting: one awkward name is no reason for a whole transfer to fail. A
+//! default name is handed out only when nothing survives the wash.
 //!
-//! **이것만으로 안전해지지 않는다.** 씻기는 정상 경로를 지키는 것이고, 씻기를 빠져나간 것은
-//! `inbox::resolve`의 실제 경로 확인이 잡는다. 둘 다 있어야 한다.
+//! **This alone does not make anything safe.** Washing guards the ordinary path; whatever slips
+//! past it is caught by `inbox::resolve`'s real-path checks. Both have to be there.
 
 /// 윈도우가 장치로 예약한 이름들. 확장자가 붙어도 예약이라 `con.txt`도 걸린다.
 const 예약어: &[&str] = &[
@@ -12,7 +13,9 @@ const 예약어: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-const 최대_바이트: usize = 255;
+/// 이름 하나가 넘으면 안 되는 바이트 수. `peer::part_path`가 `.part` 꼬리를 붙일 때도 이
+/// 한도 안에 들어가도록 줄기를 줄여야 하므로 모듈 밖에서 보인다.
+pub(super) const 최대_바이트: usize = 255;
 
 pub fn safe_name(proposed: &str) -> String {
     // **마지막 조각만 취한다.** 구분자를 지우기만 하면 `../../etc/passwd`가

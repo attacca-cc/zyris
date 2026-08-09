@@ -1,3 +1,5 @@
+#![cfg(feature = "transfer")]
+
 //! 감옥은 실제 파일시스템으로만 판정한다. 순수 함수가 못 보는 것이 여기 있다 — 심링크.
 
 use zyris_capkit::transfer::inbox::{Inbox, InboxError};
