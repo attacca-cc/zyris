@@ -200,7 +200,10 @@ async fn a_fresh_lock_file_is_not_broken_and_the_pin_fails() {
     // Freshly written: its mtime is "now", nowhere near the staleness threshold.
     tokio::fs::write(&lock_path, b"fresh-nonce").await.unwrap();
 
-    let store = TofuStore::new(&path);
+    // A short timeout instead of the 5s default: this test only cares that the retry loop
+    // gives up and reports an error, not about the production wait time. `with_lock_timeout`
+    // is `#[doc(hidden)]` — for tests exactly like this one, not for real callers.
+    let store = TofuStore::new(&path).with_lock_timeout(std::time::Duration::from_millis(100));
     // A live writer's lock must never be stolen: this has to fail loudly, not proceed as if
     // no one held it and not silently drop the pin.
     let result = store.pin("node-b", "key-1").await;
