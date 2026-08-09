@@ -31,6 +31,14 @@ const CLOSE_STOPPED_WAIT: Duration = Duration::from_secs(5);
 /// caller (`dial` or `establish`) produced this transport. Once a first message has arrived, an
 /// established connection's own heartbeat (zyris's, layered above this transport) is what
 /// detects a peer that goes silent later — this deadline does not re-apply to every read.
+///
+/// **Must stay well under zyris's own heartbeat interval (20s, `HeartbeatConfig::default` in
+/// `zyris-proto/src/envelope.rs`).** The two are coupled only by convention — nothing enforces
+/// it — but if this ever grew to meet or exceed the heartbeat interval, an idle-but-healthy
+/// connection legitimately waiting for its *first* message after a longer-than-usual pause
+/// could be killed by this deadline before the heartbeat ever gets a say. `first_read` (below)
+/// is what keeps this deadline from ever applying past the first read; if the heartbeat
+/// interval is ever retuned, re-check this constant against it too.
 const FIRST_MESSAGE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// `iroh::Endpoint` is `Arc`-backed and cheap to clone, but a `Connection` does **not** keep its
