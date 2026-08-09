@@ -6,3 +6,4 @@
 //! fits.
 
 pub mod frame;
+pub mod key;
