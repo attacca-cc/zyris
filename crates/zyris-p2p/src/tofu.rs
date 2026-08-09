@@ -48,6 +48,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::fingerprint::{fingerprint, PeerConfirmer};
+
 #[derive(Debug, thiserror::Error)]
 pub enum TofuError {
     #[error("this node's key changed. pinned: {pinned}, offered: {offered}")]
@@ -56,6 +58,12 @@ pub enum TofuError {
     Malformed { path: String, reason: String },
     #[error("{0}")]
     Io(String),
+    /// The person asked to confirm `label`'s fingerprint said no. Nothing was pinned —
+    /// `TofuStore::authorize` returns this before ever calling `pin`, so an attacker who gets
+    /// refused once does not get a second, quieter attempt under the same slug: the peer stays
+    /// unknown, exactly as if the connection had never happened.
+    #[error("peer confirmation for {label} was refused (fingerprint {fingerprint}); not pinned")]
+    Refused { label: String, fingerprint: String },
 }
 
 /// The on-disk ledger. `deny_unknown_fields` and requiring `peers` (no `#[serde(default)]`)
@@ -71,7 +79,7 @@ struct Ledger {
     peers: HashMap<String, Entry>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     endpoint_id: String,
     /// Never read by this code. It is here for the human who opens the file after a
@@ -139,15 +147,78 @@ impl TofuStore {
     ///
     /// A ledger we cannot read is an error, not an empty ledger. See the module docs.
     pub async fn check(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
-        let ledger = self.read().await?;
-        match ledger.peers.get(peer_slug) {
+        match self.lookup(peer_slug).await? {
             None => Ok(()),
             Some(entry) if entry.endpoint_id == endpoint_id => Ok(()),
-            Some(entry) => Err(TofuError::Changed {
-                pinned: entry.endpoint_id.clone(),
-                offered: endpoint_id.to_string(),
-            }),
+            Some(entry) => {
+                Err(TofuError::Changed { pinned: entry.endpoint_id, offered: endpoint_id.to_string() })
+            }
         }
+    }
+
+    /// Checks the offered key against a confirmer, pinning it if the confirmer accepts.
+    ///
+    /// This is `check` plus a human in the loop for the one case `check` cannot resolve on its
+    /// own — a peer this ledger has never seen:
+    ///
+    /// 1. **Look up `peer_slug` without taking any lock.** A known peer is settled right here:
+    ///    the same key returns `Ok(())`, a different key returns `Err(Changed)` — and neither
+    ///    case calls `confirmer` at all. A key that is already pinned differently is not a
+    ///    judgment call for a person to make; it is refused outright, the same way `check`
+    ///    already refuses it. Asking "are you sure?" about a substitution would just give an
+    ///    attacker a second, quieter attempt at the same slug.
+    /// 2. **Only an unknown peer reaches `confirmer.confirm`.** This is deliberately the one
+    ///    step in `authorize` that can take longer than a filesystem call — a person has to
+    ///    read a fingerprint and decide. Nothing here holds `pin`'s file lock (or even the
+    ///    in-process one `pin` also takes) while that happens: the lock is designed to be
+    ///    broken as stale after 60 seconds (see the module docs and `LOCK_STALE_THRESHOLD`)
+    ///    because the only legitimate way to hold it that long is a dead writer, and a person
+    ///    thinking it over is not dead, just slower than a lock built for crash recovery can
+    ///    tell apart from one.
+    /// 3. **A refusal returns `Err(Refused)` and pins nothing.** An acceptance calls
+    ///    [`Self::pin`], which takes the lock and *re-checks* before writing. That re-check is
+    ///    what makes step 1's lock-free lookup safe despite the gap a slow human opens up: if
+    ///    another connection pinned a different key for this same `peer_slug` while this one
+    ///    was waiting on an answer, `pin` reports `Changed` instead of overwriting it — the
+    ///    exact protection `pin`'s own doc comment describes, inherited here for free rather
+    ///    than re-implemented.
+    ///
+    /// `peer_slug` carries the same requirement as `check` and `pin`: a name the user chose,
+    /// never a string attacca minted. See the module docs.
+    pub async fn authorize(
+        &self,
+        confirmer: &dyn PeerConfirmer,
+        peer_slug: &str,
+        endpoint_id: &str,
+    ) -> Result<(), TofuError> {
+        match self.lookup(peer_slug).await? {
+            Some(entry) if entry.endpoint_id == endpoint_id => return Ok(()),
+            Some(entry) => {
+                return Err(TofuError::Changed {
+                    pinned: entry.endpoint_id,
+                    offered: endpoint_id.to_string(),
+                });
+            }
+            None => {}
+        }
+
+        let fp = fingerprint(endpoint_id);
+        if !confirmer.confirm(peer_slug, &fp).await {
+            return Err(TofuError::Refused { label: peer_slug.to_string(), fingerprint: fp });
+        }
+
+        self.pin(peer_slug, endpoint_id).await
+    }
+
+    /// Reads the ledger and returns this peer's pinned entry, if any — no lock, since a read
+    /// races nothing that matters (only concurrent *writes* need `pin`'s lock). The one piece
+    /// of lookup logic `check` and `authorize` both need: whether `peer_slug` is pinned at all,
+    /// and to what. Kept as its own method rather than inlined in both, since `authorize` needs
+    /// to tell "known and matching" apart from "never seen" — something `check`'s `Result<(),
+    /// _>` alone cannot express, but the `Option<Entry>` this returns can.
+    async fn lookup(&self, peer_slug: &str) -> Result<Option<Entry>, TofuError> {
+        let ledger = self.read().await?;
+        Ok(ledger.peers.get(peer_slug).cloned())
     }
 
     /// Pins the key of the first connection that succeeded. **Never overwrites a pin** — but a

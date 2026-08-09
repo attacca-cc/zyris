@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use zyris_p2p::fingerprint::PeerConfirmer;
 use zyris_p2p::tofu::{TofuError, TofuStore};
 
 #[tokio::test]
@@ -230,4 +233,175 @@ async fn a_fresh_lock_file_is_not_broken_and_the_pin_fails() {
     // no one held it and not silently drop the pin.
     let result = store.pin("kitchen-pi", "key-1").await;
     assert!(matches!(result, Err(TofuError::Io(_))), "got {result:?}");
+}
+
+/// A [`PeerConfirmer`] whose answer and call count are set up by the test. Counting calls is
+/// what lets a test prove a *known* peer (matching or changed) never reaches a human at all —
+/// only an unknown one should.
+struct StubConfirmer {
+    answer: bool,
+    calls: AtomicUsize,
+}
+
+impl StubConfirmer {
+    fn answering(answer: bool) -> StubConfirmer {
+        StubConfirmer { answer, calls: AtomicUsize::new(0) }
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerConfirmer for StubConfirmer {
+    async fn confirm(&self, _label: &str, _fingerprint: &str) -> bool {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.answer
+    }
+}
+
+#[tokio::test]
+async fn authorize_passes_a_known_matching_key_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    store.pin("kitchen-pi", "key-1").await.unwrap();
+
+    let confirmer = StubConfirmer::answering(true);
+    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(
+        confirmer.calls.load(Ordering::SeqCst),
+        0,
+        "a peer already pinned under the same key must not be confirmed again"
+    );
+}
+
+#[tokio::test]
+async fn authorize_refuses_a_known_changed_key_without_asking() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    store.pin("kitchen-pi", "key-1").await.unwrap();
+
+    // Answers `true` on purpose: even a confirmer that would say yes to anything must never
+    // be given the chance here. A changed key on an already-pinned slug is exactly the
+    // substitution TOFU exists to catch — it must be refused outright, not turned into a
+    // prompt an attacker could get lucky on.
+    let confirmer = StubConfirmer::answering(true);
+    let result = store.authorize(&confirmer, "kitchen-pi", "key-2").await;
+
+    assert!(matches!(result, Err(TofuError::Changed { .. })), "got {result:?}");
+    assert_eq!(
+        confirmer.calls.load(Ordering::SeqCst),
+        0,
+        "a known peer offering a different key must be refused without ever asking"
+    );
+    // And still not pinned as key-2 — the refusal must not have side effects.
+    assert!(matches!(
+        store.check("kitchen-pi", "key-2").await,
+        Err(TofuError::Changed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn authorize_asks_once_for_an_unknown_peer_and_does_not_pin_on_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+
+    let confirmer = StubConfirmer::answering(false);
+    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+
+    assert!(matches!(result, Err(TofuError::Refused { .. })), "got {result:?}");
+    assert_eq!(confirmer.calls.load(Ordering::SeqCst), 1, "an unknown peer must be asked");
+    // Refused, not pinned: the peer must still read as unknown afterward.
+    assert!(
+        store.check("kitchen-pi", "anything-at-all").await.is_ok(),
+        "a refused peer must not have been pinned"
+    );
+}
+
+#[tokio::test]
+async fn authorize_pins_an_unknown_peer_on_acceptance() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+
+    let confirmer = StubConfirmer::answering(true);
+    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+
+    assert!(result.is_ok(), "got {result:?}");
+    assert_eq!(confirmer.calls.load(Ordering::SeqCst), 1);
+    assert!(store.check("kitchen-pi", "key-1").await.is_ok());
+    assert!(matches!(
+        store.check("kitchen-pi", "key-2").await,
+        Err(TofuError::Changed { .. })
+    ));
+}
+
+/// The confirmer itself pins a *different* key for the same slug while it is being asked —
+/// standing in for a second connection winning a race against a human still reading a
+/// fingerprint. This is only possible at all if `authorize` is not holding the in-process
+/// write lock while `confirm` runs: `TofuStore::pin` takes that same lock (via the shared
+/// `store.clone()` below), and `tokio::sync::Mutex` is not reentrant, so a lock held across
+/// `confirm` would make this nested `pin` call hang forever rather than complete — which the
+/// outer `timeout` turns into a clean test failure instead of a wedged test suite.
+#[tokio::test]
+async fn authorize_does_not_hold_the_lock_while_waiting_on_a_confirmer() {
+    struct RacingConfirmer {
+        store: TofuStore,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerConfirmer for RacingConfirmer {
+        async fn confirm(&self, _label: &str, _fingerprint: &str) -> bool {
+            self.store.pin("kitchen-pi", "key-2").await.unwrap();
+            true
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    let confirmer = RacingConfirmer { store: store.clone() };
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.authorize(&confirmer, "kitchen-pi", "key-1"),
+    )
+    .await
+    .expect(
+        "authorize hung waiting on its own lock — confirm must not run while a lock is held",
+    );
+
+    // Our key lost the race: the confirmer's own pin landed key-2 first, so `pin`'s re-check
+    // inside `authorize` must catch the mismatch instead of overwriting it.
+    assert!(matches!(result, Err(TofuError::Changed { ref pinned, .. }) if pinned == "key-2"), "got {result:?}");
+}
+
+/// Same race, but through the `<ledger>.lock` *file* instead of the in-process mutex: the
+/// confirmer uses a fresh `TofuStore` over the same path (not a clone), so this exercises the
+/// lock that actually matters across processes — the one the module docs say a 60-second-long
+/// human absolutely cannot be waited out under. A short `with_lock_timeout` on the racing store
+/// means a mutation that holds this lock across `confirm` surfaces as a quick `Err` here rather
+/// than a multi-second hang.
+#[tokio::test]
+async fn authorize_does_not_hold_the_file_lock_while_waiting_on_a_confirmer() {
+    struct RacingConfirmer {
+        path: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerConfirmer for RacingConfirmer {
+        async fn confirm(&self, _label: &str, _fingerprint: &str) -> bool {
+            let racer = TofuStore::new(&self.path)
+                .with_lock_timeout(std::time::Duration::from_millis(500));
+            racer.pin("kitchen-pi", "key-2").await.unwrap_or_else(|e| {
+                panic!("a concurrent pin from a second process could not take the lock file: {e}")
+            });
+            true
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.json");
+    let store = TofuStore::new(&path);
+    let confirmer = RacingConfirmer { path };
+
+    let result = store.authorize(&confirmer, "kitchen-pi", "key-1").await;
+    assert!(matches!(result, Err(TofuError::Changed { ref pinned, .. }) if pinned == "key-2"), "got {result:?}");
 }
