@@ -20,21 +20,23 @@ use super::audit::{Audit, AuditLine};
 use super::inbox::Inbox;
 use super::undo::UndoStore;
 
-/// 파일을 스트림 항목 하나에 얼마씩 실을지.
+/// How much of the file to load into one stream item.
 ///
-/// **프로토콜의 `initial_stream_credit`(256 KiB)보다 넉넉히 작아야 한다.** 항목은 와이어로
-/// 나가기 전에 msgpack으로 감싸이므로, 창과 *똑같은* 크기로 실으면 직렬화된 길이가 창을 몇
-/// 바이트 넘는다. 그러면 보내는 쪽 `CreditGate::acquire`가 **첫 청크에서** 막히고, 상대는 그
-/// 청크를 못 받았으니 credit을 돌려줄 수 없다 — 양쪽이 서로를 기다리며 영원히 멈춘다.
-/// 256 KiB로 뒀을 때 실제로 그랬다(262,144는 정지, 262,080은 통과).
+/// **Must stay comfortably smaller than the protocol's `initial_stream_credit` (256 KiB).**
+/// Items get wrapped in msgpack before going out on the wire, so loading exactly the window's
+/// size makes the serialized length overrun the window by a few bytes. The sending side's
+/// `CreditGate::acquire` then blocks **on the very first chunk**, and the peer — never having
+/// received that chunk — has no way to return credit for it: both sides wait on each other
+/// forever. This actually happened at 256 KiB (262,144 hung, 262,080 got through).
 ///
-/// 감싸는 몫은 크기와 무관한 상수다(msgpack `bin32` 헤더 5바이트). 64 KiB면 항목 하나가
-/// 65,541바이트라 창 하나에 셋이 함께 흐른다.
+/// The wrapping overhead is a constant independent of size (a 5-byte msgpack `bin32` header). At
+/// 64 KiB, one item is 65,541 bytes, so three fit together in one window.
 ///
-/// **여백이 아니라 상수인 것이 약점이다.** `initial_stream_credit`은 받는 쪽이
-/// `AcceptOptions::limits`로 정하는 협상값인데 `pull`은 그 값을 볼 수 없다. 누가 창을
-/// 65,541보다 작게(예: 딱 64 KiB) 잡으면 같은 영구 정지가 돌아온다. 협상값에서 유도하도록
-/// 고치는 것이 옳다 — 지금은 기본값이 256 KiB라 네 배 여유가 있어 미뤄 둔다.
+/// **Being a constant rather than a margin is the weak point.** `initial_stream_credit` is a
+/// negotiated value the receiving side sets through `AcceptOptions::limits`, and `pull` cannot see
+/// it. If anyone sets the window smaller than 65,541 (say, exactly 64 KiB), the same permanent
+/// hang comes back. The right fix is to derive this from the negotiated value — deferred for now
+/// because the default is 256 KiB, which leaves fourfold headroom.
 const 청크: usize = 64 * 1024;
 
 /// Where the in-progress `.part` file of one transfer lives, next to its destination.
@@ -62,17 +64,18 @@ const 청크: usize = 64 * 1024;
 /// destination turns the failure cleanup into a delete of the file being replaced.
 pub fn part_path(목적지: &Path, transfer_id: &str) -> PathBuf {
     let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
-    // `.` + 16글자 + `.part` = 22바이트. 입력이 무엇이든 길이가 변하지 않는다.
+    // `.` + 16 chars + `.part` = 22 bytes. The length never changes no matter what the input is.
     let 꼬리 = format!(".{}.part", &표식[..16]);
-    // `file_name()`이 `None`일 일은 없다 — `목적지`는 `Inbox::resolve`가 `safe_name`을 거쳐
-    // 만든 경로라 항상 마지막 조각이 있다. 혹시라도 없다면 패닉 대신 "file"로 대체한다.
+    // `file_name()` can never be `None` here — `목적지` is a path `Inbox::resolve` built by
+    // passing it through `safe_name`, so it always has a last component. If it somehow were
+    // absent anyway, fall back to "file" instead of panicking.
     let 이름 = 목적지
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
-    // `safe_name`이 이름을 이미 255바이트까지 채워 놨을 수 있다. 꼬리를 그냥 붙이면 한도를
-    // 넘어 `ENAMETOOLONG`이 난다 — 꼬리 몫만큼 줄기를 **문자 경계에서** 잘라 낸다(바이트로
-    // 자르면 한글에서 패닉한다).
+    // `safe_name` may have already filled the name out to 255 bytes. Just appending the suffix
+    // would overrun the limit and produce `ENAMETOOLONG` — so the stem is cut back by exactly the
+    // suffix's share, and **at a character boundary** (cutting by byte panics on Korean text).
     let 남길_바이트 = super::name::최대_바이트.saturating_sub(꼬리.len());
     let mut 줄기 = String::new();
     for c in 이름.chars() {
@@ -82,15 +85,18 @@ pub fn part_path(목적지: &Path, transfer_id: &str) -> PathBuf {
         줄기.push(c);
     }
     let mut 임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
-    // **자르기가 임시를 목적지 자신으로 되돌릴 수 있다.** 꼬리는 `transfer_id`에서 나오고
-    // `transfer_id`도 `name`도 보내는 쪽이 고르므로, 꼬리를 미리 계산해 255바이트 이름 끝에
-    // 심어 두면 자른 결과가 원래 이름과 글자 하나 다르지 않게 된다. 그러면 이미 있던 목적지가
-    // 이어받기 부스러기로 잡혀 해시가 맞을 수 없고, 불일치 정리 `remove_file(&임시)`가 목적지
-    // 자신을 지운다 — 되돌림도 감사도 남지 않는다.
+    // **Truncation can fold `임시` back into `목적지` itself.** The suffix is derived from
+    // `transfer_id`, and both `transfer_id` and `name` are chosen by the sending side — so
+    // pre-computing the suffix and planting it at the end of a 255-byte name makes the truncated
+    // result come out letter-for-letter identical to the original name. When that happens, an
+    // existing destination gets mistaken for a resume leftover, its hash can never match, and the
+    // mismatch cleanup `remove_file(&임시)` deletes the destination itself — leaving neither an
+    // undo nor an audit trail behind.
     //
-    // 한 글자만 더 줄이면 길이가 달라져 반드시 갈라진다. 겹치는 경우 줄기는 200바이트대이므로
-    // 지울 글자가 없을 일은 없다(줄기가 이름 전체면 임시는 이름보다 꼬리만큼 길어 애초에 안
-    // 겹친다).
+    // Shortening by just one more character necessarily makes the lengths diverge. In the
+    // colliding case the stem sits in the 200-byte range, so there is always a character left to
+    // drop (if the stem were the entire name, `임시` would already be longer than the name by the
+    // suffix's length, and they would never have collided in the first place).
     if 임시 == 목적지 {
         줄기.pop();
         임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
@@ -119,7 +125,7 @@ impl Default for TransferConfig {
     }
 }
 
-/// 보내는 쪽이 `pull`에 답하려면 무엇을 보내기로 했는지 알아야 한다.
+/// For the sending side to answer `pull`, it has to know what it committed to sending.
 #[derive(Clone)]
 struct 보낼_것 {
     transfer_id: String,
@@ -137,10 +143,11 @@ struct 보낼_것 {
 #[derive(Clone)]
 pub struct LocalPeerTransfer {
     config: TransferConfig,
-    /// 받는 쪽일 때만 채워진다. `push_offer`를 처리하며 상대에게 되당기는 손잡이다.
+    /// Only filled in on the receiving side. The handle used to call back to the peer while
+    /// handling a `push_offer`.
     peer: Arc<std::sync::OnceLock<PeerTransferClient>>,
     peer_slug: String,
-    /// 보내는 쪽일 때 예약해 둔 것들.
+    /// What the sending side has reserved.
     pending: Arc<tokio::sync::Mutex<Vec<보낼_것>>>,
 }
 
@@ -201,8 +208,9 @@ impl PeerTransfer for LocalPeerTransfer {
             .await
             .map_err(|e| WireError::internal(e.to_string()))?;
 
-        // 전송을 시작하기도 전에 빨리 거절하기 위한 판정이다. **계약을 지키는 판정은 이것이
-        // 아니라 rename 직전의 재검사다** — 전송이 도는 동안 목적지가 생길 수 있다.
+        // This check exists to reject quickly, before the transfer even starts. **The check that
+        // actually enforces the contract is not this one but the re-check right before rename** —
+        // the destination can come into existence while the transfer is in flight.
         if tokio::fs::symlink_metadata(&목적지).await.is_ok() && !offer.overwrite {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
@@ -211,13 +219,14 @@ impl PeerTransfer for LocalPeerTransfer {
             .retriable(false));
         }
 
-        // 임시 파일은 같은 디렉터리 안이어야 rename이 원자적이다. 이름을 어떻게 짓는지와 왜
-        // `transfer_id`가 섞여야 하는지는 `part_path`에 적혀 있다.
+        // The temp file has to be in the same directory for rename to be atomic. How the name is
+        // built and why `transfer_id` has to be mixed in is written up in `part_path`.
         let 임시 = part_path(&목적지, &offer.transfer_id);
-        // `Inbox::resolve`가 확인한 것은 `목적지`뿐이다 — `.part`는 그 확인을 거치지 않은
-        // 별도 경로다. 부모 디렉터리는 `resolve`가 이미 걸어서 심링크가 아님을 확인했으니
-        // 안전하고(실제_부모), 마지막 조각인 `임시` 자체만 여기서 다시 본다. 확인하지 않고
-        // 그냥 열면 미리 심어 둔 심링크를 열기가 그대로 따라가 버린다.
+        // What `Inbox::resolve` checked was `목적지` alone — `.part` is a separate path that
+        // never went through that check. The parent directory is safe (`resolve` already walked
+        // it and confirmed it is not a symlink, hence `실제_부모`), so only the last component,
+        // `임시` itself, needs to be looked at again here. Skip this and just open it, and opening
+        // would follow a symlink planted there ahead of time.
         if let Ok(정보) = tokio::fs::symlink_metadata(&임시).await {
             if 정보.file_type().is_symlink() {
                 return Err(WireError::new(
@@ -228,11 +237,12 @@ impl PeerTransfer for LocalPeerTransfer {
             }
         }
         let 파일_길이 = tokio::fs::metadata(&임시).await.map(|m| m.len()).unwrap_or(0);
-        // 부스러기가 이번 offer보다 크면 이어받을 수 없다 — 처음부터 다시 받는다. 되돌리는
-        // 것은 이 판단(오프셋)뿐이면 안 된다. 파일 자체를 비우지 않고 `.append(true)`로 열면
-        // 새 바이트가 부스러기 **뒤에** 그대로 붙는다 — 해시기는 새로 받은 바이트만 보므로
-        // sha256 대조는 통과하는데 디스크에는 검증한 것과 다른 파일이 남는다. 그래서 오프셋을
-        // 0으로 되돌리는 자리에서 열기 모드도 함께 truncate로 바꾼다(아래).
+        // If the leftover is bigger than this offer, it cannot be resumed — start over from
+        // scratch. That decision (the offset) cannot be the only thing that gets reverted, though.
+        // Opening with `.append(true)` without also truncating the file leaves the new bytes
+        // sitting right **after** the leftover — the hasher only sees the newly received bytes, so
+        // the sha256 check passes, yet what is left on disk is not the file that was verified. So
+        // the spot where the offset is reset to 0 also switches the open mode to truncate (below).
         let 받은_offset = if 파일_길이 > offer.size { 0 } else { 파일_길이 };
 
         let mut 스트림 = peer.pull(offer.transfer_id.clone(), 받은_offset).await?;
@@ -244,9 +254,9 @@ impl PeerTransfer for LocalPeerTransfer {
 
         let mut 해시기 = Sha256::new();
         if 받은_offset > 0 {
-            // 이어받기라면 이미 받아 둔 부분을 다시 읽어 해시에 넣는다. 통째로 `Vec`에
-            // 올리면 상한(기본 8 GiB)까지 그대로 할당된다 — 고정 크기 버퍼로 반복 read하며
-            // 해시에만 먹인다.
+            // On a resume, re-read the part already received and feed it into the hash. Loading
+            // it whole into a `Vec` would allocate straight up to the ceiling (8 GiB by default)
+            // — instead, read repeatedly into a fixed-size buffer and feed only that to the hash.
             use tokio::io::AsyncReadExt as _;
             let mut 이미_받은 =
                 임시_열기_바탕().read(true).open(&임시).await.map_err(io_오류)?;
@@ -264,8 +274,9 @@ impl PeerTransfer for LocalPeerTransfer {
         if 받은_offset > 0 {
             열기.append(true);
         } else {
-            // 이어받는 게 아니면 있던 내용은 부스러기다 — 비우고 새로 쓴다. `append`로 열면
-            // 그 부스러기가 그대로 남아 새 바이트 앞에 눌러앉는다.
+            // If this is not a resume, whatever is already there is a leftover — truncate it and
+            // write fresh. Opening with `append` would leave that leftover sitting right in front
+            // of the new bytes.
             열기.write(true).truncate(true);
         }
         let mut 파일 = 열기.open(&임시).await.map_err(io_오류)?;
@@ -287,31 +298,35 @@ impl PeerTransfer for LocalPeerTransfer {
 
         let 실제 = hex::encode(해시기.finalize());
         if 실제 != offer.sha256 {
-            // 부분 파일을 남기면 다음 재개가 그것을 이어받아 영영 안 맞는다.
+            // Leaving the partial file behind would make the next resume pick it up and never
+            // match.
             let _ = tokio::fs::remove_file(&임시).await;
             return Err(WireError::new(
                 ErrorCode::Internal,
                 format!("sha256이 맞지 않습니다: {실제} ≠ {}", offer.sha256),
             )
-            // 설계문 §9는 `integrity_mismatch`를 **재시도 가능**으로 정한다 — 망가진 것은
-            // 이번에 흘러온 바이트지 요청 자체가 아니므로, 다시 받으면 맞을 수 있다.
-            // `ErrorCode::Internal`의 기본값은 `false`라 명시하지 않으면 반대로 나간다.
+            // Design doc §9 defines `integrity_mismatch` as **retriable** — what is broken is the
+            // bytes that came through this time, not the request itself, so receiving again can
+            // still succeed. `ErrorCode::Internal`'s default is `false`, so this comes out the
+            // wrong way if left unstated.
             .retriable(true));
         }
 
-        // **여기서 존재 여부를 다시 본다.** 위의 사전 판정은 전송이 시작되기 전의 상태였고,
-        // 그 사이에 전송 시간 전체(12 MB면 수 초)만큼의 창이 벌어져 있었다. 그 창에 목적지가
-        // 생기면 예전 코드는 `overwrite=false`인데도 덮었고, `replaced:false`·`undo:None`으로
-        // 응답해 감사 로그에도 흔적을 남기지 않았다.
+        // **This is where existence gets checked again.** The earlier check was against the state
+        // before the transfer started, and a window as wide as the whole transfer (several
+        // seconds, for a 12 MB file) opened up in between. If the destination showed up in that
+        // window, the old code overwrote it even with `overwrite=false`, and replied with
+        // `replaced:false` and `undo:None` — leaving no trace even in the audit log.
         //
-        // **이래도 재검사와 `rename` 사이에 좁은 창이 남는다.** 없앤 것이 아니라 전송 시간
-        // 전체에서 syscall 몇 개 사이로 좁힌 것이다. 정말로 닫으려면 `overwrite=false` 갈래를
-        // `renameat2(RENAME_NOREPLACE)`(linux 전용)로 커널에 맡기고, 되돌림 보관까지 함께
-        // 원자적으로 만들려면 목적지 단위 잠금이 있어야 한다 — 둘 다 이 브랜치 밖이다.
+        // **A narrow window still remains between this re-check and `rename`.** It has not been
+        // eliminated, only narrowed from the whole transfer down to a few syscalls. Closing it for
+        // real would mean handing the `overwrite=false` branch to the kernel via
+        // `renameat2(RENAME_NOREPLACE)` (Linux only), and making the undo stash atomic together
+        // with it would need a per-destination lock — both are outside this branch.
         let 이미_있나 = tokio::fs::symlink_metadata(&목적지).await.is_ok();
         if 이미_있나 && !offer.overwrite {
-            // 받아 둔 `.part`를 남기면 다음 재개가 그것을 이어받는다. 이번 요청은 거절됐으니
-            // 지운다.
+            // Leaving the `.part` received so far would make the next resume pick it up. This
+            // request was rejected, so delete it.
             let _ = tokio::fs::remove_file(&임시).await;
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
@@ -344,18 +359,21 @@ impl PeerTransfer for LocalPeerTransfer {
                 .record(AuditLine {
                     at_ms: 지금_ms(),
                     peer_slug: self.peer_slug.clone(),
-                    // p2p 전송로(zyris-p2p)가 아직 없다 — Task 4.1이 실제 엔드포인트를 채운다.
+                    // The p2p transport (zyris-p2p) does not exist yet — Task 4.1 fills in the
+                    // actual endpoint.
                     peer_endpoint: String::new(),
                     name: offer.name.clone(),
                     bytes: 결과.bytes,
                     sha256: 결과.sha256.clone(),
                     written: 결과.written.clone(),
                     replaced: 결과.replaced,
-                    // `replaced: true`인데 이것이 `None`이면 원본을 보관하지 못한 채 덮었다는
-                    // 뜻이다 — 되돌릴 수 있게 덮은 것과 영영 잃은 것을 로그만 보고 가르는
-                    // 것은 이 필드뿐이다.
+                    // `replaced: true` together with this being `None` means the original was
+                    // overwritten without ever being stashed — this field is the only thing that
+                    // tells a reversible overwrite apart from a permanent loss when reading the
+                    // log.
                     undo: 결과.undo.clone(),
-                    // 직접 연결인지 릴레이를 지났는지도 이 계층에서는 알 길이 없다.
+                    // Whether this was a direct connection or went through a relay is not
+                    // something this layer can know either.
                     direct: false,
                 })
                 .await;
@@ -379,10 +397,11 @@ impl PeerTransfer for LocalPeerTransfer {
 
         let head = PullHead { size: 것.size, sha256: 것.sha256.clone() };
 
-        // 파일은 스트림 밖에서 연다 — 못 여는 파일은 "부르기 자체가 실패"여야지 스트림
-        // 중간의 에러가 되면 안 된다. `unfold`의 상태에 담는 `끝났나` 플래그는
-        // `file_io.rs::read_stream`의 `remaining = Some(0)`과 같은 역할이다: 한 번 에러를
-        // 낸 다음 poll에서 `None`을 돌려주지 않으면 같은 에러를 영원히 내보낸다.
+        // The file is opened outside the stream — a file that cannot be opened has to be "the
+        // call itself failed", not an error partway through the stream. The `끝났나` flag carried
+        // in `unfold`'s state plays the same role as `file_io.rs::read_stream`'s
+        // `remaining = Some(0)`: without returning `None` on the next poll after emitting one
+        // error, the same error would be emitted forever.
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
         let mut file = tokio::fs::File::open(&것.path).await.map_err(io_오류)?;
         if offset > 0 {
@@ -412,12 +431,13 @@ fn io_오류(e: std::io::Error) -> WireError {
     WireError::new(ErrorCode::Internal, e.to_string())
 }
 
-/// `임시`(`.part`)를 열 때 쓰는 `OpenOptions` 바탕. unix에서는 `O_NOFOLLOW`를 얹어 마지막
-/// 조각이 심링크면 열기 자체가 실패하게 한다. 앞선 `symlink_metadata` 사전 검사와 이 열기
-/// 사이에는 여전히 좁은 창이 있다(검사 뒤·열기 전에 누가 심링크를 심으면) — 이 플래그가
-/// 그 창을 마저 닫는다. windows에도 `FILE_FLAG_OPEN_REPARSE_POINT`가 있기는 하지만 그것은
-/// "따라가지 말고 열어라"라 의미가 반대다(실패시키는 것이 아니라 링크 자체를 연다). 그래서
-/// 저쪽에서는 사전 검사만으로 방어하고 창이 남는다.
+/// The base `OpenOptions` used when opening `임시` (`.part`). On unix, `O_NOFOLLOW` is added so
+/// that opening itself fails if the last component is a symlink. A narrow window still remains
+/// between the earlier `symlink_metadata` pre-check and this open (if someone plants a symlink
+/// after the check but before the open) — this flag closes that remaining window. Windows has
+/// `FILE_FLAG_OPEN_REPARSE_POINT` too, but its meaning runs the other way ("open it without
+/// following" — it opens the link itself instead of failing). So on that side, only the pre-check
+/// defends, and the window remains.
 #[cfg_attr(not(unix), allow(unused_mut))]
 fn 임시_열기_바탕() -> tokio::fs::OpenOptions {
     let mut 옵션 = tokio::fs::OpenOptions::new();
@@ -433,7 +453,7 @@ fn 지금_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 받은 파일이 실행 가능할 이유가 없다.
+/// There is no reason a received file should be executable.
 async fn 실행_비트_제거(길: &std::path::Path) {
     #[cfg(unix)]
     {
@@ -453,10 +473,11 @@ mod tests {
     use super::part_path;
     use super::super::name::{safe_name, 최대_바이트};
 
-    /// 상대가 **꼬리를 미리 계산해 이름 끝에 심은** 255바이트 이름.
+    /// A 255-byte name where the peer **pre-computed the suffix and planted it at the end**.
     ///
-    /// 꼬리 `.<sha256(transfer_id)[..16]>.part`는 `transfer_id`에서 나오고 `transfer_id`도
-    /// `name`도 보내는 쪽이 고른다. 그래서 이런 이름을 짓는 데 아무 권한도 필요 없다.
+    /// The suffix `.<sha256(transfer_id)[..16]>.part` is derived from `transfer_id`, and both
+    /// `transfer_id` and `name` are chosen by the sending side. So crafting a name like this
+    /// requires no special privilege at all.
     fn 꼬리를_심은_이름(transfer_id: &str) -> String {
         let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
         let 꼬리 = format!(".{}.part", &표식[..16]);
@@ -464,59 +485,62 @@ mod tests {
     }
 
     #[test]
-    fn 같은_전송은_같은_자리_다른_전송은_다른_자리를_쓴다() {
+    fn same_transfer_same_slot_different_transfer_different_slot() {
         let 목적지 = Path::new("/inbox/a/same.bin");
-        // 이어받기가 사는 성질 — 재시도가 앞서 받아 둔 부스러기를 다시 찾아야 한다.
+        // The property resume depends on — a retry has to find the leftover received earlier.
         assert_eq!(part_path(목적지, "t1"), part_path(목적지, "t1"));
-        // 동시 전송이 서로의 `.part`를 덮지 않는 성질. 이게 깨지면 양쪽 다 sha256을 통과하고
-        // 응답이 디스크에 없는 바이트를 가리킨다.
+        // The property that concurrent transfers do not overwrite each other's `.part`. If this
+        // breaks, both pass the sha256 check and the reply points at bytes that are not on disk.
         assert_ne!(part_path(목적지, "t1"), part_path(목적지, "t2"));
-        // 임시가 목적지와 겹치면 실패 정리(`remove_file`)가 목적지 자체를 지운다.
+        // If the temp file collides with the destination, failure cleanup (`remove_file`) deletes
+        // the destination itself.
         assert_ne!(part_path(목적지, "t1"), 목적지);
         assert_ne!(part_path(Path::new("/inbox/a/x.part"), "t1"), Path::new("/inbox/a/x.part"));
-        // rename이 원자적이려면 같은 디렉터리 안이어야 한다.
+        // For rename to be atomic, it has to stay in the same directory.
         assert_eq!(part_path(목적지, "t1").parent(), 목적지.parent());
     }
 
     #[test]
-    fn 상대가_뭘_보내도_경로_조각이_하나로_남는다() {
+    fn whatever_the_peer_sends_exactly_one_path_component_survives() {
         let 목적지 = Path::new("/inbox/a/x.bin");
         let 임시 = part_path(목적지, "../../etc/passwd\0\n/..");
-        assert_eq!(임시.parent(), 목적지.parent(), "실제: {}", 임시.display());
+        assert_eq!(임시.parent(), 목적지.parent(), "actual: {}", 임시.display());
         let 이름 = 임시.file_name().unwrap().to_str().unwrap();
-        assert!(!이름.contains('/') && !이름.contains('\\'), "실제: {이름}");
+        assert!(!이름.contains('/') && !이름.contains('\\'), "actual: {이름}");
     }
 
-    /// 리뷰 N1: 길이 절단이 `임시`를 `목적지` **자신으로** 되돌릴 수 있다.
+    /// Review N1: length truncation can fold `임시` back into `목적지` **itself**.
     ///
-    /// 상대가 꼬리를 미리 계산해 255바이트 이름 끝에 심으면, `part_path`가 줄기를 233바이트로
-    /// 자르고 같은 꼬리를 도로 붙여 원래 이름이 나온다. 그 자리에서는 이미 있던 목적지가
-    /// 이어받기 부스러기로 오인되고, 해시 불일치 정리(`remove_file(&임시)`)가 **목적지 자신을
-    /// 지운다** — sha256 검증·되돌림 보관·감사가 한꺼번에 무력해진다.
+    /// If the peer pre-computes the suffix and plants it at the end of a 255-byte name,
+    /// `part_path` truncates the stem to 233 bytes and appends the same suffix back on, producing
+    /// the original name. At that point an existing destination gets mistaken for a resume
+    /// leftover, and the hash-mismatch cleanup (`remove_file(&임시)`) **deletes the destination
+    /// itself** — disabling sha256 verification, the undo stash, and the audit log all at once.
     #[test]
-    fn 상대가_꼬리를_이름_끝에_심어도_임시가_목적지와_안_겹친다() {
+    fn planting_the_suffix_at_the_end_of_the_name_still_keeps_temp_and_destination_apart() {
         let 이름 = 꼬리를_심은_이름("t-evil");
-        assert_eq!(이름.len(), 최대_바이트, "255바이트를 꽉 채워야 절단이 일어난다");
-        // 씻기가 이 이름을 그대로 통과시킨다 — 구분자도 제어문자도 예약어도 아니다.
+        assert_eq!(이름.len(), 최대_바이트, "must fill 255 bytes exactly for truncation to occur");
+        // The wash lets this name straight through — it is not a separator, a control character,
+        // or a reserved name.
         assert_eq!(safe_name(&이름), 이름);
 
         let 목적지 = Path::new("/inbox/a").join(&이름);
         let 임시 = part_path(&목적지, "t-evil");
-        assert_ne!(임시, 목적지, "실제: {}", 임시.display());
+        assert_ne!(임시, 목적지, "actual: {}", 임시.display());
         assert_eq!(임시.parent(), 목적지.parent());
         let 임시_이름 = 임시.file_name().unwrap().to_str().unwrap();
-        assert!(임시_이름.len() <= 최대_바이트, "{}바이트", 임시_이름.len());
-        assert!(임시_이름.ends_with(".part"), "실제: {임시_이름}");
+        assert!(임시_이름.len() <= 최대_바이트, "{} bytes", 임시_이름.len());
+        assert!(임시_이름.ends_with(".part"), "actual: {임시_이름}");
     }
 
     #[test]
-    fn 이름이_한도를_꽉_채워도_255바이트를_안_넘는다() {
-        // `safe_name`은 255바이트까지 채워 줄 수 있다. 꼬리를 그냥 붙이면 한도를 넘어
-        // `ENAMETOOLONG`이 난다.
-        let 긴_이름 = "가".repeat(85); // 3바이트 × 85 = 255바이트
+    fn name_filling_the_limit_exactly_still_stays_within_255_bytes() {
+        // `safe_name` can fill a name out to 255 bytes. Just appending the suffix would overrun
+        // the limit and produce `ENAMETOOLONG`.
+        let 긴_이름 = "가".repeat(85); // 3 bytes × 85 = 255 bytes
         let 목적지 = Path::new("/inbox/a").join(&긴_이름);
         let 이름 = part_path(&목적지, "t1").file_name().unwrap().to_str().unwrap().to_string();
-        assert!(이름.len() <= 255, "{}바이트", 이름.len());
-        assert!(이름.ends_with(".part"), "실제: {이름}");
+        assert!(이름.len() <= 255, "{} bytes", 이름.len());
+        assert!(이름.ends_with(".part"), "actual: {이름}");
     }
 }

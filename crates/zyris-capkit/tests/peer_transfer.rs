@@ -1,6 +1,7 @@
 #![cfg(feature = "transfer")]
 
-//! 전송 전 과정을 **소켓 없이** 본다. `zyris::testing::duplex`가 진짜 Connection 둘을 잇는다.
+//! Watches the whole transfer flow **without a socket**. `zyris::testing::duplex` wires up two
+//! real Connections.
 
 use std::time::Duration;
 
@@ -14,30 +15,33 @@ fn 해시(바이트: &[u8]) -> String {
     hex::encode(Sha256::digest(바이트))
 }
 
-/// 이번 전송이 쓸 `.part` 자리.
+/// The `.part` slot this transfer will use.
 ///
-/// **테스트가 이 이름을 문자열로 깔면 안 된다.** `.part` 이름에는 `transfer_id`에서 유도한
-/// 표식이 섞여 있다(같은 이름의 동시 전송이 서로의 `.part`를 덮지 않도록). 이름 규칙이
-/// 바뀌었는데 테스트가 옛 이름을 깔면, 이어받기 테스트가 "이어받을 부스러기가 아예 없는"
-/// 경로로 조용히 새어 나가면서도 초록이 난다.
+/// **Tests must not hardcode this name as a string literal.** The `.part` name has a marker
+/// folded in that's derived from `transfer_id` (so concurrent transfers with the same name don't
+/// overwrite each other's `.part`). If the naming scheme changes and a test still lays down the
+/// old name, a resume test can silently leak into the "there's no resume debris at all" path and
+/// still come out green.
 fn 부분_파일(받는_자리: &std::path::Path, transfer_id: &str, 이름: &str) -> std::path::PathBuf {
     part_path(&받는_자리.join("a").join(이름), transfer_id)
 }
 
-/// A(보내는 쪽)와 B(받는 쪽)를 잇는다. 둘 다 `peer_transfer` 하나만 내준다.
+/// Wires up A (sender) and B (receiver). Each hands out only one `peer_transfer`.
 ///
-/// **손잡이 꽂는 순서가 이 헬퍼의 요점이다.** B가 `pull`을 되부르려면 `PeerTransferClient`가
-/// 있어야 하는데 그것은 `duplex`가 Connection을 준 뒤에야 만들 수 있고, `Node`를 만들려면
-/// 받는 쪽 구현체가 그보다 **먼저** 있어야 한다. 그래서 `receiver_pending`으로 빈 채 만들고
-/// 연결이 선 다음 `set_peer`로 채운다.
+/// **The order the handles get plugged in is the whole point of this helper.** For B to call
+/// `pull` back, it needs a `PeerTransferClient`, which can only be built after `duplex` hands
+/// back a Connection — but building the `Node` requires the receiving-side implementation to
+/// exist **before** that. So it's built empty with `receiver_pending`, and filled in with
+/// `set_peer` once the connection is up.
 ///
-/// **`offer_file`도 여기서 미리 등록해 둔다.** A(보내는 쪽)의 `pull`은 `push_offer`가 부르는
-/// `transfer_id`를 자기 `pending` 목록에서 찾는다 — 등록해 두지 않으면 무엇을 내줄지 몰라
-/// "모르는 전송입니다"로 거절한다. 등록할 `해시`가 실제 파일 내용과 다를 수도 있게 열어 둔
-/// 이유는 sha256 불일치 테스트 때문이다: 그 테스트는 `push_offer`에 건네는 offer의 sha256과
-/// A에 등록해 둔 sha256을 **똑같이 틀리게** 맞춰서, `pull`이 돌려주는 head 쪽 대조
-/// (`스트림.head.sha256 != offer.sha256`)를 통과시키고 실제로 스트리밍된 바이트를 재해시해
-/// 대조하는 **뒤쪽** 검사까지 가 닿게 한다.
+/// **`offer_file` is also pre-registered here.** A's (the sender's) `pull` looks up the
+/// `transfer_id` that `push_offer` calls with in its own `pending` list — without registering it
+/// first, it doesn't know what to hand out and rejects with "unknown transfer". The registered
+/// `해시` (hash) is left free to differ from the actual file content because of the sha256
+/// mismatch test: that test sets the sha256 in the offer passed to `push_offer` and the sha256
+/// registered on A to **the same wrong value**, so it passes the head-side comparison `pull`
+/// returns (`스트림.head.sha256 != offer.sha256`), and actually reaches the **later** check that
+/// rehashes the bytes that were actually streamed and compares against that.
 async fn 붙인다(
     transfer_id: &str,
     보낼_것: &std::path::Path,
@@ -63,14 +67,14 @@ async fn 붙인다(
         .build()
         .unwrap();
     let (a_conn, b_conn) = zyris::testing::duplex(&a, &b).await.unwrap();
-    // 손잡이는 여기서만 꽂을 수 있다 — Connection이 생기고 A가 announce한 뒤다.
+    // The handle can only be plugged in here — after the Connection exists and A has announced.
     let a_client: PeerTransferClient = b_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
     받는_것.set_peer(a_client);
     (a_conn, b_conn)
 }
 
 #[tokio::test]
-async fn 파일이_inbox에_그대로_도착한다() {
+async fn file_lands_in_the_inbox_unchanged() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -106,7 +110,7 @@ async fn 파일이_inbox에_그대로_도착한다() {
 }
 
 #[tokio::test]
-async fn sha256이_안_맞으면_받은_것을_버린다() {
+async fn discards_what_it_received_when_sha256_does_not_match() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -119,9 +123,11 @@ async fn sha256이_안_맞으면_받은_것을_버린다() {
         undo: 되돌림.path().to_path_buf(),
         ..TransferConfig::default()
     };
-    // A에 등록해 두는 sha256도 push_offer에 건네는 것과 **똑같이 틀리게** 맞춘다. 그래야
-    // `pull`의 head 대조(선언과 다른 것을 내주려는지 보는 앞쪽 검사)를 통과해서, 실제로 받은
-    // 바이트를 재해시해 대조하는 뒤쪽 검사(이 테스트가 실제로 보려는 것)까지 가 닿는다.
+    // The sha256 registered on A is also set to **the exact same wrong value** as what's passed
+    // to push_offer. That way it passes `pull`'s head-side comparison (the earlier check for
+    // whether it's about to hand out something different from what it declared), and actually
+    // reaches the later check (what this test really watches) that rehashes the bytes actually
+    // received and compares them.
     let 틀린_해시 = 해시("다른 내용".as_bytes());
     let (a_conn, _b) =
         붙인다("t2", &원본, 내용.len() as u64, &틀린_해시, 설정).await;
@@ -132,21 +138,21 @@ async fn sha256이_안_맞으면_받은_것을_버린다() {
             transfer_id: "t2".into(),
             name: "a.bin".into(),
             size: 내용.len() as u64,
-            sha256: 틀린_해시.clone(), // 일부러 틀린 값
+            sha256: 틀린_해시.clone(), // deliberately wrong value
             overwrite: false,
         })
         .await;
 
-    assert!(결과.is_err(), "불일치인데 성공했다");
-    // 부분 파일을 남기면 다음 재개가 그것을 이어받아 영영 안 맞는다.
+    assert!(결과.is_err(), "succeeded despite the mismatch");
+    // If a partial file is left behind, the next resume will pick it up and never match.
     let mut 남은_것 = tokio::fs::read_dir(받는_자리.path().join("a")).await;
     if let Ok(ref mut d) = 남은_것 {
-        assert!(d.next_entry().await.unwrap().is_none(), "부분 파일이 남았다");
+        assert!(d.next_entry().await.unwrap().is_none(), "a partial file was left behind");
     }
 }
 
 #[tokio::test]
-async fn overwrite가_false면_있는_파일을_안_덮는다() {
+async fn does_not_overwrite_an_existing_file_when_overwrite_is_false() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -162,8 +168,9 @@ async fn overwrite가_false면_있는_파일을_안_덮는다() {
         undo: 되돌림.path().to_path_buf(),
         ..TransferConfig::default()
     };
-    // 이 테스트는 "이미 있는데 overwrite가 꺼져 있다" 검사에서 `pull`을 부르기도 전에
-    // 끝나므로 등록 값 자체는 실제로 안 쓰이지만, 헬퍼 계약을 맞추려 정상 값을 넘긴다.
+    // This test finishes at the "already exists but overwrite is off" check before `pull` is
+    // ever called, so the registered value itself is never actually used — but a normal value
+    // is passed anyway to satisfy the helper's contract.
     let (a_conn, _b) =
         붙인다("t3", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
     let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
@@ -182,12 +189,12 @@ async fn overwrite가_false면_있는_파일을_안_덮는다() {
     assert_eq!(
         tokio::fs::read(받는_자리.path().join("a").join("a.txt")).await.unwrap(),
         "예전 것".as_bytes(),
-        "덮지 않기로 했는데 덮었다"
+        "overwrote it even though it was set not to"
     );
 }
 
 #[tokio::test]
-async fn overwrite가_true면_덮고_원본을_되돌림_자리로_옮긴다() {
+async fn overwrite_true_replaces_and_moves_the_original_to_the_undo_slot() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -223,18 +230,19 @@ async fn overwrite가_true면_덮고_원본을_되돌림_자리로_옮긴다() {
 
     assert!(결과.replaced);
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
-    let 되돌릴_것 = 결과.undo.expect("덮었으면 되돌림 자리가 있어야 한다");
+    let 되돌릴_것 = 결과.undo.expect("if it overwrote, there must be an undo slot");
     assert_eq!(tokio::fs::read(&되돌릴_것).await.unwrap(), "예전 것".as_bytes());
 
-    // 되돌릴 수 있게 덮은 것과 원본을 영영 잃은 것은 감사 로그에서 `undo`로만 갈린다.
+    // An overwrite that can be undone and one that loses the original forever are distinguished
+    // only by `undo` in the audit log.
     let 글 = tokio::fs::read_to_string(&감사_길).await.unwrap();
     let 줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
     assert_eq!(줄["replaced"], true);
-    assert_eq!(줄["undo"], 되돌릴_것, "무엇을 어디로 치웠는지가 로그에 남아야 한다");
+    assert_eq!(줄["undo"], 되돌릴_것, "the log must record what was moved and to where");
 }
 
 #[tokio::test]
-async fn 상한을_넘는_파일은_거부한다() {
+async fn rejects_a_file_that_exceeds_the_limit() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -247,12 +255,14 @@ async fn 상한을_넘는_파일은_거부한다() {
         max_file_bytes: 10,
         ..TransferConfig::default()
     };
-    // 크기 상한 검사는 `pull`을 부르기 전 가장 먼저 일어나므로 등록 값은 실제로 안 쓰인다.
+    // The size-limit check happens first, before `pull` is ever called, so the registered value
+    // is never actually used.
     let (a_conn, _b) =
         붙인다("t5", &원본, "작다".len() as u64, &해시("작다".as_bytes()), 설정).await;
     let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
 
-    // 바이트를 한 개도 안 쓰고 거절해야 한다 — 선언된 크기만 보고 판단한다.
+    // It must reject without consuming a single byte — it decides based only on the declared
+    // size.
     let 결과 = b
         .push_offer(TransferOffer {
             transfer_id: "t5".into(),
@@ -265,10 +275,11 @@ async fn 상한을_넘는_파일은_거부한다() {
     assert!(결과.is_err());
 }
 
-/// 감사 범위 — 브리프 밖이지만 승인된 추가 범위: `audit`이 설정되면 성공한 전송마다 한 줄이
-/// 남고, 그 줄이 실제로 쓰인 자리를 가리키는 파싱 가능한 JSON이어야 한다.
+/// Audit scope — outside the brief but an approved addition to scope: when `audit` is
+/// configured, each successful transfer must leave one line, and that line must be parseable
+/// JSON pointing at the slot that was actually used.
 #[tokio::test]
-async fn audit이_설정되면_전송_한_줄이_남는다() {
+async fn audit_configured_leaves_one_line_per_transfer() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -301,17 +312,18 @@ async fn audit이_설정되면_전송_한_줄이_남는다() {
 
     let 글 = tokio::fs::read_to_string(&감사_길).await.unwrap();
     let 줄들: Vec<&str> = 글.lines().collect();
-    assert_eq!(줄들.len(), 1, "성공한 전송 하나에 한 줄만 남아야 한다");
+    assert_eq!(줄들.len(), 1, "exactly one line must be left for one successful transfer");
     let 파싱: serde_json::Value =
-        serde_json::from_str(줄들[0]).expect("감사 줄이 파싱 가능한 JSON이어야 한다");
+        serde_json::from_str(줄들[0]).expect("the audit line must be parseable JSON");
     assert_eq!(파싱["written"], 결과.written);
 }
 
-/// 리뷰 F2: `with_extension("part")`는 확장자를 **바꾼다** — 제안된 이름이 이미 `.part`로
-/// 끝나면 임시 경로와 목적지가 같은 자리가 된다. 그러면 이미 있던 파일이 "이어받기 부스러기"로
-/// 오인되고, 실패 정리(`remove_file`)가 곧 목적지 자체를 지운다.
+/// Review F2: `with_extension("part")` **changes** the extension — if the proposed name already
+/// ends in `.part`, the temp path and the destination become the same slot. Then the file that
+/// was already there gets mistaken for "resume debris," and the failure cleanup (`remove_file`)
+/// ends up deleting the destination itself.
 #[tokio::test]
-async fn 이름이_이미_part로_끝나도_임시_경로가_목적지와_안_겹친다() {
+async fn temp_path_does_not_collide_with_the_destination_even_when_the_name_already_ends_in_part() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -319,7 +331,8 @@ async fn 이름이_이미_part로_끝나도_임시_경로가_목적지와_안_�
     let 원본 = 원본_자리.path().join("x.part");
     tokio::fs::write(&원본, &새_내용).await.unwrap();
 
-    // 받는 쪽에 같은 이름의 파일이 이미 있다 — 이번 전송과는 무관한 옛 내용이다.
+    // The receiving side already has a file with the same name — old content unrelated to this
+    // transfer.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     tokio::fs::write(받는_자리.path().join("a").join("x.part"), "OLD-ORIGINAL".as_bytes())
         .await
@@ -348,28 +361,35 @@ async fn 이름이_이미_part로_끝나도_임시_경로가_목적지와_안_�
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 새_내용);
     assert_eq!(결과.sha256, 해시(&새_내용));
     assert!(결과.replaced);
-    let 되돌릴_것 = 결과.undo.expect("덮었으면 되돌림 자리가 있어야 한다 — 임시가 목적지와 겹치면 안 생긴다");
+    let 되돌릴_것 = 결과.undo.expect(
+        "if it overwrote, there must be an undo slot — this shouldn't happen if the temp path collides with the destination",
+    );
     assert_eq!(tokio::fs::read(&되돌릴_것).await.unwrap(), "OLD-ORIGINAL".as_bytes());
 }
 
-/// 상대가 **꼬리를 미리 계산해 이름 끝에 심은** 255바이트 이름.
+/// A 255-byte name where the peer has **precomputed the suffix and planted it at the end of the
+/// name.**
 ///
-/// `part_path`의 꼬리 `.<sha256(transfer_id)[..16]>.part`는 `transfer_id`에서 나오는데,
-/// `transfer_id`도 `name`도 보내는 쪽이 고른다 — 이런 이름을 짓는 데 아무 권한도 필요 없다.
+/// `part_path`'s suffix `.<sha256(transfer_id)[..16]>.part` comes from `transfer_id`, and the
+/// sender picks both `transfer_id` and `name` — no permission at all is needed to construct a
+/// name like this.
 fn 꼬리를_심은_이름(transfer_id: &str) -> String {
     let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
     let 꼬리 = format!(".{}.part", &표식[..16]);
     format!("{}{}", "A".repeat(255 - 꼬리.len()), 꼬리)
 }
 
-/// 리뷰 N1(Important): `part_path`가 255바이트 한도에 맞춰 줄기를 자르는 탓에, 위 이름에서는
-/// 자른 결과가 원래 이름과 **같아진다** — `임시 == 목적지`.
+/// Review N1 (Important): because `part_path` truncates the stem to fit the 255-byte limit, for
+/// the name above the truncated result **becomes the same as** the original name — `임시 ==
+/// 목적지` (temp == destination).
 ///
-/// 그러면 이미 있던 목적지가 이어받기 부스러기로 잡혀(`파일_길이`가 목적지 길이가 된다) 해시가
-/// 맞을 수 없고, 불일치 정리 `remove_file(&임시)`가 **목적지 자신을 지운다.** 그 갈래에서는
-/// 되돌림 보관도 감사 줄도 남지 않는다 — 방어선 셋이 한꺼번에 비는 유일한 자리다.
+/// Then the destination that was already there gets caught as resume debris (`파일_길이` becomes
+/// the destination's length), the hash can't possibly match, and the mismatch cleanup
+/// `remove_file(&임시)` **deletes the destination itself.** On that branch, neither an undo
+/// backup nor an audit line is left behind — the one spot where all three lines of defense are
+/// empty at once.
 #[tokio::test]
-async fn 꼬리를_심은_이름이_와도_기존_원본을_안_지운다() {
+async fn does_not_delete_the_existing_original_even_with_a_planted_suffix_name() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -378,8 +398,9 @@ async fn 꼬리를_심은_이름이_와도_기존_원본을_안_지운다() {
     let 원본 = 원본_자리.path().join("payload.bin");
     tokio::fs::write(&원본, &내용).await.unwrap();
 
-    // 목적지에 지워지면 안 되는 원본이 이미 있다. 길이가 offer보다 짧아야 "이어받기 부스러기"로
-    // 오인되는 갈래를 탄다.
+    // The destination already has an original that must not be deleted. Its length has to be
+    // shorter than the offer's for it to take the branch where it gets mistaken for "resume
+    // debris."
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     let 목적지 = 받는_자리.path().join("a").join(&이름);
     tokio::fs::write(&목적지, "IRREPLACEABLE-ORIGINAL".as_bytes()).await.unwrap();
@@ -403,26 +424,31 @@ async fn 꼬리를_심은_이름이_와도_기존_원본을_안_지운다() {
         })
         .await;
 
-    // 무엇이 잘못됐는지 먼저 드러나게 한다 — 겹치면 응답이 실패하기 **전에** 목적지가 지워진다.
-    assert!(목적지.exists(), "실패 정리가 목적지 자신을 지웠다 (임시가 목적지와 겹쳤다)");
-    let 결과 = 결과.expect("겹치지 않으면 평범한 덮어쓰기다");
+    // Surface what went wrong first — if they collide, the destination is deleted **before**
+    // the response fails.
+    assert!(
+        목적지.exists(),
+        "failure cleanup deleted the destination itself (temp collided with the destination)"
+    );
+    let 결과 = 결과.expect("if they don't collide, this is just an ordinary overwrite");
     assert!(결과.replaced);
     assert_eq!(결과.written, 목적지.display().to_string());
     assert_eq!(tokio::fs::read(&목적지).await.unwrap(), 내용);
-    let 되돌릴_것 = 결과.undo.expect("덮었으면 원본이 되돌림 자리에 있어야 한다");
+    let 되돌릴_것 = 결과.undo.expect("if it overwrote, the original must be in the undo slot");
     assert_eq!(
         tokio::fs::read(&되돌릴_것).await.unwrap(),
         "IRREPLACEABLE-ORIGINAL".as_bytes(),
-        "원본이 통째로 보관돼 있어야 한다"
+        "the original must be preserved intact"
     );
 }
 
-/// 리뷰 F1(Critical): 남은 `.part`가 이번 offer의 크기보다 크면 offset은 0으로 되돌리면서도
-/// 파일 자체는 지우지도 자르지도 않았다 — `.append(true)`로 열어서 새 바이트를 부스러기
-/// **뒤에** 이어 붙였다. 해시기는 새로 받은 바이트만 보므로 sha256 대조는 통과하고, 디스크에는
-/// 검증한 것과 다른 파일이 남는다.
+/// Review F1 (Critical): when leftover `.part` debris is larger than this offer's size, the
+/// offset was reset to 0, but the file itself was never deleted or truncated — it was opened
+/// with `.append(true)` and the new bytes were appended **after** the debris. The hasher only
+/// sees the newly received bytes, so the sha256 comparison passes, and what's left on disk is a
+/// different file from the one that was verified.
 #[tokio::test]
-async fn 이어받기_부스러기가_offer보다_크면_지우고_처음부터_받는다() {
+async fn deletes_and_restarts_from_scratch_when_resume_debris_is_larger_than_the_offer() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -430,8 +456,9 @@ async fn 이어받기_부스러기가_offer보다_크면_지우고_처음부터_
     let 원본 = 원본_자리.path().join("data.txt");
     tokio::fs::write(&원본, &내용).await.unwrap();
 
-    // 받는 쪽에 이번 전송과 무관한, offer.size(3바이트)보다 훨씬 큰 부스러기 `.part`가
-    // 이미 있다 — 예를 들어 예전의 큰 전송이 끊긴 자리다.
+    // The receiving side already has `.part` debris unrelated to this transfer, much larger than
+    // the offer's size (3 bytes) — for example, the remnant of an old large transfer that got
+    // cut off.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     tokio::fs::write(
         부분_파일(받는_자리.path(), "t8", "data.txt"),
@@ -465,18 +492,19 @@ async fn 이어받기_부스러기가_offer보다_크면_지우고_처음부터_
     assert_eq!(
         tokio::fs::read(&결과.written).await.unwrap(),
         내용,
-        "부스러기가 앞에 그대로 남아 다른 파일이 되면 안 된다"
+        "the debris must not stay in front and turn this into a different file"
     );
 }
 
-/// 리뷰 F4: 이어받기 앞부분을 통째로 메모리에 올리면 상한(기본 8 GiB)까지 그대로 할당된다 —
-/// 이 머신(RAM 3.6GB)에서는 재개 한 번이 OOM이다. 정확성만으로는 통짜 읽기와 청크 재해시를
-/// 구분할 수 없으니(둘 다 같은 바이트를 같은 순서로 해시에 넣는다), 이 테스트는 "결과가
-/// 옳다"만 본다 — 메모리 사용량 자체은 코드 리뷰(고정 크기 버퍼로 반복 read하는지)로 확인한다.
-/// F2가 고쳐지기 전에는 `.part` 이름이 달라 이 경로를 아예 타지 않았다(리뷰 F3) — 지금은
-/// `resume.bin.part`가 실제로 이어받기 시작점으로 쓰인다.
+/// Review F4: loading the resumed prefix into memory all at once allocates straight up to the
+/// limit (8 GiB by default) — on this machine (3.6GB RAM), one resume is an OOM. Correctness
+/// alone can't distinguish a monolithic read from a chunked rehash (both feed the hasher the
+/// same bytes in the same order), so this test only checks that "the result is right" — memory
+/// usage itself is confirmed by code review (whether it repeatedly reads with a fixed-size
+/// buffer). Before F2 was fixed, this path wasn't even exercised because the `.part` name was
+/// different (review F3) — now `resume.bin.part` is actually used as the resume starting point.
 #[tokio::test]
-async fn 이어받기_앞부분과_나머지가_합쳐져_원본과_같아진다() {
+async fn resumed_prefix_plus_the_rest_reassembles_into_the_original() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -515,12 +543,13 @@ async fn 이어받기_앞부분과_나머지가_합쳐져_원본과_같아진다
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
 }
 
-/// 리뷰 3-2: `.part` 자리는 `Inbox::resolve`의 확인 밖이다(그건 `목적지`만 본다). 거기 미리
-/// 심어 둔, 감옥 밖 표적을 가리키는 심링크를 push_offer가 거부해야 하고 표적은 손대지 않아야
-/// 한다. 사전 검사(`symlink_metadata`)와 `O_NOFOLLOW`(unix) 두 겹이 이걸 막는다.
+/// Review 3-2: the `.part` slot is outside `Inbox::resolve`'s check (that only looks at
+/// `목적지`, the destination). push_offer must reject a symlink planted there in advance that
+/// points at a target outside the jail, and must not touch the target. Two layers — the upfront
+/// check (`symlink_metadata`) and `O_NOFOLLOW` (unix) — guard against this.
 #[cfg(unix)]
 #[tokio::test]
-async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건드린다() {
+async fn rejects_a_symlink_planted_at_the_temp_slot_and_leaves_the_target_untouched() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -532,7 +561,8 @@ async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건
     let 원본 = 원본_자리.path().join("linked.bin");
     tokio::fs::write(&원본, &내용).await.unwrap();
 
-    // `.part` 자리에 감옥 밖(표적)을 가리키는 심링크를 미리 심어 둔다.
+    // Plants a symlink at the `.part` slot in advance, pointing outside the jail (at the
+    // target).
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     std::os::unix::fs::symlink(&표적, 부분_파일(받는_자리.path(), "t10", "linked.bin")).unwrap();
 
@@ -555,25 +585,26 @@ async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건
         })
         .await;
 
-    assert!(결과.is_err(), "임시 자리가 심링크인데 성공했다");
+    assert!(결과.is_err(), "succeeded even though the temp slot was a symlink");
     assert_eq!(tokio::fs::read(&표적).await.unwrap(), b"UNTOUCHED");
 }
 
-/// 청크를 여러 개 써야 하는 크기의 파일이 실제로 도착하는지.
+/// Whether a file large enough to need multiple chunks actually arrives.
 ///
-/// **이 테스트가 없어서 기능이 통째로 안 되는 것을 아무도 못 봤다.** 나머지 테스트의 가장 큰
-/// 짐이 9,000바이트라 전부 청크 하나에 들어갔고, 두 번째 청크로 넘어가는 길은 한 번도 지나간
-/// 적이 없었다. 그 길에 영구 정지가 있었다 — `청크`가 프로토콜의 credit 창과 같은 크기라
-/// 직렬화 뒤 창을 넘겼고, 보내는 쪽이 첫 청크에서 막혔다.
+/// **Without this test, nobody noticed the feature was completely broken.** The largest payload
+/// in the rest of the tests is 9,000 bytes, which fits entirely in one chunk, so the path that
+/// crosses into a second chunk was never exercised even once. That path had a permanent hang in
+/// it — `청크` (chunk) is the same size as the protocol's credit window, so after serialization
+/// it overran the window, and the sender got stuck on the first chunk.
 ///
-/// 그래서 **크기가 요점이다.** 짐을 청크보다 확실히 크게 유지할 것. `청크`를 키우면 이 값도
-/// 같이 키워야 한다.
+/// So **the size is the whole point.** Keep the payload solidly bigger than a chunk. If `청크`
+/// grows, this value has to grow with it.
 #[tokio::test]
-async fn 청크_여러_개짜리_파일도_끝까지_도착한다() {
+async fn a_file_spanning_multiple_chunks_arrives_completely() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
-    // 64 KiB 청크로 열한 조각쯤 난다.
+    // Splits into roughly eleven pieces at 64 KiB per chunk.
     let 내용: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
     let 원본 = 원본_자리.path().join("big.bin");
     tokio::fs::write(&원본, &내용).await.unwrap();
@@ -586,7 +617,8 @@ async fn 청크_여러_개짜리_파일도_끝까지_도착한다() {
     let (a_conn, _b) = 붙인다("big", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
     let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
 
-    // 멈추는 버그라 assert로는 안 잡힌다 — 시간을 걸어야 실패로 나타난다.
+    // It's a hanging bug, so a plain assert won't catch it — it only shows up as a failure once
+    // a timeout is applied.
     let 결과 = tokio::time::timeout(
         Duration::from_secs(20),
         b.push_offer(TransferOffer {
@@ -598,25 +630,28 @@ async fn 청크_여러_개짜리_파일도_끝까지_도착한다() {
         }),
     )
     .await
-    .expect("20초 안에 안 끝났다 — 청크가 여러 개인 전송이 멈춘다")
+    .expect("did not finish within 20 seconds — a multi-chunk transfer hangs")
     .unwrap();
 
     assert_eq!(결과.bytes, 내용.len() as u64);
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
 }
 
-/// 받는 쪽이 **정말로 이어받는지**를 가른다.
+/// Distinguishes whether the receiving side **actually resumes**.
 ///
-/// 보내는 쪽 파일의 앞부분과 이미 받아 둔 앞부분이 서로 다르다(길이만 같다). 제안하는
-/// sha256은 `이미_받은_앞부분 ++ 뒷부분`의 것이다. 그래서:
+/// The prefix of the sender's file and the prefix already received differ from each other (only
+/// the length matches). The proposed sha256 is that of `이미_받은_앞부분 ++ 뒷부분`
+/// (already-received-prefix ++ rest). So:
 ///
-/// - 이어받으면 → 앞부분을 그대로 두고 100_000부터 당긴다 → 해시가 맞는다 → 성공
-/// - 처음부터 받으면 → 보내는 쪽 앞부분(0xAA)이 온다 → 해시가 틀린다 → 실패
+/// - If it resumes → the prefix is left as-is and it pulls from 100_000 onward → the hash
+///   matches → success
+/// - If it starts from scratch → the sender's prefix (0xAA) arrives → the hash doesn't match →
+///   failure
 ///
-/// 보내는 쪽이 제안한 해시와 다른 내용을 갖고 있는 것은 현실에서 일어나지 않지만,
-/// 받는 쪽의 판단만 떼어 보려면 이 방법뿐이다.
+/// The sender holding content different from the hash it proposed doesn't happen in reality, but
+/// it's the only way to isolate the receiving side's decision on its own.
 #[tokio::test]
-async fn 받다_만_파일을_이어받는다() {
+async fn resumes_a_partially_received_file() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -624,14 +659,18 @@ async fn 받다_만_파일을_이어받는다() {
     let 이미_받은_앞부분: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
     let 보내는_쪽_앞부분: Vec<u8> = vec![0xAAu8; 100_000];
     let 뒷부분: Vec<u8> = (0..200_000u32).map(|i| ((i % 241) as u8) ^ 0x5A).collect();
-    assert_ne!(이미_받은_앞부분, 보내는_쪽_앞부분, "두 앞부분이 같으면 이 테스트는 아무것도 못 가른다");
+    assert_ne!(
+        이미_받은_앞부분,
+        보내는_쪽_앞부분,
+        "if the two prefixes were the same, this test couldn't distinguish anything"
+    );
 
     let mut 보내는_쪽_내용 = 보내는_쪽_앞부분.clone();
     보내는_쪽_내용.extend_from_slice(&뒷부분);
     let 원본 = 원본_자리.path().join("a.bin");
     tokio::fs::write(&원본, &보내는_쪽_내용).await.unwrap();
 
-    // 이어받았을 때에만 나올 수 있는 최종 내용.
+    // The final content that can only result if it actually resumed.
     let mut 기대 = 이미_받은_앞부분.clone();
     기대.extend_from_slice(&뒷부분);
 
@@ -665,7 +704,7 @@ async fn 받다_만_파일을_이어받는다() {
 }
 
 #[tokio::test]
-async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
+async fn restarts_from_scratch_when_the_partial_data_does_not_match_reality() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -673,7 +712,8 @@ async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
     let 원본 = 원본_자리.path().join("a.bin");
     tokio::fs::write(&원본, &내용).await.unwrap();
 
-    // 쓰레기 앞부분. 이어받으면 sha256이 안 맞아야 한다 — 그래야 버그가 조용히 안 지나간다.
+    // Garbage prefix. If it resumes, the sha256 must not match — otherwise the bug slips
+    // through silently.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     tokio::fs::write(부분_파일(받는_자리.path(), "bad-resume", "a.bin"), vec![0xFFu8; 10_000])
         .await
@@ -698,9 +738,9 @@ async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
         })
         .await;
 
-    // 첫 시도는 불일치로 실패하고 부분 파일을 지운다.
+    // The first attempt fails on the mismatch and deletes the partial file.
     assert!(결과.is_err());
-    // 다시 부르면 처음부터 받아 성공해야 한다.
+    // Calling it again must receive from scratch and succeed.
     let 두_번째 = b
         .push_offer(TransferOffer {
             transfer_id: "bad-resume".into(),
@@ -714,19 +754,21 @@ async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
     assert_eq!(tokio::fs::read(&두_번째.written).await.unwrap(), 내용);
 }
 
-/// `pull`이 보내는 쪽에서 정말로 `offset`부터 흘리는지를 받는 쪽 판단과 떼어 본다.
+/// Isolates whether `pull` really streams starting from `offset` on the sending side, apart
+/// from the receiving side's decision.
 ///
-/// 위 두 테스트는 **받는 쪽의 판단**(`받은_offset` 계산)만 가른다 — 보내는 쪽이 `offset`을
-/// 무시하고 항상 처음부터 흘려도, 받는 쪽이 이미 갖고 있던 앞부분과 흘러온 바이트를 잘 짜맞추면
-/// (혹은 우연히 같으면) 최종 결과가 맞아떨어질 수 있다. 그래서 `pull`을 직접 불러 보내는
-/// 쪽만 따로 본다.
+/// The two tests above only distinguish **the receiving side's decision** (the `받은_offset`
+/// calculation) — even if the sender ignored `offset` and always streamed from the start, the
+/// final result could still come out right if the receiving side stitches the prefix it already
+/// had together with the bytes that streamed in well enough (or they happen to match). So
+/// `pull` is called directly here to look at the sending side alone.
 ///
-/// `pull`은 보내는 쪽(A)이 답한다. `붙인다`가 돌려주는 `b_conn`(B의 연결)에서
-/// `wait_capability`를 기다리면 A가 announce한 손잡이가 나온다 — `a_conn`에서 기다리면
-/// 반대로 B(받는 쪽)의 손잡이가 나오는데, B는 `offer_file`을 받은 적이 없어 `pull`을 불러도
-/// "모르는 전송입니다"로 거절한다.
+/// `pull` is answered by the sending side (A). Waiting on `wait_capability` from the `b_conn`
+/// (B's connection) that `붙인다` returns gets the handle A announced — waiting on `a_conn`
+/// instead gets B's (the receiver's) handle, and B has never received `offer_file`, so calling
+/// `pull` on it gets rejected with "unknown transfer".
 #[tokio::test]
-async fn pull은_offset부터_흘린다() {
+async fn pull_streams_starting_from_the_offset() {
     let 원본_자리 = tempfile::tempdir().unwrap();
     let 받는_자리 = tempfile::tempdir().unwrap();
     let 되돌림 = tempfile::tempdir().unwrap();
@@ -747,7 +789,7 @@ async fn pull은_offset부터_흘린다() {
     assert_eq!(
         스트림.head.size,
         내용.len() as u64,
-        "head.size는 offset을 뺀 값이 아니라 파일 전체 크기여야 한다"
+        "head.size must be the whole file size, not the value with offset subtracted"
     );
 
     let mut 받은: Vec<u8> = Vec::new();
@@ -755,5 +797,5 @@ async fn pull은_offset부터_흘린다() {
         let Chunk(바이트) = 조각.unwrap();
         받은.extend_from_slice(&바이트);
     }
-    assert_eq!(받은, 내용[100_000..], "100_000부터 끝까지와 바이트가 같아야 한다");
+    assert_eq!(받은, 내용[100_000..], "bytes must match from 100_000 to the end");
 }

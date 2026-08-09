@@ -58,23 +58,26 @@ impl Inbox {
             .await
             .map_err(|e| InboxError::Io(e.to_string()))?;
 
-        // canonicalize는 링크를 따라가므로 링크 너머가 루트 밖이든 안이든 "루트 안"으로
-        // 보일 수 있다 — 뒤이은 escape 검사보다 먼저 조각마다 직접 봐야 한다. 특히 링크가
-        // 루트 "안"의 다른 자리(다른 상대의 디렉터리 등)를 가리키면 escape 검사만으로는
-        // 절대 못 잡는다.
+        // `canonicalize` follows links, so whatever is past a link can look "inside the root"
+        // whether it actually is or not — each component has to be checked directly, before the
+        // escape check that follows. In particular, if a link points at another spot that is
+        // itself "inside" the root (another peer's directory, say), the escape check alone can
+        // never catch it.
         //
-        // 걷는 기준은 **정규화하지 않은** `self.root`다. `뿌리`(정규화한 것)를 기준으로 걸으면
-        // `self.root`의 조상 중 하나라도 심링크일 때(macOS의 `/var`→`/private/var`,
-        // 심링크로 된 홈 디렉터리 등) `부모.strip_prefix(뿌리)`가 실패해 `unwrap_or`가 절대경로
-        // 전체를 돌려주고, 걷기가 파일시스템 루트부터 다시 시작돼 inbox 바깥의 모든 조상까지
-        // 심링크로 걸린다 — 정상적인 요청이 전부 거부된다. `부모`는 `self.root.join(..)`이라
-        // `self.root` 기준으로는 항상 `strip_prefix`가 성립하므로, 걷기가 inbox 안에 새로
-        // 붙인 조각만 본다. inbox 자체(또는 그 조상)가 심링크인 것은 받는 사람의 설정이라
-        // 허용하고, inbox **안**의 조각이 심링크인 것만 거부한다.
+        // The walk is anchored on **`self.root` unnormalized**. Anchoring on `뿌리` (the
+        // canonicalized one) instead would break as soon as any ancestor of `self.root` is a
+        // symlink (macOS's `/var` → `/private/var`, a symlinked home directory, and so on):
+        // `부모.strip_prefix(뿌리)` would fail, `unwrap_or` would hand back the whole absolute
+        // path, and the walk would restart from the filesystem root — flagging every ancestor
+        // outside the inbox as a symlink and rejecting every ordinary request. `부모` is
+        // `self.root.join(..)`, so `strip_prefix` against `self.root` always succeeds, and the
+        // walk only ever looks at the components newly appended inside the inbox. The inbox
+        // itself (or one of its ancestors) being a symlink is the receiving side's own setup and
+        // is allowed; only a component **inside** the inbox being a symlink is rejected.
         심링크_없는지(&self.root, &부모).await?;
 
-        // 부모까지는 실재하므로 canonicalize로 확인한다. 목적지 자체는 아직 없을 수 있어
-        // 별도로 본다.
+        // The parent is guaranteed to exist by this point, so `canonicalize` can confirm it. The
+        // destination itself may not exist yet, so it is checked separately.
         let 실제_부모 =
             tokio::fs::canonicalize(&부모).await.map_err(|e| InboxError::Io(e.to_string()))?;
         if !실제_부모.starts_with(&뿌리) {
@@ -82,13 +85,14 @@ impl Inbox {
         }
 
         let 길 = 실제_부모.join(safe_name(proposed));
-        // 이 시점에 `실제_부모`는 이미 `뿌리` 안임이 확인됐고 `safe_name`은 구분자 없는 조각
-        // 하나만 돌려주므로, 이 검사가 실제로 걸릴 길은 없다. 방어선을 하나 더 두는 것뿐이니
-        // 나중에 이걸 보고 핵심 방어라고 착각하지 말 것 — 핵심은 위의 `심링크_없는지`다.
+        // By this point `실제_부모` has already been confirmed to be inside `뿌리`, and
+        // `safe_name` returns exactly one separator-free component, so there is no real way for
+        // this check to ever trip. It is only a second line of defense — do not later mistake it
+        // for the primary one, which is `심링크_없는지` above.
         if !길.starts_with(&뿌리) {
             return Err(InboxError::Escaped);
         }
-        // 목적지가 이미 링크면 쓰는 순간 링크가 가리키는 곳에 쓰인다.
+        // If the destination is already a link, writing to it writes wherever the link points.
         if let Ok(정보) = tokio::fs::symlink_metadata(&길).await {
             if 정보.file_type().is_symlink() {
                 return Err(InboxError::SymlinkInPath);
@@ -98,7 +102,7 @@ impl Inbox {
     }
 }
 
-/// `뿌리`부터 `길`까지 내려가며 조각마다 심링크인지 본다.
+/// Walks down from `뿌리` to `길`, checking each component for a symlink.
 async fn 심링크_없는지(뿌리: &Path, 길: &Path) -> Result<(), InboxError> {
     let 나머지 = 길.strip_prefix(뿌리).unwrap_or(길);
     let mut 지금 = 뿌리.to_path_buf();

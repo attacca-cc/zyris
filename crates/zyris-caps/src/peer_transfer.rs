@@ -71,13 +71,13 @@ mod tests {
     use zyris::proto::Transfer;
 
     #[test]
-    fn pull만_스트림이다() {
+    fn only_pull_is_a_stream() {
         let d = super::peer_transfer_capability();
         assert_eq!(d.name, "peer_transfer");
         assert_eq!(d.version, 1);
         assert_eq!(d.tool("push_offer").unwrap().transfer, Transfer::Unary);
         assert_eq!(d.tool("pull").unwrap().transfer, Transfer::UniStream);
-        // 도구가 늘면 피어에게 열리는 표면이 늘어난다. 여기서 잡는다.
+        // Adding a tool grows the surface opened to the peer. This is where that gets caught.
         let mut 이름들: Vec<_> = d.tools.iter().map(|t| t.name.as_str()).collect();
         이름들.sort();
         assert_eq!(이름들, ["pull", "push_offer"]);

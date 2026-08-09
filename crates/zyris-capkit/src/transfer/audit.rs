@@ -37,7 +37,7 @@ impl Audit {
     }
     pub async fn record(&self, line: AuditLine) {
         if let Err(e) = self.write(line).await {
-            tracing::warn!(error = %e, path = %self.path.display(), "감사 로그를 쓰지 못했습니다");
+            tracing::warn!(error = %e, path = %self.path.display(), "failed to write audit log");
         }
     }
 
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn 한_전송이_한_줄로_쌓인다() {
+    async fn one_transfer_appends_one_line() {
         let 자리 = tempfile::tempdir().unwrap();
         let 길 = 자리.path().join("transfers.log");
         let audit = Audit::new(&길);
@@ -82,16 +82,16 @@ mod tests {
         audit.record(한_줄()).await;
 
         let 글 = tokio::fs::read_to_string(&길).await.unwrap();
-        assert_eq!(글.lines().count(), 2, "append여야 한다");
+        assert_eq!(글.lines().count(), 2, "must append");
         let 첫_줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
         assert_eq!(첫_줄["peer_slug"], "arch-zyris-code");
         assert_eq!(첫_줄["replaced"], true);
     }
 
     #[tokio::test]
-    async fn 백업을_못_하고_덮은_것이_로그에서_드러난다() {
-        // 되돌릴 수 있게 덮은 것과 원본을 영영 잃은 것은 `undo`로만 갈린다. 이 필드가 없으면
-        // 감사 로그에서 둘이 글자 하나 다르지 않다.
+    async fn overwrite_without_backup_shows_up_in_the_log() {
+        // A reversible overwrite and a permanently lost original are told apart only by `undo`.
+        // Without this field they read as identical, letter for letter, in the audit log.
         let 자리 = tempfile::tempdir().unwrap();
         let 길 = 자리.path().join("transfers.log");
         let audit = Audit::new(&길);
@@ -100,12 +100,12 @@ mod tests {
         let 글 = tokio::fs::read_to_string(&길).await.unwrap();
         let 줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
         assert_eq!(줄["replaced"], true);
-        assert!(줄["undo"].is_null(), "백업 없이 덮은 것이 로그에 드러나야 한다");
+        assert!(줄["undo"].is_null(), "an overwrite without a backup must show up in the log");
     }
 
     #[tokio::test]
-    async fn 못_써도_전송을_막지_않는다() {
+    async fn failing_to_write_does_not_block_the_transfer() {
         let audit = Audit::new("/proc/못쓰는자리/x.log");
-        audit.record(한_줄()).await; // 패닉하지 않으면 통과
+        audit.record(한_줄()).await; // passes as long as this does not panic
     }
 }
