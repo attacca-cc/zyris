@@ -448,3 +448,112 @@ async fn dropping_a_pending_connection_without_establishing_rejects_the_peer() {
     .await
     .expect("test exceeded its deadline");
 }
+
+#[tokio::test]
+async fn a_peer_that_stalls_after_one_byte_does_not_hang_the_first_read() {
+    // Regression for F1: `establish`'s own deadline covers the QUIC handshake and opening the
+    // bi-stream, and a peer satisfies it the moment it opens the stream and writes anything at
+    // all — even one byte. Before this fix, nothing bounded what happened next: the resulting
+    // transport's first read (which `Node::accept`'s `read_handshake` performs, with its own
+    // heartbeat watchdog not yet running) could hang forever behind a peer that wrote one byte
+    // and then went silent. Takes ~`FIRST_MESSAGE_DEADLINE` (10s) to run — that duration being
+    // exactly what's under test, not incidental.
+    tokio::time::timeout(TEST_DEADLINE, async {
+        let b_key = iroh::SecretKey::generate();
+        let b_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(b_key)
+            .alpns(vec![zyris_p2p::transport::ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let b_addr = b_ep.addr();
+
+        let b_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            let (_peer, b_transport) =
+                zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await.unwrap();
+            let (_b_sink, mut b_read) = Box::new(b_transport).split();
+            let started = std::time::Instant::now();
+            let result = b_read.next().await;
+            (result.is_some(), started.elapsed())
+        });
+
+        let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let a_conn =
+            a_ep.connect(b_addr, zyris_p2p::transport::ALPN).await.unwrap();
+        let (mut a_send, _a_recv) = a_conn.open_bi().await.unwrap();
+        // Satisfies `establish`'s own deadline (the stream is open and *something* arrived) but
+        // never completes even the 5-byte frame header, let alone a full message — exactly the
+        // shape F1 exists for.
+        a_send.write_all(&[0u8]).await.unwrap();
+
+        let (got_a_result, elapsed) = b_task.await.unwrap();
+        assert!(got_a_result, "a stalled peer's first read must resolve (as an error), not hang");
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "must give up at FIRST_MESSAGE_DEADLINE (10s), not linger indefinitely: took {elapsed:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(9),
+            "must actually wait close to the full FIRST_MESSAGE_DEADLINE, not bail early for an \
+             unrelated reason: took {elapsed:?}"
+        );
+
+        // Kept alive for the whole test so the "one byte, then stall" is genuine — an early
+        // drop would end the stream cleanly instead, which is a different scenario entirely.
+        drop(a_send);
+    })
+    .await
+    .expect("test exceeded its deadline");
+}
+
+#[tokio::test]
+async fn establish_rejects_a_connection_that_negotiated_a_different_alpn() {
+    // Regression for F2: `establish` never checked the negotiated ALPN. Measured: bind the
+    // endpoint with two ALPNs, connect on the *other* one, write a few bytes, and `establish`
+    // returned `Ok` — happily treating a peer speaking an unrelated protocol as if it were
+    // speaking zyris.
+    tokio::time::timeout(TEST_DEADLINE, async {
+        const OTHER_ALPN: &[u8] = b"other/1";
+        let b_key = iroh::SecretKey::generate();
+        let b_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(b_key)
+            .alpns(vec![zyris_p2p::transport::ALPN.to_vec(), OTHER_ALPN.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let b_addr = b_ep.addr();
+
+        let b_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&b_ep).await.unwrap();
+            zyris_p2p::peer::establish(pending, ESTABLISH_DEADLINE).await
+        });
+
+        let a_ep = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        // Connects on the *other* ALPN the endpoint happens to also accept — not zyris's.
+        let a_conn = a_ep.connect(b_addr, OTHER_ALPN).await.unwrap();
+        let (mut a_send, _a_recv) = a_conn.open_bi().await.unwrap();
+        a_send.write_all(&[0u8; 5]).await.unwrap();
+
+        match b_task.await.unwrap() {
+            Err(zyris_p2p::peer::PeerError::AlpnMismatch { negotiated, expected }) => {
+                assert_eq!(negotiated, OTHER_ALPN, "must report the ALPN actually negotiated");
+                assert_eq!(expected, zyris_p2p::transport::ALPN);
+            }
+            Ok(_) => panic!("a connection on a different ALPN must be rejected, not accepted"),
+            Err(other) => panic!("expected AlpnMismatch, got a different error: {other}"),
+        }
+    })
+    .await
+    .expect("test exceeded its deadline");
+}

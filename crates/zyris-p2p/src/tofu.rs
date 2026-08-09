@@ -2,7 +2,19 @@
 //!
 //! attacca issues node credentials and runs the rendezvous, so a "fake B" introduced to A
 //! cannot be ruled out by cryptography alone. Pinning turns that into an attack that works
-//! **once, never twice, and leaves a mark**.
+//! **once, never twice, and leaves a mark** — but only if the ledger is keyed on something
+//! attacca itself cannot re-mint.
+//!
+//! **The key `check`/`pin` take (`peer_slug`) must be a stable name the user chose, and must
+//! never be a server-issued identifier.** An earlier version of this store keyed the ledger on
+//! attacca's own `node_id`. That does not defend against the substitution this module exists
+//! for: attacca mints `node_id`, so introducing a fake B is as simple as minting it a *new*
+//! `node_id` with the same human-facing slug. The fake arrives as an unknown peer, passes
+//! `check` (nothing is pinned under a `node_id` nobody has seen before), and gets pinned —
+//! every time, with no mark left anywhere. Keying on a name the *user* picked and attacca has
+//! no channel to silently change is what actually makes the substitution visible: attacca can
+//! mint as many `node_id`s as it wants, but it cannot make a second one answer to the slug the
+//! user already pinned without `check` catching the mismatch.
 //!
 //! **There is no automatic way out.** A human has to edit the file. Accepting a changed key
 //! quietly would make the pin worth nothing.
@@ -113,10 +125,14 @@ impl TofuStore {
     /// Checks the offered key against what is pinned. An unknown peer passes — pinning
     /// happens **after** a connection succeeds, not here.
     ///
+    /// `peer_slug` **must be a stable name the user chose** (e.g. the slug they gave this
+    /// peer) **and must never be a server-issued identifier** such as attacca's `node_id` —
+    /// see the module docs for why keying on the latter defeats the whole point of pinning.
+    ///
     /// A ledger we cannot read is an error, not an empty ledger. See the module docs.
-    pub async fn check(&self, node_id: &str, endpoint_id: &str) -> Result<(), TofuError> {
+    pub async fn check(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
         let ledger = self.read().await?;
-        match ledger.peers.get(node_id) {
+        match ledger.peers.get(peer_slug) {
             None => Ok(()),
             Some(entry) if entry.endpoint_id == endpoint_id => Ok(()),
             Some(entry) => Err(TofuError::Changed {
@@ -126,8 +142,16 @@ impl TofuStore {
         }
     }
 
-    /// Pins the key of the first connection that succeeded. **Never overwrites a pin.**
-    pub async fn pin(&self, node_id: &str, endpoint_id: &str) -> Result<(), TofuError> {
+    /// Pins the key of the first connection that succeeded. **Never overwrites a pin** — but a
+    /// second call offering a *different* key for an already-pinned `peer_slug` is reported as
+    /// `Err(TofuError::Changed)`, not silently swallowed as `Ok`. A caller that pins without
+    /// having called `check` first must still learn a substitution was attempted; returning
+    /// `Ok` there would hide the exact event this store exists to surface. Only a re-pin of the
+    /// identical key — a true no-op — returns `Ok(())`.
+    ///
+    /// `peer_slug` **must be a stable name the user chose, and must never be a server-issued
+    /// identifier.** See [`Self::check`] and the module docs.
+    pub async fn pin(&self, peer_slug: &str, endpoint_id: &str) -> Result<(), TofuError> {
         // Keeps same-process tasks that share this instance (via clone) off the lock-file
         // retry loop entirely: they serialize here first, so at most one of them ever
         // touches the lock file at a time.
@@ -142,11 +166,18 @@ impl TofuStore {
         // still races without a lock every writer actually sees: the filesystem.
         let file_lock = self.acquire_lock_file().await?;
         let mut ledger = self.read().await?;
-        if ledger.peers.contains_key(node_id) {
-            return Ok(());
+        if let Some(entry) = ledger.peers.get(peer_slug) {
+            return if entry.endpoint_id == endpoint_id {
+                Ok(())
+            } else {
+                Err(TofuError::Changed {
+                    pinned: entry.endpoint_id.clone(),
+                    offered: endpoint_id.to_string(),
+                })
+            };
         }
         ledger.peers.insert(
-            node_id.to_string(),
+            peer_slug.to_string(),
             Entry { endpoint_id: endpoint_id.to_string(), first_seen_ms: now_ms() },
         );
         self.write(&ledger, &file_lock).await
