@@ -114,8 +114,8 @@ mod tests {
         let mut header = [0u8; 5];
         header[0] = 0;
         header[1..5].copy_from_slice(&((MAX_FRAME + 1) as u32).to_be_bytes());
-        // Without this cap, a peer that ignores the protocol could declare a 4 GiB length
-        // and push that much straight into our memory before we ever see a payload byte.
+        // Not a memory defense (see the module doc) — this is about rejecting a peer that
+        // isn't speaking real zyris before bothering to read a payload byte from it at all.
         assert!(matches!(decode_header(&header), Err(FrameError::TooLarge(_))));
     }
 
