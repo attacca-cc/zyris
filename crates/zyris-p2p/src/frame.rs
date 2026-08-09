@@ -5,12 +5,22 @@
 //! [u8 kind][u32 BE len][payload …]      kind 0 = Binary, 1 = Text
 //! ```
 //!
-//! **The `len` cap is the real memory defense here.** The protocol's credit accounting only
-//! binds what the sender is allowed to send — the receiver keeps no ledger of its own
-//! (`CreditViolation` is defined but never used) — so it does nothing to stop a peer that
-//! ignores the protocol. Without a hard cap on `len`, such a peer could declare a 4 GiB
-//! payload and push that much straight into our memory before we ever see a single payload
-//! byte.
+//! **The `len` cap bounds a declared length, not resident memory — it is not the memory
+//! defense it looks like.** `vec![0u8; len]` for a length up to `MAX_FRAME` costs only a few
+//! KB of RSS up front, not `len` bytes: glibc's `alloc_zeroed` hands back lazy, copy-on-write
+//! zero pages, and nothing is actually resident until the receiver writes into them one
+//! `read_exact` at a time. So a peer declaring an oversized length does not spike our memory
+//! the way this used to claim; what the cap actually buys is rejecting a peer that is not
+//! speaking real zyris (`decode_header` refuses the length before any payload byte is read),
+//! not bounding allocation cost.
+//!
+//! **The real exposure is time, not memory.** The protocol's credit accounting only binds what
+//! the sender is allowed to send — the receiver keeps no ledger of its own (`CreditViolation`
+//! is defined but never used) — so it does nothing to stop a peer that ignores the protocol.
+//! A peer that opens a connection and then sends a handful of bytes, or none at all, holds a
+//! task, a connection, and a socket open indefinitely: iroh's own keepalives run regardless, so
+//! there is no idle timeout to fall back on. That is a deadline problem for whoever drives the
+//! read loop on top of this framing, not something a length cap can fix.
 
 use zyris_proto::WireMessage;
 

@@ -3,8 +3,10 @@
 //! Only ever one bi-stream. zyris already multiplexes at its own layer and paces with credit,
 //! so there is no reason to open a second QUIC stream.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
-use iroh::endpoint::{ReadExactError, RecvStream, SendStream};
+use iroh::endpoint::{RecvStream, SendStream};
 use zyris::transport::{Transport, WireSink, WireStream};
 use zyris::TransportError;
 use zyris_proto::WireMessage;
@@ -12,6 +14,12 @@ use zyris_proto::WireMessage;
 use crate::frame::{body, decode_header, encode};
 
 pub const ALPN: &[u8] = b"zyris/1";
+
+/// How long `close` waits for the peer to acknowledge the last of the buffered stream data
+/// before tearing down the connection anyway. Bounds what would otherwise be an unbounded wait
+/// on an unresponsive peer; on a healthy connection this resolves in well under a
+/// round-trip-time, since it is only waiting for a QUIC ACK.
+const CLOSE_STOPPED_WAIT: Duration = Duration::from_secs(5);
 
 /// `iroh::Endpoint` is `Arc`-backed and cheap to clone, but a `Connection` does **not** keep its
 /// owning `Endpoint` alive — dropping the last clone of the `Endpoint` aborts its socket
@@ -66,7 +74,19 @@ impl WireSink for IrohSink {
         // scoped correctly: it ends this connection and this connection only. Dropping this
         // sink's `_endpoint` clone afterwards is harmless as long as at least one other clone
         // (the caller's original, or another connection's) is still alive somewhere.
-        let _ = self.send.finish();
+        //
+        // Ordering matters here and used to be wrong: `finish()` only requests that no more
+        // data be sent — it does not wait for what is already buffered to actually reach the
+        // peer. Calling `Connection::close` immediately after `finish()` discards whatever
+        // hadn't been acknowledged yet, which on a real transfer is not a hypothetical: it
+        // dropped an entire in-flight frame in testing. `stopped()` resolves once the peer has
+        // acknowledged receipt of everything the stream sent (`Ok(None)`) or told us it gave up
+        // early (`Ok(Some(code))`); either way, once it resolves there is nothing further this
+        // stream owes the peer, and closing the connection is safe. Bounded by
+        // `CLOSE_STOPPED_WAIT` so a peer that never acknowledges can't hang our own shutdown.
+        if self.send.finish().is_ok() {
+            let _ = tokio::time::timeout(CLOSE_STOPPED_WAIT, self.send.stopped()).await;
+        }
         self.conn.close((code as u32).into(), reason.as_bytes());
         Ok(())
     }
@@ -76,13 +96,15 @@ impl WireSink for IrohSink {
 impl WireStream for IrohRead {
     async fn next(&mut self) -> Option<Result<WireMessage, TransportError>> {
         let mut header = [0u8; 5];
-        match self.recv.read_exact(&mut header).await {
-            Ok(()) => {}
-            // Zero bytes arrived before the peer ended the stream: nothing was cut off
-            // mid-frame, so this is a clean end of traffic, not a fault. Surfacing it as an
-            // error would make every ordinary disconnect noisy.
-            Err(ReadExactError::FinishedEarly(0)) => return None,
-            Err(e) => return Some(Err(TransportError::Io(e.to_string()))),
+        // No "clean end of stream" branch here on purpose. An earlier version tried to treat a
+        // zero-byte `FinishedEarly` specially so an ordinary disconnect wouldn't look like an
+        // error, but `close` above always follows `finish()` with `Connection::close`, so a
+        // peer hanging up through this code never produces a clean stream-EOF on this side —
+        // it always shows up as a connection-level error instead, and that branch was dead.
+        // It also bought nothing even where reachable: `run_reader` in `zyris/src/connection.rs`
+        // maps a bare `None` and `Some(Err(_))` to the same `CloseReason::Transport` either way.
+        if let Err(e) = self.recv.read_exact(&mut header).await {
+            return Some(Err(TransportError::Io(e.to_string())));
         }
         let (kind, len) = match decode_header(&header) {
             Ok(v) => v,
