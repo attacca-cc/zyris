@@ -471,3 +471,49 @@ async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건
     assert!(결과.is_err(), "임시 자리가 심링크인데 성공했다");
     assert_eq!(tokio::fs::read(&표적).await.unwrap(), b"UNTOUCHED");
 }
+
+/// 청크를 여러 개 써야 하는 크기의 파일이 실제로 도착하는지.
+///
+/// **이 테스트가 없어서 기능이 통째로 안 되는 것을 아무도 못 봤다.** 나머지 테스트의 가장 큰
+/// 짐이 9,000바이트라 전부 청크 하나에 들어갔고, 두 번째 청크로 넘어가는 길은 한 번도 지나간
+/// 적이 없었다. 그 길에 영구 정지가 있었다 — `청크`가 프로토콜의 credit 창과 같은 크기라
+/// 직렬화 뒤 창을 넘겼고, 보내는 쪽이 첫 청크에서 막혔다.
+///
+/// 그래서 **크기가 요점이다.** 짐을 청크보다 확실히 크게 유지할 것. `청크`를 키우면 이 값도
+/// 같이 키워야 한다.
+#[tokio::test]
+async fn 청크_여러_개짜리_파일도_끝까지_도착한다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    // 64 KiB 청크로 열한 조각쯤 난다.
+    let 내용: Vec<u8> = (0..700_000u32).map(|i| (i % 251) as u8).collect();
+    let 원본 = 원본_자리.path().join("big.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) = 붙인다("big", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    // 멈추는 버그라 assert로는 안 잡힌다 — 시간을 걸어야 실패로 나타난다.
+    let 결과 = tokio::time::timeout(
+        Duration::from_secs(20),
+        b.push_offer(TransferOffer {
+            transfer_id: "big".into(),
+            name: "big.bin".into(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: false,
+        }),
+    )
+    .await
+    .expect("20초 안에 안 끝났다 — 청크가 여러 개인 전송이 멈춘다")
+    .unwrap();
+
+    assert_eq!(결과.bytes, 내용.len() as u64);
+    assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
+}

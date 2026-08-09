@@ -20,7 +20,16 @@ use super::audit::{Audit, AuditLine};
 use super::inbox::Inbox;
 use super::undo::UndoStore;
 
-const 청크: usize = 256 * 1024;
+/// 파일을 스트림 항목 하나에 얼마씩 실을지.
+///
+/// **프로토콜의 `initial_stream_credit`(256 KiB)보다 넉넉히 작아야 한다.** 항목은 와이어로
+/// 나가기 전에 msgpack으로 감싸이므로, 창과 *똑같은* 크기로 실으면 직렬화된 길이가 창을 몇
+/// 바이트 넘는다. 그러면 보내는 쪽 `CreditGate::acquire`가 **첫 청크에서** 막히고, 상대는 그
+/// 청크를 못 받았으니 credit을 돌려줄 수 없다 — 양쪽이 서로를 기다리며 영원히 멈춘다.
+/// 256 KiB로 뒀을 때 실제로 그랬다(262,144는 정지, 262,080은 통과).
+///
+/// 64 KiB면 감싸는 몫이 남고 창 하나에 네 항목이 함께 흐른다.
+const 청크: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TransferConfig {
