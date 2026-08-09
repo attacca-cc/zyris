@@ -4,3 +4,5 @@
 //! `WireMessage::{Binary, Text}`, and the only client/server asymmetry is
 //! `Role::Dial` / `Role::Accept` — so once it is settled who dialled, everything else already
 //! fits.
+
+pub mod frame;
