@@ -1,14 +1,15 @@
-//! 덮기 전에 원본을 옮겨 둔다.
+//! Moves the original aside before it gets overwritten.
 //!
-//! 복사가 아니라 **이동**인 이유는 디스크를 두 배 먹지 않기 위해서다. 그리고 **보관에 실패해도
-//! 전송은 진행한다** — zyris-code의 `code_edit`이 같은 규칙이다. 안전망이 없다고 일을 막으면
-//! 고칠 수 없는 상태가 생긴다.
+//! A **move**, not a copy, so disk usage does not double. And **a failed stash does not stop the
+//! transfer** — zyris-code's `code_edit` follows the same rule. Blocking work because the safety
+//! net is missing produces states nobody can repair.
 //!
-//! 다만 "보관에 실패한다"가 "조용히 앞선 백업을 지운다"로 번지면 안 된다. 그래서 자리 이름에는
-//! 밀리초 말고 프로세스 내 순번도 붙는다(같은 밀리초·같은 이름의 백업이 겹치지 않도록), 심링크는
-//! rename이 안 통하면 copy로 대체하지 않는다(가리키는 대상의 내용이 새어 나가므로), 그리고
-//! copy는 됐는데 원본 삭제만 실패한 경우는 `None`이 아니라 이미 만든 백업 경로를 돌려준다
-//! (그래야 존재하는 백업을 잃어버리지 않는다).
+//! What must never happen is "the stash failed" turning into "an earlier backup was quietly
+//! deleted". So slot names carry an in-process sequence number as well as the millisecond (two
+//! backups of the same name in the same millisecond must not collide), a symlink is not
+//! copy-fallbacked when rename does not work (that would leak the contents of whatever it points
+//! at), and the case where the copy succeeded but only unlinking the original failed returns the
+//! backup path rather than `None` (otherwise a backup that exists is lost to the caller).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,12 +36,13 @@ impl UndoStore {
         UndoStore { root: root.into() }
     }
 
-    /// 원본을 보관 자리로 옮기고 간 자리를 돌려준다.
+    /// Moves the original into a stash slot and returns where it went.
     ///
-    /// 옮길 것이 없으면(파일이 없으면) `None`. 보관 자체를 못 만들었거나 아무것도 못 옮겼으면
-    /// `None`. **예외 하나**: rename이 안 통해 copy로 넘어갔다가 원본 삭제(unlink)만 실패한
-    /// 경우 — 그때는 백업이 이미 완전한 상태로 존재하므로 그 경로를 돌려준다. `None`은
-    /// "백업이 전혀 없다"는 뜻이지 "원본이 사라졌으니 걱정 말라"는 뜻이 아니다.
+    /// `None` when there is nothing to move (no such file), and `None` when the slot could not be
+    /// created or nothing could be moved into it. **One exception**: rename did not work, the
+    /// copy fallback succeeded, and only unlinking the original failed — the backup is complete
+    /// at that point, so its path is returned. `None` means "there is no backup at all", never
+    /// "the original is safe".
     pub async fn stash(&self, victim: &Path, now_ms: u64) -> Option<PathBuf> {
         let 메타 = tokio::fs::symlink_metadata(victim).await.ok()?;
         let 이름 = victim.file_name()?;

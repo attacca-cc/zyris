@@ -1,3 +1,5 @@
+#![cfg(feature = "transfer")]
+
 use std::os::unix::fs::PermissionsExt;
 
 use zyris_capkit::transfer::undo::UndoStore;

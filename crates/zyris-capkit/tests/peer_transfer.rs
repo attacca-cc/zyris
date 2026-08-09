@@ -1,3 +1,5 @@
+#![cfg(feature = "transfer")]
+
 //! 전송 전 과정을 **소켓 없이** 본다. `zyris::testing::duplex`가 진짜 Connection 둘을 잇는다.
 
 use std::time::Duration;
@@ -6,10 +8,20 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use zyris::{Chunk, Node, NodeKind};
 use zyris_caps::peer_transfer::{PeerTransfer, PeerTransferClient, PeerTransferServer, TransferOffer};
-use zyris_capkit::transfer::{LocalPeerTransfer, TransferConfig};
+use zyris_capkit::transfer::{LocalPeerTransfer, TransferConfig, part_path};
 
 fn 해시(바이트: &[u8]) -> String {
     hex::encode(Sha256::digest(바이트))
+}
+
+/// 이번 전송이 쓸 `.part` 자리.
+///
+/// **테스트가 이 이름을 문자열로 깔면 안 된다.** `.part` 이름에는 `transfer_id`에서 유도한
+/// 표식이 섞여 있다(같은 이름의 동시 전송이 서로의 `.part`를 덮지 않도록). 이름 규칙이
+/// 바뀌었는데 테스트가 옛 이름을 깔면, 이어받기 테스트가 "이어받을 부스러기가 아예 없는"
+/// 경로로 조용히 새어 나가면서도 초록이 난다.
+fn 부분_파일(받는_자리: &std::path::Path, transfer_id: &str, 이름: &str) -> std::path::PathBuf {
+    part_path(&받는_자리.join("a").join(이름), transfer_id)
 }
 
 /// A(보내는 쪽)와 B(받는 쪽)를 잇는다. 둘 다 `peer_transfer` 하나만 내준다.
@@ -186,9 +198,12 @@ async fn overwrite가_true면_덮고_원본을_되돌림_자리로_옮긴다() {
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     tokio::fs::write(받는_자리.path().join("a").join("a.txt"), "예전 것".as_bytes()).await.unwrap();
 
+    let 감사_자리 = tempfile::tempdir().unwrap();
+    let 감사_길 = 감사_자리.path().join("transfers.log");
     let 설정 = TransferConfig {
         inbox: 받는_자리.path().to_path_buf(),
         undo: 되돌림.path().to_path_buf(),
+        audit: Some(감사_길.clone()),
         ..TransferConfig::default()
     };
     let (a_conn, _b) =
@@ -210,6 +225,12 @@ async fn overwrite가_true면_덮고_원본을_되돌림_자리로_옮긴다() {
     assert_eq!(tokio::fs::read(&결과.written).await.unwrap(), 내용);
     let 되돌릴_것 = 결과.undo.expect("덮었으면 되돌림 자리가 있어야 한다");
     assert_eq!(tokio::fs::read(&되돌릴_것).await.unwrap(), "예전 것".as_bytes());
+
+    // 되돌릴 수 있게 덮은 것과 원본을 영영 잃은 것은 감사 로그에서 `undo`로만 갈린다.
+    let 글 = tokio::fs::read_to_string(&감사_길).await.unwrap();
+    let 줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
+    assert_eq!(줄["replaced"], true);
+    assert_eq!(줄["undo"], 되돌릴_것, "무엇을 어디로 치웠는지가 로그에 남아야 한다");
 }
 
 #[tokio::test]
@@ -348,7 +369,7 @@ async fn 이어받기_부스러기가_offer보다_크면_지우고_처음부터_
     // 이미 있다 — 예를 들어 예전의 큰 전송이 끊긴 자리다.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
     tokio::fs::write(
-        받는_자리.path().join("a").join("data.txt.part"),
+        부분_파일(받는_자리.path(), "t8", "data.txt"),
         "STALE-GARBAGE-LONGER-THAN-NEW".as_bytes(),
     )
     .await
@@ -400,7 +421,7 @@ async fn 이어받기_앞부분과_나머지가_합쳐져_원본과_같아진다
 
     let 이미_받은_길이 = 내용.len() / 3;
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
-    tokio::fs::write(받는_자리.path().join("a").join("resume.bin.part"), &내용[..이미_받은_길이])
+    tokio::fs::write(부분_파일(받는_자리.path(), "t9", "resume.bin"), &내용[..이미_받은_길이])
         .await
         .unwrap();
 
@@ -448,7 +469,7 @@ async fn 임시_자리에_심어_둔_심링크는_거부하고_표적을_안_건
 
     // `.part` 자리에 감옥 밖(표적)을 가리키는 심링크를 미리 심어 둔다.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
-    std::os::unix::fs::symlink(&표적, 받는_자리.path().join("a").join("linked.bin.part")).unwrap();
+    std::os::unix::fs::symlink(&표적, 부분_파일(받는_자리.path(), "t10", "linked.bin")).unwrap();
 
     let 설정 = TransferConfig {
         inbox: 받는_자리.path().to_path_buf(),
@@ -550,7 +571,7 @@ async fn 받다_만_파일을_이어받는다() {
     기대.extend_from_slice(&뒷부분);
 
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
-    tokio::fs::write(받는_자리.path().join("a").join("a.bin.part"), &이미_받은_앞부분)
+    tokio::fs::write(부분_파일(받는_자리.path(), "resume", "a.bin"), &이미_받은_앞부분)
         .await
         .unwrap();
 
@@ -589,7 +610,7 @@ async fn 받다_만_것이_실제와_다르면_처음부터_받는다() {
 
     // 쓰레기 앞부분. 이어받으면 sha256이 안 맞아야 한다 — 그래야 버그가 조용히 안 지나간다.
     tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
-    tokio::fs::write(받는_자리.path().join("a").join("a.bin.part"), vec![0xFFu8; 10_000])
+    tokio::fs::write(부분_파일(받는_자리.path(), "bad-resume", "a.bin"), vec![0xFFu8; 10_000])
         .await
         .unwrap();
 

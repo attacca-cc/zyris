@@ -1,11 +1,12 @@
-//! 받은 파일이 놓이는 자리. **감옥이다.**
+//! Where received files land. **It is a jail.**
 //!
-//! `zyris-capkit`의 `path::resolve_under`는 감옥이 아니다 — 주석부터가 "the root is a default,
-//! not a jail"이고 절대경로가 그냥 통과한다. 심링크는 아예 다루지 않는다. 여기서는 받은 것을
-//! 남의 머신에 쓰는 것이라 그 규칙을 쓸 수 없다.
+//! `zyris-capkit`'s `path::resolve_under` is not one — its own comment says "the root is a
+//! default, not a jail", absolute paths sail straight through, and symlinks are not considered at
+//! all. What happens here is writing what someone else sent onto their machine, so that rule
+//! cannot be reused.
 //!
-//! 방어가 둘이다. 이름 씻기(`super::name`)가 정상 경로를 지키고, 이 파일의 실제 경로 확인이
-//! 씻기를 빠져나간 것을 잡는다. **하나만으로는 부족하다.**
+//! There are two defenses. Name washing (`super::name`) guards the ordinary path, and this file's
+//! real-path checks catch whatever slipped past the washing. **Either one alone is not enough.**
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +14,9 @@ use super::name::safe_name;
 
 #[derive(Debug)]
 pub enum InboxError {
-    /// 최종 경로가 루트 밖이다.
+    /// The final path is outside the root.
     Escaped,
-    /// 경로 조각 중 하나가 심볼릭 링크다.
+    /// One of the path's components is a symbolic link.
     SymlinkInPath,
     Io(String),
 }
@@ -45,10 +46,10 @@ impl Inbox {
         &self.root
     }
 
-    /// 최종 경로를 정하고 부모를 만들어 둔다.
+    /// Settles the final path and creates its parent directory.
     ///
-    /// `peer_slug`도 씻는다 — 상대가 자기 slug를 마음대로 부를 수 있으므로 그것도 신뢰할 수
-    /// 없는 입력이다.
+    /// `peer_slug` gets washed too — the peer names itself, so that is untrusted input as much as
+    /// the file name is.
     pub async fn resolve(&self, peer_slug: &str, proposed: &str) -> Result<PathBuf, InboxError> {
         let 부모 = self.root.join(safe_name(peer_slug));
         tokio::fs::create_dir_all(&부모).await.map_err(|e| InboxError::Io(e.to_string()))?;
