@@ -56,7 +56,10 @@ const 청크: usize = 64 * 1024;
 /// The suffix is appended to the file name rather than replacing an extension. `with_extension`
 /// would make `a.txt` and `a.bin` share one `.part`, and would make a proposed name that already
 /// ends in `.part` collide with the destination itself. The stem is shortened so the suffix still
-/// fits inside the 255-byte name limit [`super::name`] enforces.
+/// fits inside the 255-byte name limit [`super::name`] enforces — and then checked, because the
+/// shortening itself can hand back the destination's own name when the peer plants the suffix at
+/// the end of a full-length name. **The result is never the destination**; a `.part` that is the
+/// destination turns the failure cleanup into a delete of the file being replaced.
 pub fn part_path(목적지: &Path, transfer_id: &str) -> PathBuf {
     let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
     // `.` + 16글자 + `.part` = 22바이트. 입력이 무엇이든 길이가 변하지 않는다.
@@ -78,7 +81,21 @@ pub fn part_path(목적지: &Path, transfer_id: &str) -> PathBuf {
         }
         줄기.push(c);
     }
-    목적지.with_file_name(format!("{줄기}{꼬리}"))
+    let mut 임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
+    // **자르기가 임시를 목적지 자신으로 되돌릴 수 있다.** 꼬리는 `transfer_id`에서 나오고
+    // `transfer_id`도 `name`도 보내는 쪽이 고르므로, 꼬리를 미리 계산해 255바이트 이름 끝에
+    // 심어 두면 자른 결과가 원래 이름과 글자 하나 다르지 않게 된다. 그러면 이미 있던 목적지가
+    // 이어받기 부스러기로 잡혀 해시가 맞을 수 없고, 불일치 정리 `remove_file(&임시)`가 목적지
+    // 자신을 지운다 — 되돌림도 감사도 남지 않는다.
+    //
+    // 한 글자만 더 줄이면 길이가 달라져 반드시 갈라진다. 겹치는 경우 줄기는 200바이트대이므로
+    // 지울 글자가 없을 일은 없다(줄기가 이름 전체면 임시는 이름보다 꼬리만큼 길어 애초에 안
+    // 겹친다).
+    if 임시 == 목적지 {
+        줄기.pop();
+        임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
+    }
+    임시
 }
 
 #[derive(Debug, Clone)]
@@ -431,7 +448,20 @@ async fn 실행_비트_제거(길: &std::path::Path) {
 mod tests {
     use std::path::Path;
 
+    use sha2::{Digest, Sha256};
+
     use super::part_path;
+    use super::super::name::{safe_name, 최대_바이트};
+
+    /// 상대가 **꼬리를 미리 계산해 이름 끝에 심은** 255바이트 이름.
+    ///
+    /// 꼬리 `.<sha256(transfer_id)[..16]>.part`는 `transfer_id`에서 나오고 `transfer_id`도
+    /// `name`도 보내는 쪽이 고른다. 그래서 이런 이름을 짓는 데 아무 권한도 필요 없다.
+    fn 꼬리를_심은_이름(transfer_id: &str) -> String {
+        let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
+        let 꼬리 = format!(".{}.part", &표식[..16]);
+        format!("{}{}", "A".repeat(최대_바이트 - 꼬리.len()), 꼬리)
+    }
 
     #[test]
     fn 같은_전송은_같은_자리_다른_전송은_다른_자리를_쓴다() {
@@ -455,6 +485,28 @@ mod tests {
         assert_eq!(임시.parent(), 목적지.parent(), "실제: {}", 임시.display());
         let 이름 = 임시.file_name().unwrap().to_str().unwrap();
         assert!(!이름.contains('/') && !이름.contains('\\'), "실제: {이름}");
+    }
+
+    /// 리뷰 N1: 길이 절단이 `임시`를 `목적지` **자신으로** 되돌릴 수 있다.
+    ///
+    /// 상대가 꼬리를 미리 계산해 255바이트 이름 끝에 심으면, `part_path`가 줄기를 233바이트로
+    /// 자르고 같은 꼬리를 도로 붙여 원래 이름이 나온다. 그 자리에서는 이미 있던 목적지가
+    /// 이어받기 부스러기로 오인되고, 해시 불일치 정리(`remove_file(&임시)`)가 **목적지 자신을
+    /// 지운다** — sha256 검증·되돌림 보관·감사가 한꺼번에 무력해진다.
+    #[test]
+    fn 상대가_꼬리를_이름_끝에_심어도_임시가_목적지와_안_겹친다() {
+        let 이름 = 꼬리를_심은_이름("t-evil");
+        assert_eq!(이름.len(), 최대_바이트, "255바이트를 꽉 채워야 절단이 일어난다");
+        // 씻기가 이 이름을 그대로 통과시킨다 — 구분자도 제어문자도 예약어도 아니다.
+        assert_eq!(safe_name(&이름), 이름);
+
+        let 목적지 = Path::new("/inbox/a").join(&이름);
+        let 임시 = part_path(&목적지, "t-evil");
+        assert_ne!(임시, 목적지, "실제: {}", 임시.display());
+        assert_eq!(임시.parent(), 목적지.parent());
+        let 임시_이름 = 임시.file_name().unwrap().to_str().unwrap();
+        assert!(임시_이름.len() <= 최대_바이트, "{}바이트", 임시_이름.len());
+        assert!(임시_이름.ends_with(".part"), "실제: {임시_이름}");
     }
 
     #[test]

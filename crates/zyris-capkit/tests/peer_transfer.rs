@@ -352,6 +352,71 @@ async fn 이름이_이미_part로_끝나도_임시_경로가_목적지와_안_�
     assert_eq!(tokio::fs::read(&되돌릴_것).await.unwrap(), "OLD-ORIGINAL".as_bytes());
 }
 
+/// 상대가 **꼬리를 미리 계산해 이름 끝에 심은** 255바이트 이름.
+///
+/// `part_path`의 꼬리 `.<sha256(transfer_id)[..16]>.part`는 `transfer_id`에서 나오는데,
+/// `transfer_id`도 `name`도 보내는 쪽이 고른다 — 이런 이름을 짓는 데 아무 권한도 필요 없다.
+fn 꼬리를_심은_이름(transfer_id: &str) -> String {
+    let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
+    let 꼬리 = format!(".{}.part", &표식[..16]);
+    format!("{}{}", "A".repeat(255 - 꼬리.len()), 꼬리)
+}
+
+/// 리뷰 N1(Important): `part_path`가 255바이트 한도에 맞춰 줄기를 자르는 탓에, 위 이름에서는
+/// 자른 결과가 원래 이름과 **같아진다** — `임시 == 목적지`.
+///
+/// 그러면 이미 있던 목적지가 이어받기 부스러기로 잡혀(`파일_길이`가 목적지 길이가 된다) 해시가
+/// 맞을 수 없고, 불일치 정리 `remove_file(&임시)`가 **목적지 자신을 지운다.** 그 갈래에서는
+/// 되돌림 보관도 감사 줄도 남지 않는다 — 방어선 셋이 한꺼번에 비는 유일한 자리다.
+#[tokio::test]
+async fn 꼬리를_심은_이름이_와도_기존_원본을_안_지운다() {
+    let 원본_자리 = tempfile::tempdir().unwrap();
+    let 받는_자리 = tempfile::tempdir().unwrap();
+    let 되돌림 = tempfile::tempdir().unwrap();
+    let 이름 = 꼬리를_심은_이름("t-evil");
+    let 내용: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+    let 원본 = 원본_자리.path().join("payload.bin");
+    tokio::fs::write(&원본, &내용).await.unwrap();
+
+    // 목적지에 지워지면 안 되는 원본이 이미 있다. 길이가 offer보다 짧아야 "이어받기 부스러기"로
+    // 오인되는 갈래를 탄다.
+    tokio::fs::create_dir_all(받는_자리.path().join("a")).await.unwrap();
+    let 목적지 = 받는_자리.path().join("a").join(&이름);
+    tokio::fs::write(&목적지, "IRREPLACEABLE-ORIGINAL".as_bytes()).await.unwrap();
+
+    let 설정 = TransferConfig {
+        inbox: 받는_자리.path().to_path_buf(),
+        undo: 되돌림.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    let (a_conn, _b) =
+        붙인다("t-evil", &원본, 내용.len() as u64, &해시(&내용), 설정).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let 결과 = b
+        .push_offer(TransferOffer {
+            transfer_id: "t-evil".into(),
+            name: 이름.clone(),
+            size: 내용.len() as u64,
+            sha256: 해시(&내용),
+            overwrite: true,
+        })
+        .await;
+
+    // 무엇이 잘못됐는지 먼저 드러나게 한다 — 겹치면 응답이 실패하기 **전에** 목적지가 지워진다.
+    assert!(목적지.exists(), "실패 정리가 목적지 자신을 지웠다 (임시가 목적지와 겹쳤다)");
+    let 결과 = 결과.expect("겹치지 않으면 평범한 덮어쓰기다");
+    assert!(결과.replaced);
+    assert_eq!(결과.written, 목적지.display().to_string());
+    assert_eq!(tokio::fs::read(&목적지).await.unwrap(), 내용);
+    let 되돌릴_것 = 결과.undo.expect("덮었으면 원본이 되돌림 자리에 있어야 한다");
+    assert_eq!(
+        tokio::fs::read(&되돌릴_것).await.unwrap(),
+        "IRREPLACEABLE-ORIGINAL".as_bytes(),
+        "원본이 통째로 보관돼 있어야 한다"
+    );
+}
+
 /// 리뷰 F1(Critical): 남은 `.part`가 이번 offer의 크기보다 크면 offset은 0으로 되돌리면서도
 /// 파일 자체는 지우지도 자르지도 않았다 — `.append(true)`로 열어서 새 바이트를 부스러기
 /// **뒤에** 이어 붙였다. 해시기는 새로 받은 바이트만 보므로 sha256 대조는 통과하고, 디스크에는
