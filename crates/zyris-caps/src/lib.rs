@@ -11,6 +11,7 @@
 pub mod browser;
 pub mod file_io;
 pub mod input;
+pub mod peer_transfer;
 pub mod screen;
 pub mod terminal;
 
@@ -19,6 +20,10 @@ pub use file_io::{
     file_io_capability, DirEntry, FileEdit, FileIo, FileIoClient, FileIoServer, FileRead, FileStat,
 };
 pub use input::{input_capability, Input, InputClient, InputServer, MouseButton};
+pub use peer_transfer::{
+    peer_transfer_capability, PeerTransfer, PeerTransferClient, PeerTransferServer, PullHead,
+    TransferDone, TransferOffer,
+};
 pub use screen::{
     screen_capture_capability, Display, ImageFormat, Region, ScreenCapture, ScreenCaptureClient,
     ScreenCaptureServer,

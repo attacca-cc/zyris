@@ -7,7 +7,12 @@ repository.workspace = true
 description = "Reference implementations of the standard Zyris capabilities"
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+hex = { version = "0.4", optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
 # A fork, for one addition: `Enigo::move_mouse_on_output`. Absolute motion under
 # `wlr-virtual-pointer` is output-relative, so upstream's whole-desktop `move_mouse` can only ever
 # land on the output its pointer was created against — see `EnigoInput::move_to`.
@@ -44,6 +49,19 @@ input-wayland = ["input", "enigo/wayland", "enigo/platform_specific"]
 # 영향 없음 — reis/ashpd 의존성은 enigo 쪽에서 unix 전용으로 선언돼 있다.
 input-libei = ["input", "enigo/libei", "enigo/smol", "enigo/platform_specific"]
 desktop = ["screen", "input"]
+# 노드 간 파일 전송의 받는 쪽. 파일시스템만 만지므로 그래픽 의존이 없고, P2P 전송로
+# (`zyris-p2p`)와도 무관하다 — 이 feature만으로 `zyris::testing::duplex`에서 전 과정이 돈다.
+transfer = [
+    "dep:tokio",
+    "dep:bytes",
+    "dep:futures-util",
+    "dep:sha2",
+    "dep:hex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:async-trait",
+    "dep:libc",
+]
 
 [dev-dependencies]
 bytes.workspace = true

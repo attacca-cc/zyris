@@ -2893,6 +2893,17 @@ dependencies = [
 
 [[package]]
 name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
@@ -4330,6 +4341,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
+ "cargo-husky",
  "futures-util",
  "gethostname",
  "reqwest",
@@ -4362,13 +4374,18 @@ dependencies = [
 name = "zyris-capkit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "enigo",
  "futures-util",
+ "hex",
  "image",
  "libc",
  "libwayshot-xcap",
  "portable-pty",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -4428,6 +4445,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.19",
 ]
