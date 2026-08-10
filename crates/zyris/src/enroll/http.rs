@@ -538,8 +538,8 @@ mod tests {
             r#"{"error":"temporarily_unavailable","error_description":"enrollment is temporarily unavailable"}"#,
         );
         let store = Arc::new(MemoryCredentialStore::new());
-        // 한 번만 만든다 — `credential()`은 `now_unix()`를 찍으므로 두 번 부르면 1초 차이로
-        // `access_expires_at`이 어긋나 이 테스트가 간헐적으로 실패한다.
+        // Build it once — `credential()` stamps `now_unix()`, so calling it twice can land a second
+        // apart, which shifts `access_expires_at` and makes this test fail intermittently.
         let credential = credential();
         store.save(&credential).await.unwrap();
 

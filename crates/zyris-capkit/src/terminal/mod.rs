@@ -18,21 +18,23 @@ use buffer::trim_incomplete_tail;
 use sanitize::{strip_controls, trim_incomplete_escape};
 use session::{gone, Sessions, POLL_INTERVAL};
 
-/// `open_stream` 구독자가 한 청크에 싣는 최대 바이트.
+/// The maximum bytes an `open_stream` subscriber carries in one chunk.
 const STREAM_CHUNK_MAX: usize = 64 * 1024;
 
-/// `read` 한 번이 돌려주는 최대 바이트. `file_io`의 `READ_UNARY_MAX`와 같은 값이다 —
-/// Attacca의 `ZYRIS_MAX_RESULT_BYTES`(기본 1,000,000) 예산 통과가 실측으로 확인된 값.
+/// The maximum bytes a single `read` call returns. Matches `file_io`'s `READ_UNARY_MAX` — the
+/// value measured to clear Attacca's `ZYRIS_MAX_RESULT_BYTES` budget (default 1,000,000).
 const PTY_READ_MAX: usize = 128 * 1024;
 
-/// 동시에 열어 둘 수 있는 세션 수. 상한이 없으면 루프에 빠진 에이전트가 셸을 무한히 뽑는다.
+/// How many sessions may be open at once. Without a cap, an agent stuck in a loop would spawn
+/// shells without limit.
 const MAX_SESSIONS: usize = 8;
 
-/// 아무도 만지지 않는 세션을 닫기까지의 시간.
+/// How long to wait before closing a session nobody has touched.
 ///
-/// 스펙 §5.1이 연결 추적 배선 대신 이것으로 덮기로 한 지점이다 — 와이어만 끊긴 경우
-/// 아무도 `read`를 부르지 않으므로 결국 여기서 수거된다. 대가는 끊김 후 최대 이만큼
-/// 셸 프로세스가 살아 있다는 것이다.
+/// This is the point where spec §5.1 decided to cover connection-tracking plumbing with this
+/// instead — if only the wire got cut, nobody calls `read` anymore, so it eventually gets
+/// collected here. The tradeoff is that the shell process stays alive for up to this long after
+/// the disconnect.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct PtyTerminal {
@@ -49,19 +51,21 @@ impl PtyTerminal {
         PtyTerminal { root: root.into(), ..PtyTerminal::default() }
     }
 
-    /// 유휴 타임아웃 주입점. 테스트가 10분을 기다릴 수는 없다.
+    /// Injection point for the idle timeout. A test cannot wait around for 10 minutes.
     pub fn with_idle_timeout(mut self, d: Duration) -> Self {
         self.idle_timeout = d;
         self
     }
 
-    /// 유휴 스위퍼를 처음 `open` 때 건다.
+    /// Starts the idle sweeper on the first `open`.
     ///
-    /// 생성자에서 걸 수 없다 — `PtyTerminal::default()`는 tokio 런타임 밖에서도 불리고
-    /// `tokio::spawn`은 거기서 패닉한다. `open`은 async라 런타임 안이 보장된다.
+    /// It cannot be started in the constructor — `PtyTerminal::default()` can be called outside a
+    /// tokio runtime, and `tokio::spawn` would panic there. `open` is async, so being inside a
+    /// runtime is guaranteed.
     ///
-    /// 세션 맵을 `Weak`으로 잡는다. 강하게 잡으면 `local.declare` 재선언으로
-    /// `PtyTerminal`이 drop돼도 스위퍼가 맵을 붙들고 있어 셸이 살아남는다.
+    /// Holds the session map as a `Weak`. Holding it strongly would mean that even after
+    /// `PtyTerminal` is dropped by a `local.declare` re-declaration, the sweeper would keep the map
+    /// alive and the shells would survive with it.
     fn ensure_sweeper(&self) {
         if self.sweeper_started.swap(true, Ordering::Relaxed) {
             return;
@@ -73,8 +77,8 @@ impl PtyTerminal {
             loop {
                 tokio::time::sleep(tick).await;
                 let Some(sessions) = weak.upgrade() else { return };
-                // 세션이 맵에서 빠지면 `PtySession`이 drop되며 master fd가 닫히고,
-                // 슬레이브 쪽 셸이 SIGHUP을 받는다.
+                // When a session drops out of the map, `PtySession` is dropped, which closes the
+                // master fd and delivers SIGHUP to the shell on the slave side.
                 sessions.lock().unwrap().retain(|_, s| s.last_touch.elapsed() < idle);
             }
         });
@@ -100,21 +104,23 @@ impl PtyTerminal {
         Ok(id)
     }
 
-    /// `input`을 쓰고, 출력이 조용해질 때까지 기다린다.
+    /// Writes `input`, then waits until the output goes quiet.
     ///
-    /// 반환 조건은 셋 중 먼저 오는 것이다: 조용함이 만족됐고 게이트가 열렸다 /
-    /// deadline에 닿았다 / 셸이 끝났고 조용하다.
+    /// Returns on whichever of three conditions comes first: quiet is satisfied and the gate is
+    /// open / the deadline is reached / the shell has exited and is quiet.
     ///
-    /// **게이트는 `input`이 있을 때만 건다.** 입력이 아무 출력도 유발하지 않는 경우
-    /// 조용함은 즉시 만족되는데, 그대로 빈 응답을 돌려주면 에이전트가 "명령이 끝났다"로
-    /// 오해한다. deadline까지 기다려 진짜 아무것도 없음을 확인하는 편이 정직하다.
-    /// 반대로 `input`이 없는 순수 관찰까지 붙잡으면 폴링 한 번이 timeout_ms를 먹는다.
+    /// **The gate is only enforced when `input` is present.** If the input triggers no output at
+    /// all, quiet would be satisfied immediately, and returning an empty response right away would
+    /// make the agent misread that as "the command is finished." Waiting out the deadline to
+    /// confirm there really is nothing is more honest. Conversely, applying the same hold to a
+    /// pure observation with no `input` would mean every poll eats the full `timeout_ms`.
     ///
-    /// **게이트의 한계**: cooked 모드에서는 터미널이 타이핑된 바이트를 즉시 에코하므로
-    /// "읽을 게 생겼다"가 곧바로 참이 되어 게이트가 열린다. 명령이 늦게 출력을 시작하면
-    /// 에코만 담긴 응답이 먼저 나갈 수 있다 — 그때 `more`는 false고 `exited`는 `None`이라
-    /// 에이전트가 "아직 안 끝났다"를 읽어낼 수 있으니, 다시 부르면 이어진다.
-    /// 게이트가 값을 하는 곳은 에코가 없는 raw 모드(vim·htop에 키를 넣는 경우)다.
+    /// **Limits of the gate**: in cooked mode the terminal echoes typed bytes immediately, so
+    /// "there is something to read" becomes true right away and the gate opens. If the command is
+    /// slow to start producing output, a response containing only the echo can go out first — but
+    /// since `more` is false and `exited` is `None` at that point, the agent can read that as "not
+    /// done yet" and calling again picks up where it left off. Where the gate actually earns its
+    /// keep is raw mode with no echo (feeding keys to vim or htop).
     async fn settle(
         &self,
         pty: &PtyId,
@@ -146,13 +152,13 @@ impl PtyTerminal {
                 let sessions = self.sessions.lock().unwrap();
                 let s = sessions.get(&pty.0).ok_or_else(gone)?;
                 let is_quiet = s.last_byte_at.elapsed() >= quiet;
-                // 셸이 끝났고 조용하면 더 올 것이 없다 — 게이트와 무관하게 나간다.
+                // If the shell has exited and is quiet, nothing more is coming — return regardless of the gate.
                 if is_quiet && s.exited.is_some() {
                     return Ok(());
                 }
-                // 게이트는 **이 호출이 시작된 뒤 새로 온 바이트**를 본다. 이미 쌓여
-                // 있던 미독 바이트로 열어주면, 앞 호출이 남긴 프롬프트 한 조각 때문에
-                // 게이트가 늘 열린 채가 되어 아무것도 막지 못한다.
+                // The gate looks only at **bytes that arrived after this call started**. Letting
+                // already-pending unread bytes open it would mean a leftover fragment of the
+                // previous call's prompt keeps the gate permanently open, blocking nothing at all.
                 let gate_open = !gated || s.buf.total_written() > baseline;
                 if is_quiet && gate_open {
                     return Ok(());
@@ -165,10 +171,10 @@ impl PtyTerminal {
     }
 }
 
-/// 링버퍼를 자기 커서로 훑는 `open_stream` 구독자.
+/// An `open_stream` subscriber that walks the ring buffer with its own cursor.
 ///
-/// 세션의 `read_cursor`를 건드리지 않으므로, 스트림을 붙여 둔 채 `read`를 불러도
-/// 서로 바이트를 빼앗지 않는다.
+/// It never touches the session's `read_cursor`, so calling `read` while a stream is still
+/// attached does not steal bytes from either side.
 fn subscribe(
     sessions: Sessions,
     id: String,
@@ -211,11 +217,11 @@ impl Default for PtyTerminal {
     }
 }
 
-/// `exec`이 한 출력 스트림에 허용하는 최대 바이트. 넘치는 바이트는 버려지고
-/// `ExecOutput::stdout_truncated` / `stderr_truncated`가 알린다.
+/// The maximum bytes `exec` allows for one output stream. Bytes past this are dropped, and
+/// `ExecOutput::stdout_truncated` / `stderr_truncated` report that it happened.
 ///
-/// Attacca의 결과 예산(`ZYRIS_MAX_RESULT_BYTES`)을 넘지 않도록 하는 것이 목적이다 —
-/// `PTY_READ_MAX`와 같은 이유로 1 MiB 쪽이 안전하다.
+/// The point is to stay under Attacca's result budget (`ZYRIS_MAX_RESULT_BYTES`) — 1 MiB is the
+/// safe side, for the same reason as `PTY_READ_MAX`.
 const EXEC_OUTPUT_CAP: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -224,10 +230,10 @@ struct OutputAcc {
     truncated: bool,
 }
 
-/// 파이프를 `cap`까지 모으고, 넘치는 바이트는 버리면서도 계속 읽는다.
+/// Collects a pipe up to `cap`, and keeps reading even past that, discarding whatever overflows.
 ///
-/// 읽기를 멈추면 자식이 파이프가 차서 블록할 수 있다. cap을 넘긴 바이트는 결과에
-/// 포함되지 않지만 자식은 끝까지 돌게 둔다.
+/// Stopping the read could make the child block once its pipe fills up. Bytes past the cap are
+/// left out of the result, but the child is still allowed to run to completion.
 async fn drain_capped<R>(mut reader: R, acc: Arc<Mutex<OutputAcc>>, cap: usize)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -251,11 +257,12 @@ where
     }
 }
 
-/// 프로세스 트리를 죽인다.
+/// Kills the process tree.
 ///
-/// 유닉스: `exec`가 `process_group(0)`으로 자식을 새 그룹의 리더로 만들었으므로, 그
-/// 리더의 pid를 음수로 잡으면 셸이 남긴 손자까지 한 번에 죽는다. setpgid 경합(자식이
-/// 아직 그룹을 만들기 전)을 위해 그룹이 사라질 때까지 짧게 재시도한다.
+/// Unix: since `exec` made `process_group(0)` set the child up as the leader of a new group,
+/// passing that leader's pid as a negative number kills every grandchild the shell left behind in
+/// one shot. Retries briefly, until the group is gone, to cover the setpgid race window (before
+/// the child has created its group yet).
 #[cfg(unix)]
 fn kill_tree(pid: Option<u32>) {
     use std::thread;
@@ -264,12 +271,12 @@ fn kill_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     let target = -(pid as i32);
     for _ in 0..50 {
-        // SAFETY: 음수 pid는 프로세스 그룹을 가리킨다. 우리가 방금 만든 그룹이고 그
-        // 안에 우리 프로세스는 없다.
+        // SAFETY: a negative pid addresses a process group. This is the group we just created,
+        // and our own process is not in it.
         if unsafe { libc::kill(target, libc::SIGKILL) } == 0 {
-            return; // 그룹 전체에 SIGKILL이 전달됐다
+            return; // SIGKILL was delivered to the whole group
         }
-        // 리더(자식) 자신이 이미 죽었으면 그룹은 앞으로 생기지 않는다.
+        // If the leader (the child itself) is already dead, the group will never come into being.
         if unsafe { libc::kill(pid as i32, 0) } != 0 {
             return;
         }
@@ -277,8 +284,8 @@ fn kill_tree(pid: Option<u32>) {
     }
 }
 
-/// 윈도우: `taskkill /T`가 자식 트리를 죽인다. cmd.exe 하나만 죽이면 손자가 고아로 남으므로
-/// 트리 킬이 필요하다.
+/// Windows: `taskkill /T` kills the child tree. Killing just cmd.exe would leave grandchildren
+/// orphaned, so a tree kill is needed.
 #[cfg(not(unix))]
 fn kill_tree(pid: Option<u32>) {
     if let Some(pid) = pid {
@@ -322,8 +329,9 @@ impl Terminal for PtyTerminal {
         let mut cursor = s.read_cursor;
         let (bytes, dropped) = s.buf.read_at(&mut cursor, PTY_READ_MAX);
 
-        // 잘린 꼬리는 다음 호출로 넘긴다 — 멀티바이트 문자든 이스케이프 시퀀스든.
-        // 단 셸이 끝났고 이게 마지막 바이트라면 넘길 다음이 없으므로 그냥 태운다.
+        // Carry a truncated tail over to the next call — whether it's a multibyte character or an
+        // escape sequence. Except if the shell has exited and this is the last of the bytes, there
+        // is no next call to carry it to, so it's just burned.
         let at_end = s.exited.is_some() && cursor == s.buf.total_written();
         let keep = if at_end {
             bytes.len()
@@ -350,7 +358,7 @@ impl Terminal for PtyTerminal {
 
         let sessions = self.sessions.lock().unwrap();
         let s = sessions.get(&pty.0).ok_or_else(gone)?;
-        // **`read_cursor`를 건드리지 않는다.** 화면은 누적 상태의 렌더이지 소비가 아니다.
+        // **`read_cursor` is left untouched.** The screen is a render of accumulated state, not a consumption of it.
         let screen = s.parser.screen();
         let (_, cols) = screen.size();
         let (cursor_row, cursor_col) = screen.cursor_position();
@@ -414,13 +422,13 @@ impl Terminal for PtyTerminal {
             (true, true) => return Err(WireError::invalid_params("give `command` or `argv`, not both")),
             _ => {}
         }
-        // 윈도우 command 모드는 항상 cmd /C라 shell은 쓰지 않는다 (argv로 PowerShell을 고른다).
+        // Windows command mode is always cmd /C, so shell goes unused (PowerShell is chosen via argv).
         #[cfg(not(unix))]
         let _ = &shell;
 
         let mut cmd = match argv {
-            // argv 모드: 셸을 거치지 않는다. 인자는 그대로 프로그램에 전달되므로
-            // 이스케이프가 필요 없다 — PowerShell 난해한 인용의 근원이 사라진다.
+            // argv mode: no shell is involved. Arguments go straight to the program, so no
+            // escaping is needed — this is what makes PowerShell's gnarly quoting rules moot.
             Some(argv) => {
                 let mut c = Command::new(&argv[0]);
                 c.args(&argv[1..]);
@@ -435,7 +443,7 @@ impl Terminal for PtyTerminal {
                 }
                 #[cfg(not(unix))]
                 {
-                    // cmd /C는 인용 규칙이 최악이라 PowerShell은 argv로 부르는 게 맞다.
+                    // cmd /C has the worst quoting rules, so PowerShell is right to be called via argv instead.
                     let mut c = Command::new("cmd");
                     c.arg("/C").arg(command.unwrap_or_default());
                     c
@@ -453,8 +461,8 @@ impl Terminal for PtyTerminal {
         cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        // 유닉스에서 자식을 새 프로세스 그룹의 리더로 만든다 — 타임아웃 때 트리 전체를
-        // 죽일 수 있게 (셸이 남긴 손자까지).
+        // On Unix, make the child the leader of a new process group — so on timeout the whole
+        // tree can be killed (including any grandchildren the shell left behind).
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -470,10 +478,10 @@ impl Terminal for PtyTerminal {
             }
         }
 
-        // 출력은 스트림마다 독립 태스크가 cap까지 모은다. cap을 넘겨도 **계속 읽어
-        // 비운다** — 읽기를 멈추면 자식이 파이프가 차서 영영 막히기 때문이다.
-        let stdout = child.stdout.take().expect("stdout은 piped로 띄웠다");
-        let stderr = child.stderr.take().expect("stderr은 piped로 띄웠다");
+        // A separate task collects each output stream up to cap. Even past the cap it **keeps
+        // reading and draining it** — stopping would let the child's pipe fill up and block forever.
+        let stdout = child.stdout.take().expect("stdout was launched as piped");
+        let stderr = child.stderr.take().expect("stderr was launched as piped");
         let out_acc = Arc::new(Mutex::new(OutputAcc::default()));
         let err_acc = Arc::new(Mutex::new(OutputAcc::default()));
         let out_task = tokio::spawn(drain_capped(stdout, out_acc.clone(), EXEC_OUTPUT_CAP));
@@ -482,8 +490,8 @@ impl Terminal for PtyTerminal {
         let (exit_code, timed_out) = match timeout_ms {
             Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), child.wait()).await {
                 Ok(status) => (status.map_err(pty_err)?.code().unwrap_or(-1), false),
-                // 타임아웃: 트리 전체를 죽이고 수거한다. 예전 구현은 자식을 drop만 해서
-                // 좀비·고아를 남겼다.
+                // Timeout: kill and reap the whole tree. The previous implementation just dropped
+                // the child, which left zombies and orphans behind.
                 Err(_) => {
                     kill_tree(pid);
                     let _ = child.wait().await;
@@ -493,7 +501,7 @@ impl Terminal for PtyTerminal {
             None => (child.wait().await.map_err(pty_err)?.code().unwrap_or(-1), false),
         };
 
-        // 자식이 죽거나 끝나야 파이프가 닫히고 독자 태스크도 끝난다.
+        // The pipes close, and the reader tasks with them, only once the child dies or exits.
         let _ = out_task.await;
         let _ = err_task.await;
 

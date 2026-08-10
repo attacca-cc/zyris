@@ -50,14 +50,14 @@ pub struct EnigoInput {
     displays: Arc<dyn Displays>,
 }
 
-/// 세션에 맞는 [`Settings`].
+/// [`Settings`] appropriate for the session.
 ///
-/// Linux Wayland 세션에서 `input-libei`로 빌드되면 X11 백엔드를 끈다:
-/// Xwayland의 XTEST 입력은 GNOME/KDE(mutter/kwin)에서 조용히 버려지므로, X11을
-/// 켜 두면 enigo가 libei 대신 X11을 골라 모든 입력이 no-op이 된다. X11을
-/// 꺼 두면 wlroots 컴포지터에서는 Wayland 백엔드가, GNOME/KDE에서는 libei
-/// (RemoteDesktop 포털)가 선택된다. X11 세션이나 `input-libei` 없는 빌드에서는
-/// 기본값 그대로다.
+/// When built with `input-libei` in a Linux Wayland session, this turns off the X11 backend:
+/// XTEST input through Xwayland is silently dropped by GNOME/KDE (mutter/kwin), so leaving X11 on
+/// would make enigo pick X11 over libei and every input call would be a no-op. Turning X11 off
+/// makes the Wayland backend get picked in a wlroots compositor, and libei (via the RemoteDesktop
+/// portal) get picked on GNOME/KDE. On an X11 session, or a build without `input-libei`, the
+/// defaults are left as-is.
 #[cfg(feature = "input")]
 pub fn settings_for_session(restore_token: Option<String>) -> Settings {
     let mut settings = Settings::default();
@@ -94,11 +94,12 @@ impl EnigoInput {
         })
     }
 
-    /// 마지막 RemoteDesktop 포털 연결의 restore token.
+    /// The restore token from the last RemoteDesktop portal connection.
     ///
-    /// 첫 연결에서 사용자가 포털 허용 다이얼로그를 승인하면 enigo가 이 토큰을
-    /// 돌려준다. 저장해 두고 다음 연결에서 [`settings_for_session`]로 넘기면
-    /// 다이얼로그 없이 재사용된다. `input-libei` 없이 빌드되면 존재하지 않는다.
+    /// On the first connection, once the user approves the portal's permission dialog, enigo
+    /// hands back this token. Save it and pass it into [`settings_for_session`] on the next
+    /// connection to reuse the grant without the dialog appearing again. Not present when built
+    /// without `input-libei`.
     #[cfg(feature = "input-libei")]
     pub fn restore_token(&self) -> Option<String> {
         self.enigo.lock().ok()?.restore_token()

@@ -140,6 +140,8 @@ mod tests {
 
     #[test]
     fn body_reconstructs_text() {
+        // Deliberately multibyte: the framing counts bytes, so a text payload has to survive being
+        // taken apart and put back together on a boundary that is not one byte per character.
         let msg = body(1, "가".as_bytes().to_vec()).unwrap();
         assert_eq!(msg, WireMessage::Text("가".into()));
     }

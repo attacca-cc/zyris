@@ -78,8 +78,8 @@ mod tests {
         assert_eq!(d.tool("push_offer").unwrap().transfer, Transfer::Unary);
         assert_eq!(d.tool("pull").unwrap().transfer, Transfer::UniStream);
         // Adding a tool grows the surface opened to the peer. This is where that gets caught.
-        let mut 이름들: Vec<_> = d.tools.iter().map(|t| t.name.as_str()).collect();
-        이름들.sort();
-        assert_eq!(이름들, ["pull", "push_offer"]);
+        let mut names: Vec<_> = d.tools.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["pull", "push_offer"]);
     }
 }
