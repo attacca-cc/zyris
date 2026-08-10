@@ -12,6 +12,7 @@ bytes.workspace = true
 iroh = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util", "fs"] }
 tracing.workspace = true

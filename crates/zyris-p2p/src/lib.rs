@@ -5,6 +5,7 @@
 //! `Role::Dial` / `Role::Accept` — so once it is settled who dialled, everything else already
 //! fits.
 
+pub mod fingerprint;
 pub mod frame;
 pub mod key;
 pub mod peer;
