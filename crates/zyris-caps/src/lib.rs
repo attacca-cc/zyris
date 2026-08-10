@@ -10,6 +10,7 @@
 
 pub mod browser;
 pub mod file_io;
+pub mod file_transfer;
 pub mod input;
 pub mod peer_transfer;
 pub mod screen;
@@ -18,6 +19,10 @@ pub mod terminal;
 pub use browser::{browser_chrome_capability, BrowserChrome, BrowserChromeClient, BrowserChromeServer};
 pub use file_io::{
     file_io_capability, DirEntry, FileEdit, FileIo, FileIoClient, FileIoServer, FileRead, FileStat,
+};
+pub use file_transfer::{
+    file_transfer_capability, FileTransfer, FileTransferClient, FileTransferServer, InboxEntry,
+    SendReceipt,
 };
 pub use input::{input_capability, Input, InputClient, InputServer, MouseButton};
 pub use peer_transfer::{
