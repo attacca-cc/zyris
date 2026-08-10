@@ -13,7 +13,7 @@ fn blob(s: &str) -> Blob {
 fn inline(b: Blob) -> Vec<u8> {
     match b {
         Blob::Inline(b) => b.to_vec(),
-        Blob::Attachment(_) => panic!("attachment는 여기 오지 않는다"),
+        Blob::Attachment(_) => panic!("an attachment should never show up here"),
     }
 }
 
@@ -70,8 +70,9 @@ async fn exec_resolves_cwd() {
 
 // ── exec v3: argv / stdin / env / cap / timeout ──────────────────────────
 
-/// argv 모드의 요점: 셸을 거치지 않으므로 공백·따옴표·`$`·백틱·`*`가 전부 그대로
-/// 프로그램에 닿는다. 셸이 개입했다면 `$HOME`은 확장되고 백틱은 실행되고 `*`는 글롭된다.
+/// The point of argv mode: with no shell in the way, spaces, quotes, `$`, backticks, and `*` all
+/// reach the program exactly as given. If a shell had been involved, `$HOME` would have been
+/// expanded, backticks executed, and `*` globbed.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_argv_passes_arguments_unmangled() {
@@ -102,8 +103,8 @@ async fn exec_argv_passes_arguments_unmangled() {
     assert!(!out.timed_out);
 }
 
-/// PowerShell의 `-Command -` 패턴과 같은 모양 — 스크립트를 stdin으로 넣으면 인용이
-/// 필요 없다. 여기서는 유닉스에서 `/bin/sh -s`로 같은 길을 검증한다.
+/// The same shape as PowerShell's `-Command -` pattern — feeding a script through stdin needs no
+/// quoting. This verifies the same path on Unix, via `/bin/sh -s`.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_reads_a_script_from_stdin() {
@@ -124,11 +125,11 @@ async fn exec_reads_a_script_from_stdin() {
         .unwrap();
 
     assert_eq!(out.exit_code, 0);
-    assert!(out.stdout.contains("FROM-STDIN"), "본 것: {:?}", out.stdout);
-    assert!(out.stdout.contains("x=a b"), "본 것: {:?}", out.stdout);
+    assert!(out.stdout.contains("FROM-STDIN"), "got: {:?}", out.stdout);
+    assert!(out.stdout.contains("x=a b"), "got: {:?}", out.stdout);
 }
 
-/// `env` 항목은 노드 환경 위에 덮어써서 자식에 닿는다.
+/// An `env` entry reaches the child by overriding the node's environment.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_env_overrides_reach_the_child() {
@@ -154,29 +155,30 @@ async fn exec_env_overrides_reach_the_child() {
     assert_eq!(out.stdout, "from-env");
 }
 
-/// 출력은 스트림당 cap에서 잘리고, 넘친 바이트는 버려진다(`stdout_truncated`).
-/// 자식은 끝까지 돌므로 exit code는 정상이다.
+/// Output is cut off at the cap per stream, and overflow bytes are dropped (`stdout_truncated`).
+/// The child still runs to completion, so the exit code comes back normal.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_caps_output_and_reports_truncation() {
     let term = connect(PtyTerminal::default()).await;
 
-    // EXEC_OUTPUT_CAP(1 MiB)를 넘는 stdout.
+    // stdout that exceeds EXEC_OUTPUT_CAP (1 MiB).
     let out = term
         .exec(Some("yes x | head -c 1500000".into()), None, None, Some(20_000), None, None, None)
         .await
         .unwrap();
 
     assert_eq!(out.exit_code, 0);
-    assert_eq!(out.stdout.len(), 1024 * 1024, "cap보다 많이 돌려줬다");
-    assert!(out.stdout_truncated, "cap을 넘겼는데 truncated가 아니다");
+    assert_eq!(out.stdout.len(), 1024 * 1024, "returned more than the cap");
+    assert!(out.stdout_truncated, "exceeded the cap but truncated is not set");
     assert!(!out.stderr_truncated);
 }
 
-/// 타임아웃이면 **프로세스 트리 전체**를 죽이고 부분 출력과 함께 돌아온다.
+/// On timeout, the **entire process tree** is killed and the call returns with the partial output.
 ///
-/// 예전 구현은 자식을 drop만 해서 `sleep 30`이 고아로 남았다. 여기서는 셸이 자기 pid를
-/// 파일에 남기게 한 뒤, 타임아웃 후 그 pid가 죽었는지(ESRCH) 확인한다.
+/// The previous implementation just dropped the child, leaving `sleep 30` orphaned. Here the
+/// shell is made to write its own pid to a file first, and after the timeout it's checked whether
+/// that pid died (ESRCH).
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_timeout_kills_the_process_tree() {
@@ -187,16 +189,16 @@ async fn exec_timeout_kills_the_process_tree() {
 
     let out = term.exec(Some(cmd), None, None, Some(1500), None, None, None).await.unwrap();
 
-    assert!(out.timed_out, "본 것: {out:?}");
+    assert!(out.timed_out, "got: {out:?}");
     assert_eq!(out.exit_code, -1);
 
     let pid: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
-    // SAFETY: 신호 0은 검사만 한다 — 프로세스가 살아 있으면 0, 없으면 -1(ESRCH).
+    // SAFETY: signal 0 only checks — 0 if the process is alive, -1 (ESRCH) if not.
     let alive = unsafe { libc::kill(pid, 0) } == 0;
-    assert!(!alive, "프로세스 그룹 {pid}이 타임아웃 킬 뒤에도 살아 있다");
+    assert!(!alive, "process group {pid} is still alive after the timeout kill");
 }
 
-/// `command`와 `argv`를 둘 다 주면 모호하므로 거부한다.
+/// Giving both `command` and `argv` is ambiguous, so it is rejected.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_rejects_both_command_and_argv() {
@@ -206,26 +208,27 @@ async fn exec_rejects_both_command_and_argv() {
         .exec(Some("echo hi".into()), Some(vec!["echo".into()]), None, Some(5000), None, None, None)
         .await
         .unwrap_err();
-    assert!(format!("{err:?}").contains("not both"), "본 오류: {err:?}");
+    assert!(format!("{err:?}").contains("not both"), "got error: {err:?}");
 }
 
-/// 둘 다 빠지면 실행할 것이 없다.
+/// If both are missing, there is nothing to run.
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_rejects_neither_command_nor_argv() {
     let term = connect(PtyTerminal::default()).await;
 
     let err = term.exec(None, None, None, Some(5000), None, None, None).await.unwrap_err();
-    assert!(format!("{err:?}").contains("not neither"), "본 오류: {err:?}");
+    assert!(format!("{err:?}").contains("not neither"), "got error: {err:?}");
 }
 
-// ── 리더 스레드가 소비자에 매이지 않는다 ────────────────────────────────
+// ── the reader thread is not held hostage by a consumer ─────────────────
 
-/// 아무도 스트림을 빼가지 않는 동안에도 PTY는 계속 돌아야 한다.
+/// The PTY has to keep running even while nobody is draining its stream.
 ///
-/// 판정은 **스트림을 한 번도 건드리지 않고** 파일 시스템으로 한다. 리더가 막히면 셸이
-/// PTY에 쓰다 함께 막혀 마지막 `touch`에 영영 도달하지 못한다. 스트림을 읽어서
-/// 판정하면 막힌 리더가 소비와 함께 풀려버려 아무것도 구분하지 못한다.
+/// The check is done through the filesystem, **never touching the stream itself**. If the reader
+/// were blocked, the shell would block right along with it while writing to the PTY, and would
+/// never reach the final `touch`. Judging by reading the stream instead would let a blocked
+/// reader get freed the moment it's consumed, which would fail to distinguish anything.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_reader_never_blocks_without_a_consumer() {
@@ -236,7 +239,7 @@ async fn the_reader_never_blocks_without_a_consumer() {
     let _stream = term.open_stream(Some("/bin/sh".into()), 80, 24).await.unwrap();
     let pty = _stream.head.pty.clone();
 
-    // mpsc(64) × 8 KiB ≈ 512 KiB를 훌쩍 넘는 출력을 PTY로 낸다.
+    // Produce output on the PTY that far exceeds mpsc(64) x 8 KiB ~= 512 KiB.
     term.write(
         pty,
         blob(&format!("yes zyris | head -c 2000000; touch {}\n", marker.display())),
@@ -250,14 +253,16 @@ async fn the_reader_never_blocks_without_a_consumer() {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    panic!("소비자가 없자 PTY가 멈췄다 — 셸이 마지막 명령에 도달하지 못했다");
+    panic!("the PTY stalled with no consumer draining it — the shell never reached its last command");
 }
 
-/// 셸이 끝나면 두 가지가 동시에 성립해야 한다: 스트림이 **끝나고**, 핸들은 **남는다**.
+/// Once the shell exits, two things must hold at the same time: the stream **ends**, and the
+/// handle **survives**.
 ///
-/// v1은 둘 다 못 한다. 세션이 `pair.slave`를 계속 쥐고 있어 master가 EOF를 못 보므로
-/// 리더 스레드가 영영 `read`에 매달리고, 설령 EOF가 오더라도 리더가 세션을 맵에서
-/// 지워버린다. 지우면 셸이 죽으며 낸 마지막 출력을 에이전트가 영영 못 본다 (스펙 §4).
+/// v1 managed neither. The session kept holding onto `pair.slave`, so the master never saw EOF
+/// and the reader thread would be stuck in `read` forever; and even if EOF did arrive, the reader
+/// would erase the session from the map. Erasing it would mean the agent never gets to see the
+/// last output the shell produced while dying (spec §4).
 #[cfg(unix)]
 #[tokio::test]
 async fn a_session_survives_the_shell_exiting() {
@@ -273,29 +278,29 @@ async fn a_session_survives_the_shell_exiting() {
     loop {
         match tokio::time::timeout(Duration::from_secs(5), stream.items.next()).await {
             Ok(Some(Ok(chunk))) => seen.push_str(&String::from_utf8_lossy(&inline(chunk.data))),
-            Ok(Some(Err(e))) => panic!("스트림 오류: {e}"),
+            Ok(Some(Err(e))) => panic!("stream error: {e}"),
             Ok(None) => break,
-            Err(_) => panic!("셸이 끝났는데 스트림이 끝나지 않았다 — 본 것: {seen:?}"),
+            Err(_) => panic!("the shell exited but the stream never ended — got: {seen:?}"),
         }
     }
-    assert!(seen.contains("LAST-WORD"), "마지막 출력을 놓쳤다: {seen:?}");
+    assert!(seen.contains("LAST-WORD"), "missed the last output: {seen:?}");
 
-    // 스트림이 끝나도 핸들은 유효하다 — `pty_gone`이 아니라 정상 응답이어야 한다.
-    term.resize(pty.clone(), 100, 30).await.expect("셸이 끝나도 세션은 남아야 한다");
+    // The handle stays valid even after the stream ends — this should get a normal response, not `pty_gone`.
+    term.resize(pty.clone(), 100, 30).await.expect("the session should survive the shell exiting");
     term.close(pty).await.unwrap();
 }
 
-// ── unary 경로: open / read / screen ────────────────────────────────────
+// ── unary path: open / read / screen ─────────────────────────────────────
 
-/// 짧은 settle. 벽시계에 매달리지 않도록 테스트는 항상 값을 주입한다.
+/// A short settle. Tests always inject a value so they are never left hanging on the wall clock.
 fn quick() -> Option<Settle> {
     Some(Settle { quiet_ms: 60, timeout_ms: 3000 })
 }
 
 async fn open_sh(term: &TerminalClient) -> PtyId {
     let opened = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
-    // 셸이 뜨며 낸 프롬프트를 흘려보낸다. 여기서 조급하게 끊으면 그 바이트가 다음
-    // 테스트의 `content`에 섞여 들어온다.
+    // Drain the prompt the shell produces on startup. Cutting this off too eagerly would leak
+    // those bytes into the next test's `content`.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let _ = term
         .read(opened.pty.clone(), None, Some(Settle { quiet_ms: 150, timeout_ms: 3000 }))
@@ -304,7 +309,7 @@ async fn open_sh(term: &TerminalClient) -> PtyId {
     opened.pty
 }
 
-/// `exec`으로는 불가능한 것 — 상태가 다음 호출까지 이어진다.
+/// Something `exec` cannot do — state carries over across calls.
 #[cfg(unix)]
 #[tokio::test]
 async fn state_carries_across_calls() {
@@ -314,12 +319,12 @@ async fn state_carries_across_calls() {
     term.read(pty.clone(), Some("cd /tmp\n".into()), quick()).await.unwrap();
     let out: PtyRead = term.read(pty.clone(), Some("pwd\n".into()), quick()).await.unwrap();
 
-    assert!(out.content.contains("/tmp"), "본 것: {:?}", out.content);
+    assert!(out.content.contains("/tmp"), "got: {:?}", out.content);
     assert_eq!(out.exited, None);
     assert_eq!(out.dropped, 0);
 }
 
-/// `quiet_ms == 0`은 기다리지 않는다.
+/// `quiet_ms == 0` does not wait at all.
 #[cfg(unix)]
 #[tokio::test]
 async fn quiet_zero_returns_immediately() {
@@ -328,10 +333,11 @@ async fn quiet_zero_returns_immediately() {
 
     let t0 = std::time::Instant::now();
     term.read(pty, None, Some(Settle { quiet_ms: 0, timeout_ms: 10_000 })).await.unwrap();
-    assert!(t0.elapsed() < Duration::from_millis(500), "걸린 시간: {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_millis(500), "elapsed: {:?}", t0.elapsed());
 }
 
-/// settle의 반환 경로 둘 중 **조용함** 쪽. 출력이 금방 끝나면 timeout_ms를 기다리지 않는다.
+/// The **quiet** side of settle's two return paths. If output finishes quickly, `timeout_ms` is
+/// never waited out.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_quick_command_returns_on_quiet_not_on_timeout() {
@@ -344,13 +350,15 @@ async fn a_quick_command_returns_on_quiet_not_on_timeout() {
         .await
         .unwrap();
 
-    assert!(out.content.contains("FAST"), "본 것: {:?}", out.content);
-    assert!(t0.elapsed() < Duration::from_secs(3), "timeout까지 붙잡혔다: {:?}", t0.elapsed());
+    assert!(out.content.contains("FAST"), "got: {:?}", out.content);
+    assert!(t0.elapsed() < Duration::from_secs(3), "held until timeout: {:?}", t0.elapsed());
 }
 
-/// 멀티바이트 문자가 PTY를 통과해도 온전하다. 청크 경계에서 쪼개졌다면 대체 문자가 섞인다.
-/// 경계를 실제로 강제할 수는 없으므로(커널이 청크를 나눈다) 여기서는 **왕복 무결성**만 보고,
-/// 경계 규칙 자체는 `buffer.rs`의 `trim_incomplete_tail` 단위 테스트가 결정론적으로 덮는다.
+/// A multibyte character stays intact even after passing through the PTY. If it were split across
+/// a chunk boundary, a replacement character would leak in. The boundary cannot actually be forced
+/// here (the kernel decides where chunks split), so this only checks **round-trip integrity**; the
+/// boundary rule itself is covered deterministically by the `trim_incomplete_tail` unit tests in
+/// `buffer.rs`.
 #[cfg(unix)]
 #[tokio::test]
 async fn multibyte_output_survives_intact() {
@@ -366,25 +374,25 @@ async fn multibyte_output_survives_intact() {
         .await
         .unwrap();
 
-    assert!(out.content.contains("가나다라🎯"), "본 것: {:?}", out.content);
-    assert!(!out.content.contains('\u{FFFD}'), "대체 문자가 섞였다: {:?}", out.content);
+    assert!(out.content.contains("가나다라🎯"), "got: {:?}", out.content);
+    assert!(!out.content.contains('\u{FFFD}'), "a replacement character leaked in: {:?}", out.content);
 }
 
-/// 출력을 내지 않는 입력은 빈 응답을 **조기에** 돌려주면 안 된다 (스펙 §3.4).
-/// 조기 반환하면 에이전트가 "명령이 끝났다"로 오해한다.
+/// Input that produces no output must not return an empty response **early** (spec §3.4). An
+/// early return would make the agent misread it as "the command finished."
 ///
-/// **에코를 꺼야 이 게이트가 실제로 걸린다.** cooked 모드에서는 터미널이 타이핑된
-/// 바이트를 즉시 되돌려주므로 "읽을 게 생겼다"가 곧바로 만족되어 게이트가 열린다.
-/// 게이트가 값을 하는 곳은 에코가 없는 raw 모드 — 즉 vim·htop 같은 풀스크린 프로그램에
-/// 키를 넣고 화면이 반응하기를 기다리는, 바로 그 경우다.
+/// **Echo has to be off for this gate to actually engage.** In cooked mode the terminal echoes
+/// typed bytes back immediately, so "there is something to read" is satisfied right away and the
+/// gate opens. Where the gate earns its keep is raw mode with no echo — i.e. exactly the case of
+/// feeding keys to a full-screen program like vim or htop and waiting for the screen to react.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_input_with_no_output_waits_for_the_deadline() {
     let term = connect(PtyTerminal::default()).await;
     let pty = open_sh(&term).await;
 
-    // 에코를 끄고 readline이 아닌 소비자를 전면에 둔다. bash는 프롬프트를 그릴 때마다
-    // readline이 터미널 모드를 되돌려 놓으므로 `stty -echo`만으로는 유지되지 않는다.
+    // Turn off echo and put a non-readline consumer in the foreground. bash's readline resets the
+    // terminal mode every time it draws a prompt, so `stty -echo` alone would not stick.
     term.read(
         pty.clone(),
         Some("stty -echo; cat > /dev/null\n".into()),
@@ -399,12 +407,12 @@ async fn an_input_with_no_output_waits_for_the_deadline() {
         .await
         .unwrap();
 
-    // `cat`이 /dev/null로 삼키므로 PTY는 완전히 조용하다. 게이트가 없으면 50ms에 빈 응답이 나간다.
-    assert!(t0.elapsed() >= Duration::from_millis(550), "걸린 시간: {:?}", t0.elapsed());
-    assert!(out.content.is_empty(), "에코가 꺼졌는데 뭔가 왔다: {:?}", out.content);
+    // `cat` swallows it into /dev/null, so the PTY is completely quiet. Without the gate, an empty response would go out at 50ms.
+    assert!(t0.elapsed() >= Duration::from_millis(550), "elapsed: {:?}", t0.elapsed());
+    assert!(out.content.is_empty(), "echo was off but something came through: {:?}", out.content);
 }
 
-/// 반면 `input`이 없는 순수 관찰은 붙잡지 않는다 — 매 폴링이 timeout_ms를 먹으면 못 쓴다.
+/// Conversely, a pure observation with no `input` is never held — if every poll ate `timeout_ms`, it would be unusable.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_pure_observation_does_not_wait_for_the_deadline() {
@@ -414,17 +422,17 @@ async fn a_pure_observation_does_not_wait_for_the_deadline() {
 
     let t0 = std::time::Instant::now();
     term.read(pty, None, Some(Settle { quiet_ms: 50, timeout_ms: 5000 })).await.unwrap();
-    assert!(t0.elapsed() < Duration::from_millis(1000), "걸린 시간: {:?}", t0.elapsed());
+    assert!(t0.elapsed() < Duration::from_millis(1000), "elapsed: {:?}", t0.elapsed());
 }
 
-/// 한 번에 못 담으면 `more: true`로 알리고, 다시 부르면 **순서대로** 이어진다.
+/// When it doesn't all fit in one call, `more: true` reports that, and calling again continues **in order**.
 #[cfg(unix)]
 #[tokio::test]
 async fn more_paginates_in_order() {
     let term = connect(PtyTerminal::default()).await;
     let pty = open_sh(&term).await;
 
-    // PTY_READ_MAX(128 KiB)를 넘기되 RING_MAX(1 MiB) 안에 드는 양.
+    // An amount that exceeds PTY_READ_MAX (128 KiB) but still fits within RING_MAX (1 MiB).
     term.read(
         pty.clone(),
         Some("seq 1 40000\n".into()),
@@ -438,20 +446,20 @@ async fn more_paginates_in_order() {
     for _ in 0..40 {
         let out: PtyRead =
             term.read(pty.clone(), None, Some(Settle { quiet_ms: 0, timeout_ms: 1000 })).await.unwrap();
-        assert_eq!(out.dropped, 0, "1 MiB 링 안에 드는 양인데 잃었다");
+        assert_eq!(out.dropped, 0, "should fit within the 1 MiB ring but was lost");
         all.push_str(&out.content);
         saw_more |= out.more;
         if !out.more {
             break;
         }
     }
-    assert!(saw_more, "128 KiB를 넘겼는데 more가 한 번도 안 섰다");
-    let a = all.find("39998").expect("39998이 없다");
-    let b = all.find("39999").expect("39999가 없다");
-    assert!(a < b, "순서가 뒤집혔다");
+    assert!(saw_more, "exceeded 128 KiB but `more` never came back true");
+    let a = all.find("39998").expect("39998 is missing");
+    let b = all.find("39999").expect("39999 is missing");
+    assert!(a < b, "the order got reversed");
 }
 
-/// 셸이 끝난 뒤에도 마지막 출력과 종료 코드를 받는다 (스펙 §4).
+/// Even after the shell exits, the last output and the exit code both come through (spec §4).
 #[cfg(unix)]
 #[tokio::test]
 async fn output_and_exit_code_survive_the_shell_exiting() {
@@ -467,18 +475,18 @@ async fn output_and_exit_code_survive_the_shell_exiting() {
         .await
         .unwrap();
 
-    assert!(out.content.contains("LAST-WORD"), "본 것: {:?}", out.content);
+    assert!(out.content.contains("LAST-WORD"), "got: {:?}", out.content);
     assert_eq!(out.exited, Some(7));
 }
 
-/// vt100 제어문자가 격자로 렌더된다.
+/// vt100 control characters render into a grid.
 #[cfg(unix)]
 #[tokio::test]
 async fn screen_renders_cursor_addressing() {
     let term = connect(PtyTerminal::default()).await;
     let pty = open_sh(&term).await;
 
-    // 화면을 지우고 3행 5열로 옮겨 쓴다.
+    // Clear the screen and write starting at row 3, column 5.
     let s: PtyScreen = term
         .screen(
             pty,
@@ -488,12 +496,13 @@ async fn screen_renders_cursor_addressing() {
         .await
         .unwrap();
 
-    assert_eq!(s.lines.len(), 24, "행 수가 rows와 달라선 안 된다");
-    assert!(s.lines[2].starts_with("    MARKER"), "3행이 기대와 다르다: {:?}", s.lines[2]);
+    assert_eq!(s.lines.len(), 24, "the line count must not differ from rows");
+    assert!(s.lines[2].starts_with("    MARKER"), "row 3 was not as expected: {:?}", s.lines[2]);
 }
 
-/// `screen`은 읽기 커서를 전진시키지 않는다 — 화면은 누적 상태의 렌더라 소비 개념이 없다.
-/// 이걸 반대로 만들면 `screen` 한 번에 빌드 로그가 통째로 사라진다.
+/// `screen` does not advance the read cursor — the screen is a render of accumulated state, so
+/// there is no notion of consuming it. Getting this backwards would mean a single `screen` call
+/// wipes out an entire build log.
 #[cfg(unix)]
 #[tokio::test]
 async fn screen_does_not_advance_the_read_cursor() {
@@ -501,7 +510,7 @@ async fn screen_does_not_advance_the_read_cursor() {
     let pty = open_sh(&term).await;
 
     term.read(pty.clone(), Some("echo NEEDLE-IN-BUFFER\n".into()), quick()).await.unwrap();
-    // 위 read가 이미 가져갔으므로 새 출력을 하나 더 만든다.
+    // The read above already took it, so produce one more piece of output.
     term.write(pty.clone(), blob("echo SECOND-NEEDLE\n")).await.unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -509,12 +518,12 @@ async fn screen_does_not_advance_the_read_cursor() {
 
     let out: PtyRead =
         term.read(pty, None, Some(Settle { quiet_ms: 0, timeout_ms: 1000 })).await.unwrap();
-    assert!(out.content.contains("SECOND-NEEDLE"), "screen이 커서를 먹었다: {:?}", out.content);
+    assert!(out.content.contains("SECOND-NEEDLE"), "screen consumed the cursor: {:?}", out.content);
 }
 
-// ── 수명: 상한과 유휴 수거 ──────────────────────────────────────────────
+// ── lifetime: cap and idle reaping ────────────────────────────────────────
 
-/// 상한이 없으면 루프에 빠진 에이전트가 셸을 무한히 뽑는다.
+/// Without a cap, an agent stuck in a loop would spawn shells without limit.
 #[cfg(unix)]
 #[tokio::test]
 async fn opening_past_the_cap_fails_with_too_many_ptys() {
@@ -523,11 +532,11 @@ async fn opening_past_the_cap_fails_with_too_many_ptys() {
         term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
     }
     let err = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap_err();
-    assert!(format!("{err:?}").contains("too_many_ptys"), "본 오류: {err:?}");
+    assert!(format!("{err:?}").contains("too_many_ptys"), "got error: {err:?}");
 }
 
-/// 유휴 타임아웃이 세션을 닫는다. 벽시계 대신 주입한 값으로 잰다 —
-/// 10분을 기다리는 테스트는 테스트가 아니다.
+/// The idle timeout closes a session. Measured against an injected value instead of the wall
+/// clock — a test that waits 10 minutes is not a test.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_idle_session_is_reaped() {
@@ -540,10 +549,10 @@ async fn an_idle_session_is_reaped() {
         .read(opened.pty, None, Some(Settle { quiet_ms: 0, timeout_ms: 500 }))
         .await
         .unwrap_err();
-    assert!(format!("{err:?}").contains("pty_gone"), "본 오류: {err:?}");
+    assert!(format!("{err:?}").contains("pty_gone"), "got error: {err:?}");
 }
 
-/// 계속 만지는 세션은 살아 있어야 한다 — 스위퍼가 `last_touch`를 진짜로 보는지.
+/// A session that keeps getting touched must stay alive — checks that the sweeper genuinely looks at `last_touch`.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_touched_session_is_not_reaped() {
@@ -554,16 +563,17 @@ async fn a_touched_session_is_not_reaped() {
         tokio::time::sleep(Duration::from_millis(150)).await;
         term.read(opened.pty.clone(), None, Some(Settle { quiet_ms: 0, timeout_ms: 500 }))
             .await
-            .expect("만지고 있는 세션이 수거됐다");
+            .expect("a session that is actively being touched was reaped anyway");
     }
 }
 
-/// 진짜 셸의 출력에 ESC가 한 바이트도 남아선 안 된다.
+/// Not a single ESC byte may survive in a real shell's output.
 ///
-/// 라이브 실측(2026-07-31)에서 Attacca의 안전 가드가 U+001B가 든 tool 출력을 통째로
-/// 거부했다 — `"tool output contains disallowed control character U+001B"`. 셸 프롬프트의
-/// bracketed-paste 시퀀스 하나로 걸리므로, 이게 새면 `read`는 실제 사용에서 거의 항상
-/// 차단된다. 단위 테스트는 합성 입력만 보므로 진짜 프롬프트로 한 번 더 못 박는다.
+/// A live measurement (2026-07-31) found Attacca's safety guard outright rejecting tool output
+/// that contains U+001B — `"tool output contains disallowed control character U+001B"`. A single
+/// bracketed-paste sequence from a shell prompt is enough to trigger it, so if this leaks, `read`
+/// is blocked in real use almost every time. Unit tests only ever see synthetic input, so this
+/// nails it down once more against a real prompt.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_real_shell_read_carries_no_escape_bytes() {
@@ -571,7 +581,7 @@ async fn a_real_shell_read_carries_no_escape_bytes() {
     let opened = term.open(Some("/bin/sh".into()), 80, 24).await.unwrap();
     let pty = opened.pty;
 
-    // 프롬프트 + 색 + 커서 이동을 한꺼번에 낸다.
+    // Produce a prompt plus color plus cursor movement all at once.
     let out: PtyRead = term
         .read(
             pty,
@@ -581,12 +591,12 @@ async fn a_real_shell_read_carries_no_escape_bytes() {
         .await
         .unwrap();
 
-    assert!(!out.content.contains('\u{1b}'), "ESC가 남았다: {:?}", out.content);
-    assert!(out.content.contains("RED"), "본문이 사라졌다: {:?}", out.content);
+    assert!(!out.content.contains('\u{1b}'), "ESC survived: {:?}", out.content);
+    assert!(out.content.contains("RED"), "the body content is missing: {:?}", out.content);
     for c in out.content.chars() {
         assert!(
             c >= ' ' || c == '\n' || c == '\t',
-            "제어 문자 {:?}가 남았다: {:?}",
+            "control character {:?} survived: {:?}",
             c,
             out.content
         );

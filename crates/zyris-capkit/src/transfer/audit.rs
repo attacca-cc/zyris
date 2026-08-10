@@ -43,14 +43,14 @@ impl Audit {
 
     async fn write(&self, line: AuditLine) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
-        if let Some(부모) = self.path.parent() {
-            tokio::fs::create_dir_all(부모).await?;
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        let mut 글 = serde_json::to_string(&line).unwrap_or_default();
-        글.push('\n');
+        let mut text = serde_json::to_string(&line).unwrap_or_default();
+        text.push('\n');
         let mut f =
             tokio::fs::OpenOptions::new().create(true).append(true).open(&self.path).await?;
-        f.write_all(글.as_bytes()).await
+        f.write_all(text.as_bytes()).await
     }
 }
 
@@ -58,7 +58,7 @@ impl Audit {
 mod tests {
     use super::{Audit, AuditLine};
 
-    fn 한_줄() -> AuditLine {
+    fn one_line() -> AuditLine {
         AuditLine {
             at_ms: 1_754_700_000_000,
             peer_slug: "arch-zyris-code".into(),
@@ -75,37 +75,37 @@ mod tests {
 
     #[tokio::test]
     async fn one_transfer_appends_one_line() {
-        let 자리 = tempfile::tempdir().unwrap();
-        let 길 = 자리.path().join("transfers.log");
-        let audit = Audit::new(&길);
-        audit.record(한_줄()).await;
-        audit.record(한_줄()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transfers.log");
+        let audit = Audit::new(&path);
+        audit.record(one_line()).await;
+        audit.record(one_line()).await;
 
-        let 글 = tokio::fs::read_to_string(&길).await.unwrap();
-        assert_eq!(글.lines().count(), 2, "must append");
-        let 첫_줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
-        assert_eq!(첫_줄["peer_slug"], "arch-zyris-code");
-        assert_eq!(첫_줄["replaced"], true);
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(text.lines().count(), 2, "must append");
+        let first_line: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(first_line["peer_slug"], "arch-zyris-code");
+        assert_eq!(first_line["replaced"], true);
     }
 
     #[tokio::test]
     async fn overwrite_without_backup_shows_up_in_the_log() {
         // A reversible overwrite and a permanently lost original are told apart only by `undo`.
         // Without this field they read as identical, letter for letter, in the audit log.
-        let 자리 = tempfile::tempdir().unwrap();
-        let 길 = 자리.path().join("transfers.log");
-        let audit = Audit::new(&길);
-        audit.record(AuditLine { undo: None, ..한_줄() }).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transfers.log");
+        let audit = Audit::new(&path);
+        audit.record(AuditLine { undo: None, ..one_line() }).await;
 
-        let 글 = tokio::fs::read_to_string(&길).await.unwrap();
-        let 줄: serde_json::Value = serde_json::from_str(글.lines().next().unwrap()).unwrap();
-        assert_eq!(줄["replaced"], true);
-        assert!(줄["undo"].is_null(), "an overwrite without a backup must show up in the log");
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        let line: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(line["replaced"], true);
+        assert!(line["undo"].is_null(), "an overwrite without a backup must show up in the log");
     }
 
     #[tokio::test]
     async fn failing_to_write_does_not_block_the_transfer() {
-        let audit = Audit::new("/proc/못쓰는자리/x.log");
-        audit.record(한_줄()).await; // passes as long as this does not panic
+        let audit = Audit::new("/proc/unwritable-dir/x.log");
+        audit.record(one_line()).await; // passes as long as this does not panic
     }
 }

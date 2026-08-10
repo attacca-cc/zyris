@@ -25,12 +25,12 @@ pub struct UndoStore {
 /// colliding candidate gets picked, because the retry moves on to the next sequence number; it is
 /// safe across several processes too, even though each starts its own counter at 0 and so the
 /// values can coincide, because the filesystem's `mkdir` has the final say.
-static 다음_순번: AtomicU64 = AtomicU64::new(0);
+static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The most times a single `stash` call retries to find a slot. Giving up beyond this means
 /// something else is wrong (a stopped clock, say) — piling up this much collision within one
 /// millisecond and one sequence-number range is not supposed to happen on its own.
-const 최대_시도: u32 = 64;
+const MAX_ATTEMPTS: u32 = 64;
 
 impl UndoStore {
     pub fn new(root: impl Into<PathBuf>) -> UndoStore {
@@ -45,15 +45,15 @@ impl UndoStore {
     /// at that point, so its path is returned. `None` means "there is no backup at all", never
     /// "the original is safe".
     pub async fn stash(&self, victim: &Path, now_ms: u64) -> Option<PathBuf> {
-        let 메타 = tokio::fs::symlink_metadata(victim).await.ok()?;
-        let 이름 = victim.file_name()?;
+        let meta = tokio::fs::symlink_metadata(victim).await.ok()?;
+        let name = victim.file_name()?;
 
-        let 자리 = self.자리_잡기(now_ms).await?;
-        let 목적지 = 자리.join(이름);
+        let slot = self.claim_slot(now_ms).await?;
+        let dest = slot.join(name);
 
         // On the same filesystem, rename is cheap, and it moves a symlink as-is, pointer and all.
-        if tokio::fs::rename(victim, &목적지).await.is_ok() {
-            return Some(목적지);
+        if tokio::fs::rename(victim, &dest).await.is_ok() {
+            return Some(dest);
         }
 
         // rename did not work (a different filesystem, or a permissions problem). Moving a
@@ -61,19 +61,19 @@ impl UndoStore {
         // points at, exposing in the stash slot exactly what the original was hiding. For the same
         // reason inbox.rs rejects symlinks outright, this gives up here instead of taking the copy
         // fallback.
-        if 메타.file_type().is_symlink() {
+        if meta.file_type().is_symlink() {
             return None;
         }
 
-        tokio::fs::copy(victim, &목적지).await.ok()?;
+        tokio::fs::copy(victim, &dest).await.ok()?;
         // The backup is already complete by this point. A failure to delete the original does not
         // hide that result — quietly returning `None` here would mean the caller never learns
         // about a backup that does exist.
         let _ = tokio::fs::remove_file(victim).await;
-        Some(목적지)
+        Some(dest)
     }
 
-    /// Creates one new `{now_ms}-{순번}` slot and returns its path.
+    /// Creates one new `{now_ms}-{seq}` slot and returns its path.
     ///
     /// **Using `create_dir` instead of `create_dir_all` is the whole point of this function.**
     /// `create_dir_all` succeeds quietly even when the slot already exists — so the old
@@ -84,17 +84,17 @@ impl UndoStore {
     /// `AlreadyExists` when the slot is already there — that failure is the signal to move on to
     /// the next sequence number. Because the filesystem's `mkdir` is atomic, no matter how many
     /// processes are racing, exactly one of them ends up owning a given slot.
-    async fn 자리_잡기(&self, now_ms: u64) -> Option<PathBuf> {
+    async fn claim_slot(&self, now_ms: u64) -> Option<PathBuf> {
         // The root itself is shared by every slot, so creating it every time (succeeding if it
-        // already exists) is safe — the only place contention happens is the `{now_ms}-{순번}`
+        // already exists) is safe — the only place contention happens is the `{now_ms}-{seq}`
         // leaf underneath it.
         tokio::fs::create_dir_all(&self.root).await.ok()?;
 
-        for _ in 0..최대_시도 {
-            let 순번 = 다음_순번.fetch_add(1, Ordering::Relaxed);
-            let 후보 = self.root.join(format!("{now_ms}-{순번}"));
-            match tokio::fs::create_dir(&후보).await {
-                Ok(()) => return Some(후보),
+        for _ in 0..MAX_ATTEMPTS {
+            let seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
+            let candidate = self.root.join(format!("{now_ms}-{seq}"));
+            match tokio::fs::create_dir(&candidate).await {
+                Ok(()) => return Some(candidate),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(_) => return None,
             }

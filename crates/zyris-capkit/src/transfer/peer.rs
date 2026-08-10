@@ -37,7 +37,7 @@ use super::undo::UndoStore;
 /// it. If anyone sets the window smaller than 65,541 (say, exactly 64 KiB), the same permanent
 /// hang comes back. The right fix is to derive this from the negotiated value — deferred for now
 /// because the default is 256 KiB, which leaves fourfold headroom.
-const 청크: usize = 64 * 1024;
+const CHUNK_SIZE: usize = 64 * 1024;
 
 /// Where the in-progress `.part` file of one transfer lives, next to its destination.
 ///
@@ -62,46 +62,46 @@ const 청크: usize = 64 * 1024;
 /// shortening itself can hand back the destination's own name when the peer plants the suffix at
 /// the end of a full-length name. **The result is never the destination**; a `.part` that is the
 /// destination turns the failure cleanup into a delete of the file being replaced.
-pub fn part_path(목적지: &Path, transfer_id: &str) -> PathBuf {
-    let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
+pub fn part_path(dest: &Path, transfer_id: &str) -> PathBuf {
+    let marker = hex::encode(Sha256::digest(transfer_id.as_bytes()));
     // `.` + 16 chars + `.part` = 22 bytes. The length never changes no matter what the input is.
-    let 꼬리 = format!(".{}.part", &표식[..16]);
-    // `file_name()` can never be `None` here — `목적지` is a path `Inbox::resolve` built by
+    let tail = format!(".{}.part", &marker[..16]);
+    // `file_name()` can never be `None` here — `dest` is a path `Inbox::resolve` built by
     // passing it through `safe_name`, so it always has a last component. If it somehow were
     // absent anyway, fall back to "file" instead of panicking.
-    let 이름 = 목적지
+    let name = dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".to_string());
     // `safe_name` may have already filled the name out to 255 bytes. Just appending the suffix
     // would overrun the limit and produce `ENAMETOOLONG` — so the stem is cut back by exactly the
     // suffix's share, and **at a character boundary** (cutting by byte panics on Korean text).
-    let 남길_바이트 = super::name::최대_바이트.saturating_sub(꼬리.len());
-    let mut 줄기 = String::new();
-    for c in 이름.chars() {
-        if 줄기.len() + c.len_utf8() > 남길_바이트 {
+    let keep_bytes = super::name::MAX_BYTES.saturating_sub(tail.len());
+    let mut stem = String::new();
+    for c in name.chars() {
+        if stem.len() + c.len_utf8() > keep_bytes {
             break;
         }
-        줄기.push(c);
+        stem.push(c);
     }
-    let mut 임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
-    // **Truncation can fold `임시` back into `목적지` itself.** The suffix is derived from
+    let mut temp = dest.with_file_name(format!("{stem}{tail}"));
+    // **Truncation can fold `temp` back into `dest` itself.** The suffix is derived from
     // `transfer_id`, and both `transfer_id` and `name` are chosen by the sending side — so
     // pre-computing the suffix and planting it at the end of a 255-byte name makes the truncated
     // result come out letter-for-letter identical to the original name. When that happens, an
     // existing destination gets mistaken for a resume leftover, its hash can never match, and the
-    // mismatch cleanup `remove_file(&임시)` deletes the destination itself — leaving neither an
+    // mismatch cleanup `remove_file(&temp)` deletes the destination itself — leaving neither an
     // undo nor an audit trail behind.
     //
     // Shortening by just one more character necessarily makes the lengths diverge. In the
     // colliding case the stem sits in the 200-byte range, so there is always a character left to
-    // drop (if the stem were the entire name, `임시` would already be longer than the name by the
+    // drop (if the stem were the entire name, `temp` would already be longer than the name by the
     // suffix's length, and they would never have collided in the first place).
-    if 임시 == 목적지 {
-        줄기.pop();
-        임시 = 목적지.with_file_name(format!("{줄기}{꼬리}"));
+    if temp == dest {
+        stem.pop();
+        temp = dest.with_file_name(format!("{stem}{tail}"));
     }
-    임시
+    temp
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +127,7 @@ impl Default for TransferConfig {
 
 /// For the sending side to answer `pull`, it has to know what it committed to sending.
 #[derive(Clone)]
-struct 보낼_것 {
+struct ToSend {
     transfer_id: String,
     path: PathBuf,
     size: u64,
@@ -148,7 +148,7 @@ pub struct LocalPeerTransfer {
     peer: Arc<std::sync::OnceLock<PeerTransferClient>>,
     peer_slug: String,
     /// What the sending side has reserved.
-    pending: Arc<tokio::sync::Mutex<Vec<보낼_것>>>,
+    pending: Arc<tokio::sync::Mutex<Vec<ToSend>>>,
 }
 
 impl LocalPeerTransfer {
@@ -181,7 +181,7 @@ impl LocalPeerTransfer {
     /// Reserves what the sending side will hand out. `send_to` calls this right before
     /// `push_offer`.
     pub async fn offer_file(&self, transfer_id: String, path: PathBuf, size: u64, sha256: String) {
-        self.pending.lock().await.push(보낼_것 { transfer_id, path, size, sha256 });
+        self.pending.lock().await.push(ToSend { transfer_id, path, size, sha256 });
     }
 }
 
@@ -192,18 +192,18 @@ impl PeerTransfer for LocalPeerTransfer {
             return Err(WireError::new(
                 ErrorCode::PayloadTooLarge,
                 format!(
-                    "{}바이트는 이 노드의 상한 {}바이트를 넘습니다",
+                    "{} bytes exceeds this node's limit of {} bytes",
                     offer.size, self.config.max_file_bytes
                 ),
             )
             .retriable(false));
         }
         let peer = self.peer.get().ok_or_else(|| {
-            WireError::internal("이 노드는 받는 쪽으로 세워지지 않았습니다".to_string())
+            WireError::internal("this node is not set up as a receiver".to_string())
         })?;
 
         let inbox = Inbox::new(&self.config.inbox);
-        let 목적지 = inbox
+        let dest = inbox
             .resolve(&self.peer_slug, &offer.name)
             .await
             .map_err(|e| WireError::internal(e.to_string()))?;
@@ -211,99 +211,99 @@ impl PeerTransfer for LocalPeerTransfer {
         // This check exists to reject quickly, before the transfer even starts. **The check that
         // actually enforces the contract is not this one but the re-check right before rename** —
         // the destination can come into existence while the transfer is in flight.
-        if tokio::fs::symlink_metadata(&목적지).await.is_ok() && !offer.overwrite {
+        if tokio::fs::symlink_metadata(&dest).await.is_ok() && !offer.overwrite {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
-                format!("{}이(가) 이미 있습니다. 덮으려면 overwrite를 켜세요", 목적지.display()),
+                format!("{} already exists. Enable overwrite to replace it", dest.display()),
             )
             .retriable(false));
         }
 
         // The temp file has to be in the same directory for rename to be atomic. How the name is
         // built and why `transfer_id` has to be mixed in is written up in `part_path`.
-        let 임시 = part_path(&목적지, &offer.transfer_id);
-        // What `Inbox::resolve` checked was `목적지` alone — `.part` is a separate path that
+        let temp = part_path(&dest, &offer.transfer_id);
+        // What `Inbox::resolve` checked was `dest` alone — `.part` is a separate path that
         // never went through that check. The parent directory is safe (`resolve` already walked
-        // it and confirmed it is not a symlink, hence `실제_부모`), so only the last component,
-        // `임시` itself, needs to be looked at again here. Skip this and just open it, and opening
+        // it and confirmed it is not a symlink, hence `real_parent`), so only the last component,
+        // `temp` itself, needs to be looked at again here. Skip this and just open it, and opening
         // would follow a symlink planted there ahead of time.
-        if let Ok(정보) = tokio::fs::symlink_metadata(&임시).await {
-            if 정보.file_type().is_symlink() {
+        if let Ok(info) = tokio::fs::symlink_metadata(&temp).await {
+            if info.file_type().is_symlink() {
                 return Err(WireError::new(
                     ErrorCode::InvalidParams,
-                    "임시 파일 자리가 심볼릭 링크입니다".to_string(),
+                    "the temp file location is a symbolic link".to_string(),
                 )
                 .retriable(false));
             }
         }
-        let 파일_길이 = tokio::fs::metadata(&임시).await.map(|m| m.len()).unwrap_or(0);
+        let file_len = tokio::fs::metadata(&temp).await.map(|m| m.len()).unwrap_or(0);
         // If the leftover is bigger than this offer, it cannot be resumed — start over from
         // scratch. That decision (the offset) cannot be the only thing that gets reverted, though.
         // Opening with `.append(true)` without also truncating the file leaves the new bytes
         // sitting right **after** the leftover — the hasher only sees the newly received bytes, so
         // the sha256 check passes, yet what is left on disk is not the file that was verified. So
         // the spot where the offset is reset to 0 also switches the open mode to truncate (below).
-        let 받은_offset = if 파일_길이 > offer.size { 0 } else { 파일_길이 };
+        let received_offset = if file_len > offer.size { 0 } else { file_len };
 
-        let mut 스트림 = peer.pull(offer.transfer_id.clone(), 받은_offset).await?;
-        if 스트림.head.sha256 != offer.sha256 || 스트림.head.size != offer.size {
+        let mut stream = peer.pull(offer.transfer_id.clone(), received_offset).await?;
+        if stream.head.sha256 != offer.sha256 || stream.head.size != offer.size {
             return Err(WireError::internal(
-                "보내는 쪽이 offer와 다른 것을 내주려 합니다".to_string(),
+                "the sending side is trying to hand over something different from the offer".to_string(),
             ));
         }
 
-        let mut 해시기 = Sha256::new();
-        if 받은_offset > 0 {
+        let mut hasher = Sha256::new();
+        if received_offset > 0 {
             // On a resume, re-read the part already received and feed it into the hash. Loading
             // it whole into a `Vec` would allocate straight up to the ceiling (8 GiB by default)
             // — instead, read repeatedly into a fixed-size buffer and feed only that to the hash.
             use tokio::io::AsyncReadExt as _;
-            let mut 이미_받은 =
-                임시_열기_바탕().read(true).open(&임시).await.map_err(io_오류)?;
-            let mut 버퍼 = vec![0u8; 청크];
+            let mut already_received =
+                temp_open_options().read(true).open(&temp).await.map_err(io_error)?;
+            let mut buf = vec![0u8; CHUNK_SIZE];
             loop {
-                let n = 이미_받은.read(&mut 버퍼).await.map_err(io_오류)?;
+                let n = already_received.read(&mut buf).await.map_err(io_error)?;
                 if n == 0 {
                     break;
                 }
-                해시기.update(&버퍼[..n]);
+                hasher.update(&buf[..n]);
             }
         }
-        let mut 열기 = 임시_열기_바탕();
-        열기.create(true);
-        if 받은_offset > 0 {
-            열기.append(true);
+        let mut open = temp_open_options();
+        open.create(true);
+        if received_offset > 0 {
+            open.append(true);
         } else {
             // If this is not a resume, whatever is already there is a leftover — truncate it and
             // write fresh. Opening with `append` would leave that leftover sitting right in front
             // of the new bytes.
-            열기.write(true).truncate(true);
+            open.write(true).truncate(true);
         }
-        let mut 파일 = 열기.open(&임시).await.map_err(io_오류)?;
+        let mut file = open.open(&temp).await.map_err(io_error)?;
 
         use tokio::io::AsyncWriteExt;
-        let mut 쓴_바이트 = 받은_offset;
-        while let Some(조각) = 스트림.items.next().await {
-            let Chunk(바이트) = 조각?;
-            쓴_바이트 += 바이트.len() as u64;
-            if 쓴_바이트 > offer.size {
-                let _ = tokio::fs::remove_file(&임시).await;
-                return Err(WireError::internal("선언한 크기보다 많이 보냈습니다".to_string()));
+        let mut written = received_offset;
+        while let Some(chunk) = stream.items.next().await {
+            let Chunk(bytes) = chunk?;
+            written += bytes.len() as u64;
+            if written > offer.size {
+                let _ = tokio::fs::remove_file(&temp).await;
+                return Err(WireError::internal("sent more than the declared size".to_string()));
             }
-            해시기.update(&바이트);
-            파일.write_all(&바이트).await.map_err(io_오류)?;
+            hasher.update(&bytes);
+            file.write_all(&bytes).await.map_err(io_error)?;
         }
-        파일.flush().await.map_err(io_오류)?;
-        drop(파일);
+        file.flush().await.map_err(io_error)?;
+        drop(file);
 
-        let 실제 = hex::encode(해시기.finalize());
-        if 실제 != offer.sha256 {
+        let actual = hex::encode(hasher.finalize());
+        if actual != offer.sha256 {
             // Leaving the partial file behind would make the next resume pick it up and never
             // match.
-            let _ = tokio::fs::remove_file(&임시).await;
+            let _ = tokio::fs::remove_file(&temp).await;
             return Err(WireError::new(
                 ErrorCode::Internal,
-                format!("sha256이 맞지 않습니다: {실제} ≠ {}", offer.sha256),
+                format!("sha256 mismatch: {actual} ≠ {}", offer.sha256),
             )
             // Design doc §9 defines `integrity_mismatch` as **retriable** — what is broken is the
             // bytes that came through this time, not the request itself, so receiving again can
@@ -323,55 +323,55 @@ impl PeerTransfer for LocalPeerTransfer {
         // real would mean handing the `overwrite=false` branch to the kernel via
         // `renameat2(RENAME_NOREPLACE)` (Linux only), and making the undo stash atomic together
         // with it would need a per-destination lock — both are outside this branch.
-        let 이미_있나 = tokio::fs::symlink_metadata(&목적지).await.is_ok();
-        if 이미_있나 && !offer.overwrite {
+        let already_exists = tokio::fs::symlink_metadata(&dest).await.is_ok();
+        if already_exists && !offer.overwrite {
             // Leaving the `.part` received so far would make the next resume pick it up. This
             // request was rejected, so delete it.
-            let _ = tokio::fs::remove_file(&임시).await;
+            let _ = tokio::fs::remove_file(&temp).await;
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
                 format!(
-                    "{}이(가) 전송 중에 생겼습니다. 덮으려면 overwrite를 켜세요",
-                    목적지.display()
+                    "{} appeared during the transfer. Enable overwrite to replace it",
+                    dest.display()
                 ),
             )
             .retriable(false));
         }
 
-        let undo = if 이미_있나 {
-            UndoStore::new(&self.config.undo).stash(&목적지, 지금_ms()).await
+        let undo = if already_exists {
+            UndoStore::new(&self.config.undo).stash(&dest, now_ms()).await
         } else {
             None
         };
-        tokio::fs::rename(&임시, &목적지).await.map_err(io_오류)?;
-        실행_비트_제거(&목적지).await;
+        tokio::fs::rename(&temp, &dest).await.map_err(io_error)?;
+        strip_exec_bits(&dest).await;
 
-        let 결과 = TransferDone {
-            written: 목적지.display().to_string(),
-            bytes: 쓴_바이트,
-            sha256: 실제,
-            replaced: 이미_있나,
+        let result = TransferDone {
+            written: dest.display().to_string(),
+            bytes: written,
+            sha256: actual,
+            replaced: already_exists,
             undo: undo.map(|p| p.display().to_string()),
         };
 
-        if let Some(감사_길) = &self.config.audit {
-            Audit::new(감사_길)
+        if let Some(audit_path) = &self.config.audit {
+            Audit::new(audit_path)
                 .record(AuditLine {
-                    at_ms: 지금_ms(),
+                    at_ms: now_ms(),
                     peer_slug: self.peer_slug.clone(),
                     // The p2p transport (zyris-p2p) does not exist yet — Task 4.1 fills in the
                     // actual endpoint.
                     peer_endpoint: String::new(),
                     name: offer.name.clone(),
-                    bytes: 결과.bytes,
-                    sha256: 결과.sha256.clone(),
-                    written: 결과.written.clone(),
-                    replaced: 결과.replaced,
+                    bytes: result.bytes,
+                    sha256: result.sha256.clone(),
+                    written: result.written.clone(),
+                    replaced: result.replaced,
                     // `replaced: true` together with this being `None` means the original was
                     // overwritten without ever being stashed — this field is the only thing that
                     // tells a reversible overwrite apart from a permanent loss when reading the
                     // log.
-                    undo: 결과.undo.clone(),
+                    undo: result.undo.clone(),
                     // Whether this was a direct connection or went through a relay is not
                     // something this layer can know either.
                     direct: false,
@@ -379,11 +379,11 @@ impl PeerTransfer for LocalPeerTransfer {
                 .await;
         }
 
-        Ok(결과)
+        Ok(result)
     }
 
     async fn pull(&self, transfer_id: String, offset: u64) -> Result<Streaming<PullHead, Chunk>> {
-        let 것 = self
+        let to_send = self
             .pending
             .lock()
             .await
@@ -391,47 +391,47 @@ impl PeerTransfer for LocalPeerTransfer {
             .find(|p| p.transfer_id == transfer_id)
             .cloned()
             .ok_or_else(|| {
-                WireError::new(ErrorCode::InvalidParams, format!("모르는 전송입니다: {transfer_id}"))
+                WireError::new(ErrorCode::InvalidParams, format!("unknown transfer: {transfer_id}"))
                     .retriable(false)
             })?;
 
-        let head = PullHead { size: 것.size, sha256: 것.sha256.clone() };
+        let head = PullHead { size: to_send.size, sha256: to_send.sha256.clone() };
 
         // The file is opened outside the stream — a file that cannot be opened has to be "the
-        // call itself failed", not an error partway through the stream. The `끝났나` flag carried
+        // call itself failed", not an error partway through the stream. The `done` flag carried
         // in `unfold`'s state plays the same role as `file_io.rs::read_stream`'s
         // `remaining = Some(0)`: without returning `None` on the next poll after emitting one
         // error, the same error would be emitted forever.
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        let mut file = tokio::fs::File::open(&것.path).await.map_err(io_오류)?;
+        let mut file = tokio::fs::File::open(&to_send.path).await.map_err(io_error)?;
         if offset > 0 {
-            file.seek(std::io::SeekFrom::Start(offset)).await.map_err(io_오류)?;
+            file.seek(std::io::SeekFrom::Start(offset)).await.map_err(io_error)?;
         }
 
         let items =
-            futures_util::stream::unfold((file, false), move |(mut file, 끝났나)| async move {
-                if 끝났나 {
+            futures_util::stream::unfold((file, false), move |(mut file, done)| async move {
+                if done {
                     return None;
                 }
-                let mut 버퍼 = vec![0u8; 청크];
-                match file.read(&mut 버퍼).await {
+                let mut buf = vec![0u8; CHUNK_SIZE];
+                match file.read(&mut buf).await {
                     Ok(0) => None,
                     Ok(n) => {
-                        버퍼.truncate(n);
-                        Some((Ok(Chunk(Bytes::from(버퍼))), (file, false)))
+                        buf.truncate(n);
+                        Some((Ok(Chunk(Bytes::from(buf))), (file, false)))
                     }
-                    Err(e) => Some((Err(io_오류(e)), (file, true))),
+                    Err(e) => Some((Err(io_error(e)), (file, true))),
                 }
             });
         Ok(Streaming::new(head, items))
     }
 }
 
-fn io_오류(e: std::io::Error) -> WireError {
+fn io_error(e: std::io::Error) -> WireError {
     WireError::new(ErrorCode::Internal, e.to_string())
 }
 
-/// The base `OpenOptions` used when opening `임시` (`.part`). On unix, `O_NOFOLLOW` is added so
+/// The base `OpenOptions` used when opening `temp` (`.part`). On unix, `O_NOFOLLOW` is added so
 /// that opening itself fails if the last component is a symlink. A narrow window still remains
 /// between the earlier `symlink_metadata` pre-check and this open (if someone plants a symlink
 /// after the check but before the open) — this flag closes that remaining window. Windows has
@@ -439,14 +439,14 @@ fn io_오류(e: std::io::Error) -> WireError {
 /// following" — it opens the link itself instead of failing). So on that side, only the pre-check
 /// defends, and the window remains.
 #[cfg_attr(not(unix), allow(unused_mut))]
-fn 임시_열기_바탕() -> tokio::fs::OpenOptions {
-    let mut 옵션 = tokio::fs::OpenOptions::new();
+fn temp_open_options() -> tokio::fs::OpenOptions {
+    let mut options = tokio::fs::OpenOptions::new();
     #[cfg(unix)]
-    옵션.custom_flags(libc::O_NOFOLLOW);
-    옵션
+    options.custom_flags(libc::O_NOFOLLOW);
+    options
 }
 
-fn 지금_ms() -> u64 {
+fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -454,14 +454,14 @@ fn 지금_ms() -> u64 {
 }
 
 /// There is no reason a received file should be executable.
-async fn 실행_비트_제거(길: &std::path::Path) {
+async fn strip_exec_bits(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(길, std::fs::Permissions::from_mode(0o600)).await;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
     }
     #[cfg(not(unix))]
-    let _ = 길;
+    let _ = path;
 }
 
 #[cfg(test)]
@@ -471,76 +471,76 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::part_path;
-    use super::super::name::{safe_name, 최대_바이트};
+    use super::super::name::{safe_name, MAX_BYTES};
 
     /// A 255-byte name where the peer **pre-computed the suffix and planted it at the end**.
     ///
     /// The suffix `.<sha256(transfer_id)[..16]>.part` is derived from `transfer_id`, and both
     /// `transfer_id` and `name` are chosen by the sending side. So crafting a name like this
     /// requires no special privilege at all.
-    fn 꼬리를_심은_이름(transfer_id: &str) -> String {
-        let 표식 = hex::encode(Sha256::digest(transfer_id.as_bytes()));
-        let 꼬리 = format!(".{}.part", &표식[..16]);
-        format!("{}{}", "A".repeat(최대_바이트 - 꼬리.len()), 꼬리)
+    fn name_with_tail(transfer_id: &str) -> String {
+        let marker = hex::encode(Sha256::digest(transfer_id.as_bytes()));
+        let tail = format!(".{}.part", &marker[..16]);
+        format!("{}{}", "A".repeat(MAX_BYTES - tail.len()), tail)
     }
 
     #[test]
     fn same_transfer_same_slot_different_transfer_different_slot() {
-        let 목적지 = Path::new("/inbox/a/same.bin");
+        let dest = Path::new("/inbox/a/same.bin");
         // The property resume depends on — a retry has to find the leftover received earlier.
-        assert_eq!(part_path(목적지, "t1"), part_path(목적지, "t1"));
+        assert_eq!(part_path(dest, "t1"), part_path(dest, "t1"));
         // The property that concurrent transfers do not overwrite each other's `.part`. If this
         // breaks, both pass the sha256 check and the reply points at bytes that are not on disk.
-        assert_ne!(part_path(목적지, "t1"), part_path(목적지, "t2"));
+        assert_ne!(part_path(dest, "t1"), part_path(dest, "t2"));
         // If the temp file collides with the destination, failure cleanup (`remove_file`) deletes
         // the destination itself.
-        assert_ne!(part_path(목적지, "t1"), 목적지);
+        assert_ne!(part_path(dest, "t1"), dest);
         assert_ne!(part_path(Path::new("/inbox/a/x.part"), "t1"), Path::new("/inbox/a/x.part"));
         // For rename to be atomic, it has to stay in the same directory.
-        assert_eq!(part_path(목적지, "t1").parent(), 목적지.parent());
+        assert_eq!(part_path(dest, "t1").parent(), dest.parent());
     }
 
     #[test]
     fn whatever_the_peer_sends_exactly_one_path_component_survives() {
-        let 목적지 = Path::new("/inbox/a/x.bin");
-        let 임시 = part_path(목적지, "../../etc/passwd\0\n/..");
-        assert_eq!(임시.parent(), 목적지.parent(), "actual: {}", 임시.display());
-        let 이름 = 임시.file_name().unwrap().to_str().unwrap();
-        assert!(!이름.contains('/') && !이름.contains('\\'), "actual: {이름}");
+        let dest = Path::new("/inbox/a/x.bin");
+        let temp = part_path(dest, "../../etc/passwd\0\n/..");
+        assert_eq!(temp.parent(), dest.parent(), "actual: {}", temp.display());
+        let name = temp.file_name().unwrap().to_str().unwrap();
+        assert!(!name.contains('/') && !name.contains('\\'), "actual: {name}");
     }
 
-    /// Review N1: length truncation can fold `임시` back into `목적지` **itself**.
+    /// Review N1: length truncation can fold `temp` back into `dest` **itself**.
     ///
     /// If the peer pre-computes the suffix and plants it at the end of a 255-byte name,
     /// `part_path` truncates the stem to 233 bytes and appends the same suffix back on, producing
     /// the original name. At that point an existing destination gets mistaken for a resume
-    /// leftover, and the hash-mismatch cleanup (`remove_file(&임시)`) **deletes the destination
+    /// leftover, and the hash-mismatch cleanup (`remove_file(&temp)`) **deletes the destination
     /// itself** — disabling sha256 verification, the undo stash, and the audit log all at once.
     #[test]
     fn planting_the_suffix_at_the_end_of_the_name_still_keeps_temp_and_destination_apart() {
-        let 이름 = 꼬리를_심은_이름("t-evil");
-        assert_eq!(이름.len(), 최대_바이트, "must fill 255 bytes exactly for truncation to occur");
+        let name = name_with_tail("t-evil");
+        assert_eq!(name.len(), MAX_BYTES, "must fill 255 bytes exactly for truncation to occur");
         // The wash lets this name straight through — it is not a separator, a control character,
         // or a reserved name.
-        assert_eq!(safe_name(&이름), 이름);
+        assert_eq!(safe_name(&name), name);
 
-        let 목적지 = Path::new("/inbox/a").join(&이름);
-        let 임시 = part_path(&목적지, "t-evil");
-        assert_ne!(임시, 목적지, "actual: {}", 임시.display());
-        assert_eq!(임시.parent(), 목적지.parent());
-        let 임시_이름 = 임시.file_name().unwrap().to_str().unwrap();
-        assert!(임시_이름.len() <= 최대_바이트, "{} bytes", 임시_이름.len());
-        assert!(임시_이름.ends_with(".part"), "actual: {임시_이름}");
+        let dest = Path::new("/inbox/a").join(&name);
+        let temp = part_path(&dest, "t-evil");
+        assert_ne!(temp, dest, "actual: {}", temp.display());
+        assert_eq!(temp.parent(), dest.parent());
+        let temp_name = temp.file_name().unwrap().to_str().unwrap();
+        assert!(temp_name.len() <= MAX_BYTES, "{} bytes", temp_name.len());
+        assert!(temp_name.ends_with(".part"), "actual: {temp_name}");
     }
 
     #[test]
     fn name_filling_the_limit_exactly_still_stays_within_255_bytes() {
         // `safe_name` can fill a name out to 255 bytes. Just appending the suffix would overrun
         // the limit and produce `ENAMETOOLONG`.
-        let 긴_이름 = "가".repeat(85); // 3 bytes × 85 = 255 bytes
-        let 목적지 = Path::new("/inbox/a").join(&긴_이름);
-        let 이름 = part_path(&목적지, "t1").file_name().unwrap().to_str().unwrap().to_string();
-        assert!(이름.len() <= 255, "{} bytes", 이름.len());
-        assert!(이름.ends_with(".part"), "actual: {이름}");
+        let long_name = "가".repeat(85); // 3 bytes × 85 = 255 bytes
+        let dest = Path::new("/inbox/a").join(&long_name);
+        let name = part_path(&dest, "t1").file_name().unwrap().to_str().unwrap().to_string();
+        assert!(name.len() <= 255, "{} bytes", name.len());
+        assert!(name.ends_with(".part"), "actual: {name}");
     }
 }
