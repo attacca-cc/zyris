@@ -80,12 +80,17 @@ pub enum ZScope {
     /// management surface a machine that owns a device grant uses to mint sibling nodes.
     #[serde(rename = "nodes:write")]
     NodesWrite,
+    /// P2P rendezvous between nodes on the same account — publish this node's own address and ask
+    /// for a sibling's. The file itself never passes through Attacca, so what this scope opens is
+    /// **the address book only**.
+    #[serde(rename = "peers:write")]
+    PeersWrite,
 }
 
 impl ZScope {
     /// Every scope, in the order Attacca lists them. Useful for a node that wants to ask for
     /// everything and let the approving user cut it down.
-    pub const ALL: [ZScope; 18] = [
+    pub const ALL: [ZScope; 19] = [
         ZScope::AgentsRead,
         ZScope::AgentsWrite,
         ZScope::ProjectsRead,
@@ -104,6 +109,7 @@ impl ZScope {
         ZScope::KanbanWrite,
         ZScope::EventsRead,
         ZScope::NodesWrite,
+        ZScope::PeersWrite,
     ];
 
     /// The wire spelling, which is also what `request_scopes` and `$ZYRIS_SCOPES` take.
@@ -127,6 +133,7 @@ impl ZScope {
             ZScope::KanbanWrite => "kanban:write",
             ZScope::EventsRead => "events:read",
             ZScope::NodesWrite => "nodes:write",
+            ZScope::PeersWrite => "peers:write",
         }
     }
 
@@ -676,6 +683,50 @@ pub struct ZNode {
     pub created_at: Option<String>,
 }
 
+/// A sibling node's iroh address, as [`AttaccaApi::peer_lookup`] answers it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ZPeerAddr {
+    pub node_id: String,
+    pub slug: String,
+    /// iroh EndpointId — an ed25519 public key. The peer proves its identity with this.
+    pub endpoint_id: String,
+    /// Hole-punching candidate addresses.
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    /// The relay the deployment operates. Carried here rather than hardcoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    pub online: bool,
+}
+
+/// One entry of [`AttaccaApi::peer_list`]'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ZPeerEntry {
+    pub node_id: String,
+    /// The name a user refers to this peer by. **It is a label, not a trust anchor.**
+    ///
+    /// Do not key a peer-key pin on it, and do not key one on `node_id` or on `node_name`
+    /// (`TokenResponse.node_name` in `enroll/protocol.rs`) either. Every one of those is issued by
+    /// the server, and the server is precisely the party a pin exists to constrain: it can present
+    /// a substituted peer as a **new node**, which then arrives as "never seen before," passes any
+    /// check, and gets pinned — working every time and leaving no trace.
+    ///
+    /// A slug looks user-chosen but is not. Measured against Attacca on 2026-08-10: it is derived
+    /// from the node's `name`, whose default on the device-grant path is the enrolling device's own
+    /// unverified self-report, and which the approval dialog pre-fills so a user can approve it
+    /// without typing anything. It is also neither unique nor stable — renames recompute it with no
+    /// collision check, no constraint backs it, and freeing a slug when a node is revoked so a new
+    /// node can take it is deliberate behaviour with a test asserting it. "Same name, different key"
+    /// is a supported workflow there, which is exactly the event a pin is supposed to catch.
+    ///
+    /// So the anchor cannot come from the server at all. It comes from a person: the peer's key
+    /// fingerprint is confirmed once, out of band, and the pin binds to the key that was confirmed.
+    /// The slug's job is to say which peer the user meant, and nothing more.
+    pub slug: String,
+    pub endpoint_id: String,
+    pub online: bool,
+}
+
 #[zyris::capability(name = "attacca_api", version = 1)]
 pub trait AttaccaApi {
     /// Identify the account this connection is authorized as, and the scopes it was granted.
@@ -841,4 +892,22 @@ pub trait AttaccaApi {
     /// List the nodes registered under this node's authenticated device. Requires `nodes:write`;
     /// never includes a token.
     async fn list_nodes(&self) -> zyris::Result<Vec<ZNode>>;
+
+    /// Publish this node's own iroh address. Call again whenever the address changes. `peers:write`.
+    ///
+    /// `endpoint_id` **keeps whatever value was published first.** A request to overwrite it with a
+    /// different one is rejected — so the server never becomes a place that quietly swaps the key.
+    async fn peer_publish(&self, endpoint_id: String, addrs: Vec<String>) -> zyris::Result<()>;
+
+    /// Ask for another node's address on the same account. `peers:write`.
+    ///
+    /// **The lookup key is the slug.** When a user says "send it to my laptop," that name has to be
+    /// the key itself, so TOFU pinning demands the same key for the same name. Looking up by
+    /// `node_id` would leave the pin protecting something other than what the user actually said
+    /// (caught in the phase 2 final review).
+    async fn peer_lookup(&self, slug: String) -> zyris::Result<ZPeerAddr>;
+
+    /// List the nodes on the same account. Used to decide whether an incoming connection may be
+    /// accepted. `peers:write`.
+    async fn peer_list(&self) -> zyris::Result<Vec<ZPeerEntry>>;
 }
