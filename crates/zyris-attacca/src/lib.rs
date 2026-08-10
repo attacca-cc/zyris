@@ -901,10 +901,16 @@ pub trait AttaccaApi {
 
     /// Ask for another node's address on the same account. `peers:write`.
     ///
-    /// **The lookup key is the slug.** When a user says "send it to my laptop," that name has to be
-    /// the key itself, so TOFU pinning demands the same key for the same name. Looking up by
-    /// `node_id` would leave the pin protecting something other than what the user actually said
-    /// (caught in the phase 2 final review).
+    /// **The lookup key is the slug, because that is the name a user says** — "send it to my
+    /// laptop." It is how the caller names the peer it meant, and nothing more. See
+    /// [`ZPeerEntry::slug`] for why it cannot also be what a peer-key pin binds to: the anchor is a
+    /// fingerprint a person confirmed out of band, not any name this server issues.
+    ///
+    /// A slug is neither unique nor stable here, so an implementation that finds two live nodes
+    /// under one slug must **refuse rather than pick one.** Answering with an arbitrary node sends
+    /// the file to a machine the user did not name, and — because the pin is per-slug — surfaces as
+    /// "this peer's key changed," which is a false alarm at exactly the place a real one must be
+    /// believed.
     async fn peer_lookup(&self, slug: String) -> zyris::Result<ZPeerAddr>;
 
     /// List the nodes on the same account. Used to decide whether an incoming connection may be

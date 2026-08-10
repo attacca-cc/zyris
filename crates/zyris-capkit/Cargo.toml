@@ -49,8 +49,9 @@ input-wayland = ["input", "enigo/wayland", "enigo/platform_specific"]
 # 영향 없음 — reis/ashpd 의존성은 enigo 쪽에서 unix 전용으로 선언돼 있다.
 input-libei = ["input", "enigo/libei", "enigo/smol", "enigo/platform_specific"]
 desktop = ["screen", "input"]
-# 노드 간 파일 전송의 받는 쪽. 파일시스템만 만지므로 그래픽 의존이 없고, P2P 전송로
-# (`zyris-p2p`)와도 무관하다 — 이 feature만으로 `zyris::testing::duplex`에서 전 과정이 돈다.
+# The receiving side of node-to-node file transfer. It touches nothing but the filesystem, so it
+# pulls in no graphics dependencies, and it is independent of the P2P transport (`zyris-p2p`) — this
+# feature alone is enough to drive the whole exchange over `zyris::testing::duplex`.
 transfer = [
     "dep:tokio",
     "dep:bytes",
