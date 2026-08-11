@@ -169,6 +169,17 @@ impl LocalPeerTransfer {
         let _ = self.peer.set(client);
     }
 
+    /// The sending side. `root` is only ever read from — [`Self::offer_file`] hands out files under
+    /// it and `pull` streams them.
+    ///
+    /// **The `peer` slot must stay empty on one of these, and that is load-bearing.** This object is
+    /// announced to the remote peer (`send::IrohPeerLink::open` builds a `PeerTransferServer` from
+    /// it), so the peer can call `push_offer` back down the link. What refuses it is `push_offer`
+    /// reading `self.peer` before it reaches the inbox — and the `inbox` and `undo` this constructor
+    /// sets are the node's *root*, not an inbox, because a sender has no inbox to name. Call
+    /// [`Self::set_peer`] on one of these and a peer's files stop being refused and start landing in
+    /// the root of the node, with `Inbox`'s path jail nowhere in the path. Use
+    /// [`Self::receiver_pending`] for anything that is meant to receive.
     pub fn sender(root: PathBuf) -> LocalPeerTransfer {
         LocalPeerTransfer {
             config: TransferConfig { inbox: root.clone(), undo: root, ..Default::default() },

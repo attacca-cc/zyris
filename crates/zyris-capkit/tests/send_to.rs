@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use zyris::{Datum, ErrorCode, Node, NodeKind, Result, Streaming, WireError};
+use zyris::{Chunk, Datum, ErrorCode, Node, NodeKind, Result, Streaming, WireError};
 use zyris_attacca::{
     AttaccaApi, AttaccaApiClient, AttaccaApiServer, ZAgent, ZHistoryQuery, ZJob, ZJobFilter,
     ZJobUpdate, ZMe, ZNewAgent, ZNewJob, ZNewNode, ZNewProject, ZNewSession, ZNewWork, ZNode,
@@ -24,7 +24,9 @@ use zyris_attacca::{
     ZTurnFrame, ZTurnStatus, ZUsage, ZWork, ZWorkFilter, ZWorkTasks, ZWorkUpdate,
 };
 use zyris_caps::file_transfer::{FileTransfer, SendReceipt};
-use zyris_caps::peer_transfer::{PeerTransferClient, PeerTransferServer};
+use zyris_caps::peer_transfer::{
+    PeerTransfer, PeerTransferClient, PeerTransferServer, PullHead, TransferDone, TransferOffer,
+};
 use zyris_capkit::transfer::send::{FileTransferConfig, LocalFileTransfer, PeerLink, PeerSession};
 use zyris_capkit::transfer::{LocalPeerTransfer, TransferConfig};
 use zyris_p2p::fingerprint::PeerConfirmer;
@@ -675,11 +677,116 @@ async fn running_out_of_time_is_a_pending_receipt_not_an_error() {
     let receipt = fixture.send("laptop", "report.pdf").await.unwrap();
 
     assert!(receipt.pending, "running out of time is not a failure: {receipt:?}");
-    assert!(receipt.next.is_some(), "a pending receipt has to say what to do now");
     assert_eq!(receipt.node, "laptop");
     assert_eq!(receipt.bytes, 0, "nothing was confirmed written, so nothing may be reported as written");
     assert_eq!(receipt.written, "");
     assert!(!receipt.direct);
+    // Stuck in `open`, so the peer has nothing yet — the line must not claim there is something to
+    // resume. It stays a `pending` receipt because a lookup and a dial are both worth retrying.
+    let next = receipt.next.expect("a pending receipt has to say what to do now");
+    assert!(next.contains("not been reached"), "{next}");
+}
+
+/// The one place "resume" is a true word: the link is open and `push_offer` is in flight, so bytes
+/// may already be sitting on the peer as a `.part`. Nothing stood on this branch before — the test
+/// above is named for it but never gets past `open`.
+#[tokio::test]
+async fn running_out_of_time_while_the_bytes_are_moving_promises_a_resume() {
+    /// A peer that accepts the link and then never answers `push_offer`.
+    #[derive(Clone)]
+    struct StallsOnPush;
+    #[async_trait::async_trait]
+    impl PeerTransfer for StallsOnPush {
+        async fn push_offer(&self, _offer: TransferOffer) -> Result<TransferDone> {
+            std::future::pending().await
+        }
+        async fn pull(
+            &self,
+            _transfer_id: String,
+            _offset: u64,
+        ) -> Result<Streaming<PullHead, Chunk>> {
+            Err(WireError::internal("the sender is the one pulled from".to_string()))
+        }
+    }
+
+    struct OpensThenStalls {
+        dials: Arc<AtomicUsize>,
+        held: tokio::sync::Mutex<Vec<zyris::Connection>>,
+    }
+    #[async_trait::async_trait]
+    impl PeerLink for OpensThenStalls {
+        async fn open(&self, _addr: &ZPeerAddr, sender: LocalPeerTransfer) -> Result<PeerSession> {
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            let a = Node::builder()
+                .name("a")
+                .kind(NodeKind::Cli)
+                .capability(PeerTransferServer(sender))
+                .build()?;
+            let b = Node::builder()
+                .name("b")
+                .kind(NodeKind::Cli)
+                .capability(PeerTransferServer(StallsOnPush))
+                .build()?;
+            let (a_conn, b_conn) = zyris::testing::duplex(&a, &b).await?;
+            // `wait_capability`, not `capability`: the announce arrives during the handshake, and
+            // reading it synchronously right after `duplex` returns races that.
+            let client: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await?;
+            self.held.lock().await.push(b_conn);
+            Ok(PeerSession { client, connection: a_conn })
+        }
+    }
+
+    let dials = Arc::new(AtomicUsize::new(0));
+    let link = Arc::new(OpensThenStalls {
+        dials: dials.clone(),
+        held: tokio::sync::Mutex::new(Vec::new()),
+    });
+    let fixture =
+        Fixture::build(Ok(peer("laptop", 1)), Duration::from_millis(200), None, Some(link)).await;
+    fixture.write("report.pdf", b"contents").await;
+
+    let receipt = fixture.send("laptop", "report.pdf").await.unwrap();
+
+    assert!(receipt.pending, "{receipt:?}");
+    assert_eq!(dials.load(Ordering::SeqCst), 1, "the link has to have opened for this to be the case");
+    let next = receipt.next.expect("a pending receipt has to say what to do now");
+    assert!(next.contains("resume"), "{next}");
+}
+
+/// The other side of the same clock. Running out of time *before the file has even been measured*
+/// leaves nothing on the peer to come back to, so answering `pending` would send the caller — an
+/// agent, which does what `next` tells it — into a retry that begins the same read from zero and
+/// ends in the same place, forever.
+///
+/// Staying in that phase takes a file that genuinely cannot be read inside the deadline, so this
+/// uses a sparse one: `set_len` costs no disk, and hashing still has to pull every one of those
+/// bytes through. 256 MiB against a 1 ms budget is ~2 orders of magnitude of margin either way.
+///
+/// (A zero deadline does *not* work, which is worth recording: `timeout` keeps polling the inner
+/// future until its timer fires, so a small file finishes hashing and moves on before the expiry
+/// ever lands.)
+#[tokio::test]
+async fn running_out_of_time_before_the_file_is_measured_is_refused_not_called_resumable() {
+    let fixture =
+        Fixture::build(Ok(peer("laptop", 1)), Duration::from_millis(1), None, None).await;
+    let sparse = fixture.write("report.pdf", b"").await;
+    tokio::fs::File::options()
+        .write(true)
+        .open(&sparse)
+        .await
+        .unwrap()
+        .set_len(256 * 1024 * 1024)
+        .await
+        .unwrap();
+
+    let error = fixture.send("laptop", "report.pdf").await.unwrap_err();
+
+    assert_eq!(code_of(&error), "source_too_slow_to_measure", "{error:?}");
+    assert!(
+        !error.retriable,
+        "a retry repeats the same read and fails in the same place, so it must not be invited"
+    );
+    assert_eq!(fixture.dialed(), 0, "nothing may be dialed before the file has been measured");
 }
 
 // ---------------------------------------------------------------------------------------------

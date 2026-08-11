@@ -21,6 +21,7 @@
 //! `zyris-capkit` implements capabilities, `zyris-p2p` carries them.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +56,23 @@ const HASH_CHUNK: usize = 64 * 1024;
 
 /// Bytes of `sha256(node_id ‖ name ‖ size ‖ sha256)` kept as the `transfer_id`.
 const TRANSFER_ID_BYTES: usize = 16;
+
+/// How far [`LocalFileTransfer::send_inner`] had got when the deadline ran out.
+///
+/// Only one of the three has anything on the peer's disk to come back to, and the answer has to say
+/// which. "Call again and it resumes" is true once bytes are moving; said while the file is still
+/// being measured it points the caller at a `.part` that was never created, and the caller — an
+/// agent, which will do exactly what the `next` line says — retries forever against a step that
+/// starts from zero every time.
+mod phase {
+    /// Resolving the path and reading the file to size and hash it. Nothing has left this machine,
+    /// and nothing has been asked of anyone.
+    pub const MEASURING: u8 = 0;
+    /// Looking the peer up, settling its key, opening the link. Still nothing sent.
+    pub const REACHING: u8 = 1;
+    /// `push_offer` is in flight and the peer is pulling. A partial file may exist over there.
+    pub const SENDING: u8 = 2;
+}
 
 /// One open link to a peer, for the length of one transfer.
 pub struct PeerSession {
@@ -123,6 +141,10 @@ impl PeerLink for IrohPeerLink {
     async fn is_direct(&self, endpoint_id: &str) -> bool {
         let Ok(id) = endpoint_id.parse::<iroh::EndpointId>() else { return false };
         let Some(info) = self.endpoint.remote_info(id).await else { return false };
+        // The binding is not redundant, however much it looks it. As the block's tail expression,
+        // `addrs()`'s iterator would be a temporary living to the end of the block — dropped *after*
+        // `info`, which it borrows, which does not compile (E0597) in a desugared `async_trait`
+        // body. Naming the bool ends the borrow on this line.
         let direct = info.addrs().any(|a| {
             a.addr().is_ip() && matches!(a.usage(), iroh::endpoint::TransportAddrUsage::Active)
         });
@@ -336,12 +358,15 @@ impl LocalFileTransfer {
         }
     }
 
+    /// `at` is moved forward as the work moves, and is read only if the deadline cuts this short.
+    /// See [`phase`] for why the answer cannot be the same in all three places.
     async fn send_inner(
         &self,
         node: &str,
         path: &str,
         name: Option<String>,
         overwrite: Option<bool>,
+        at: &AtomicU8,
     ) -> Result<SendReceipt> {
         let source = self.resolve_source(path).await?;
         let proposed = match name {
@@ -352,6 +377,7 @@ impl LocalFileTransfer {
         };
         let (size, sha256) = hash_file(&source).await?;
         let transfer_id = transfer_id(&self.config.node_id, &proposed, size, &sha256);
+        at.store(phase::REACHING, Ordering::SeqCst);
 
         let addr = self.look_up_peer(node).await?;
         self.authorize_peer(node, &addr.endpoint_id).await?;
@@ -363,6 +389,9 @@ impl LocalFileTransfer {
         sender.offer_file(transfer_id.clone(), source, size, sha256.clone()).await;
 
         let session = self.link.open(&addr, sender).await?;
+        // From here on the peer can be holding bytes, so a deadline that lands after this line has
+        // something for the next call to come back to.
+        at.store(phase::SENDING, Ordering::SeqCst);
         let done = session
             .client
             .push_offer(TransferOffer {
@@ -398,31 +427,55 @@ impl FileTransfer for LocalFileTransfer {
         overwrite: Option<bool>,
     ) -> Result<SendReceipt> {
         let deadline = self.config.wire_deadline;
-        let running = self.send_inner(&node, &path, name, overwrite);
-        match tokio::time::timeout(deadline, running).await {
-            Ok(result) => result,
-            // Not an error. The bytes already received are on the peer's disk as a `.part`, and
-            // the same arguments produce the same `transfer_id`, so calling again picks up from
-            // there instead of starting over.
-            //
-            // Every measured field stays at its zero value: nothing has been confirmed written, and
-            // filling `bytes` in with the source file's size here would read as progress that has
-            // not happened.
-            Err(_) => Ok(SendReceipt {
-                node,
-                written: String::new(),
-                bytes: 0,
-                sha256: String::new(),
-                replaced: false,
-                undo: None,
-                direct: false,
-                pending: true,
-                next: Some(
-                    "still sending. Call send_to again with the same arguments to resume."
-                        .to_string(),
+        let at = AtomicU8::new(phase::MEASURING);
+        let running = self.send_inner(&node, &path, name, overwrite, &at);
+        let expired = match tokio::time::timeout(deadline, running).await {
+            Ok(result) => return result,
+            Err(_) => at.load(Ordering::SeqCst),
+        };
+
+        // Still reading the file when time ran out. Answering `pending` here would be a promise
+        // this cannot keep: nothing has been offered, so there is no partial file on the peer, and
+        // the retry the `next` line asks for begins the same read from zero and ends in the same
+        // place. A file this node cannot hash inside one call is one it cannot send at all, and
+        // saying so once beats an agent retrying until someone notices.
+        if expired == phase::MEASURING {
+            return Err(refuse(
+                "source_too_slow_to_measure",
+                format!(
+                    "reading and hashing {path} did not finish within the {}s a call gets, so \
+                     nothing has been offered to {node}. Calling again starts the same read over; \
+                     this file cannot be sent from this node until it can be read faster.",
+                    deadline.as_secs()
                 ),
-            }),
+            ));
         }
+
+        // Not an error. Once the link is open the bytes already received are on the peer's disk as
+        // a `.part`, and the same arguments produce the same `transfer_id`, so calling again picks
+        // up from there instead of starting over. Before that there is nothing to resume yet, but
+        // the work that remains is a lookup and a dial — both worth retrying — so the shape of the
+        // answer is the same and only the sentence differs.
+        //
+        // Every measured field stays at its zero value: nothing has been confirmed written, and
+        // filling `bytes` in with the source file's size here would read as progress that has not
+        // happened.
+        let next = if expired == phase::SENDING {
+            "still sending. Call send_to again with the same arguments to resume."
+        } else {
+            "the peer had not been reached yet. Call send_to again with the same arguments."
+        };
+        Ok(SendReceipt {
+            node,
+            written: String::new(),
+            bytes: 0,
+            sha256: String::new(),
+            replaced: false,
+            undo: None,
+            direct: false,
+            pending: true,
+            next: Some(next.to_string()),
+        })
     }
 
     async fn inbox_list(&self) -> Result<Vec<InboxEntry>> {
@@ -434,7 +487,20 @@ impl FileTransfer for LocalFileTransfer {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
             Err(e) => return Err(WireError::internal(e.to_string())),
         };
-        while let Ok(Some(peer)) = peers.next_entry().await {
+        // `while let Ok(Some(..))` would end the walk on a read error as if the directory had
+        // simply ended, and hand back a short list as though it were the whole one. A caller asking
+        // what arrived is worse served by a confident wrong answer than by a failure.
+        loop {
+            let peer = match peers.next_entry().await {
+                Ok(Some(peer)) => peer,
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(WireError::internal(format!(
+                        "{} could not be listed in full: {e}",
+                        self.config.inbox.display()
+                    )))
+                }
+            };
             // Received files always sit one level down, under the sending peer's washed name
             // (`Inbox::resolve`). Anything else at the top level is not something this node put
             // there.
@@ -442,8 +508,29 @@ impl FileTransfer for LocalFileTransfer {
                 continue;
             }
             let from = peer.file_name().to_string_lossy().into_owned();
-            let Ok(mut files) = tokio::fs::read_dir(peer.path()).await else { continue };
-            while let Ok(Some(file)) = files.next_entry().await {
+            // A sender's directory that has been removed since the walk above listed it is simply
+            // gone, and skipping it is right. Any other failure is not "there is nothing here".
+            let mut files = match tokio::fs::read_dir(peer.path()).await {
+                Ok(files) => files,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(WireError::internal(format!(
+                        "{} could not be listed: {e}",
+                        peer.path().display()
+                    )))
+                }
+            };
+            loop {
+                let file = match files.next_entry().await {
+                    Ok(Some(file)) => file,
+                    Ok(None) => break,
+                    Err(e) => {
+                        return Err(WireError::internal(format!(
+                            "{} could not be listed in full: {e}",
+                            peer.path().display()
+                        )))
+                    }
+                };
                 let name = file.file_name().to_string_lossy().into_owned();
                 // A transfer still in flight is not something that has arrived. This also hides a
                 // genuinely received file whose own name ends in `.part`, which is the safer way
