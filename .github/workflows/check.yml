@@ -27,5 +27,16 @@ jobs:
 
       # Includes zyris-macros' trybuild UI tests, which compare compiler diagnostics against
       # checked-in .stderr files — they are the reason a toolchain bump can fail this job on its own.
+      #
+      # **The feature flags are load-bearing, not a nicety.** `--workspace` builds every member with
+      # its *default* features, and no member turns `zyris-capkit/transfer` on — so a plain
+      # `cargo test --workspace` compiles all five of the file-transfer test files down to nothing
+      # and reports `0 tests` for each. That was the state of this job until 2026-08-11: green over a
+      # path jail, an undo trail and a TOFU pin that nothing had ever executed. Naming the features
+      # here is what makes those tests real.
+      #
+      # Every feature that gates tests has to be named. Still knowingly absent: `screen`, whose
+      # 6 tests need `xcap`/`libwayshot` and a session to capture — so they are not silently
+      # missing, they are deliberately not run here.
       - name: cargo test
-        run: cargo test --workspace
+        run: cargo test --workspace --features zyris-capkit/transfer-send,zyris-capkit/transfer-listen

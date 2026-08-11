@@ -6127,7 +6127,9 @@ dependencies = [
  "vt100",
  "xcap",
  "zyris",
+ "zyris-attacca",
  "zyris-caps",
+ "zyris-p2p",
 ]
 
 [[package]]

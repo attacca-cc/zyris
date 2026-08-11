@@ -29,7 +29,11 @@ vt100 = { version = "0.16.2", optional = true }
 tracing.workspace = true
 xcap = { version = "0.9.7", optional = true }
 zyris = { version = "0.1.0", path = "../zyris", default-features = false }
+zyris-attacca = { version = "0.1.0", path = "../zyris-attacca", optional = true }
 zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
+# The sending side dials peers and pins their keys. `iroh` is never named directly — `zyris-p2p`
+# re-exports the one it resolved, so there is no way for a second copy to end up linked in.
+zyris-p2p = { version = "0.1.0", path = "../zyris-p2p", optional = true }
 
 # `xcap` enumerates monitors over XRandR even in a Wayland session, then captures in Wayland's
 # coordinate space; the two disagree whenever Xwayland cannot express the compositor's layout. The
@@ -64,9 +68,22 @@ transfer = [
     "dep:async-trait",
     "dep:libc",
 ]
+# The sending side: `file_transfer.send_to`. Split out from `transfer` rather than folded into it
+# because this is where the dependency weight is — the rendezvous client and the whole iroh QUIC
+# stack — and a node that only ever *receives* should not have to build any of it.
+transfer-send = ["transfer", "dep:zyris-attacca", "dep:zyris-p2p"]
+# The receiving side of the *network*, as opposed to `transfer`'s receiving side of the
+# filesystem: accepting peer connections needs the rendezvous (to know whose nodes they are) and
+# iroh (to accept at all). Separate from `transfer-send` so a node can take deliveries without
+# carrying the surface that makes them.
+transfer-listen = ["transfer", "dep:zyris-attacca", "dep:zyris-p2p"]
 
 [dev-dependencies]
 bytes.workspace = true
 futures-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# `zyris::testing::duplex` — two real Connections over a channel. Every transfer test drives the
+# whole exchange through it, so none of them needs a socket. It is a non-default feature, and
+# without this line the transfer tests do not compile at all.
+zyris = { version = "0.1.0", path = "../zyris", default-features = false, features = ["testing"] }
