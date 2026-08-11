@@ -72,6 +72,11 @@ transfer = [
 # because this is where the dependency weight is — the rendezvous client and the whole iroh QUIC
 # stack — and a node that only ever *receives* should not have to build any of it.
 transfer-send = ["transfer", "dep:zyris-attacca", "dep:zyris-p2p"]
+# The receiving side of the *network*, as opposed to `transfer`'s receiving side of the
+# filesystem: accepting peer connections needs the rendezvous (to know whose nodes they are) and
+# iroh (to accept at all). Separate from `transfer-send` so a node can take deliveries without
+# carrying the surface that makes them.
+transfer-listen = ["transfer", "dep:zyris-attacca", "dep:zyris-p2p"]
 
 [dev-dependencies]
 bytes.workspace = true
