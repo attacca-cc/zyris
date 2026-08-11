@@ -152,17 +152,22 @@ impl PeerCache {
 
 /// Accepts peer connections until `endpoint` stops producing them.
 ///
-/// `node_id` is this node's own identifier, announced to the peer so it knows who answered.
-/// It is a label on the wire and nothing here is authorized by it.
+/// Takes a [`PeerDirectory`] rather than the `AttaccaApiClient` itself: the list of the account's
+/// nodes is the only thing this needs from the rendezvous, and a caller that already holds a client
+/// passes `Arc::new(client)` — the impl is right here. Naming the narrower thing is also what makes
+/// the loop testable end to end, over real endpoints, without a rendezvous to talk to.
+///
+/// `node_id` is this node's own identifier, announced to the peer so it knows who answered. It is a
+/// label on the wire; nothing here is authorized by it.
 pub async fn serve_peers(
     endpoint: iroh::Endpoint,
-    api: AttaccaApiClient,
+    directory: Arc<dyn PeerDirectory>,
     config: TransferConfig,
     tofu: TofuStore,
     node_id: String,
 ) {
     let directory = Arc::new(Mutex::new(PeerCache::new(
-        Arc::new(api),
+        directory,
         DEFAULT_DIRECTORY_TTL,
         DEFAULT_REFRESH_INTERVAL,
     )));

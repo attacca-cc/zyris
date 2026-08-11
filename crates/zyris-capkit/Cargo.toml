@@ -87,3 +87,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # whole exchange through it, so none of them needs a socket. It is a non-default feature, and
 # without this line the transfer tests do not compile at all.
 zyris = { version = "0.1.0", path = "../zyris", default-features = false, features = ["testing"] }
+# The transfer tests have to produce the same digest the receiving side will check, so they need
+# the same two crates the implementation uses. Already in the tree as optional deps of `transfer`;
+# a dependency of the crate is not visible to its integration tests, hence the repeat.
+sha2 = "0.10"
+hex = "0.4"
