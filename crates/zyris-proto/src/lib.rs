@@ -50,6 +50,14 @@ mod tests {
             method: "terminal.exec".into(),
             params: Payload::from_typed(&serde_json::json!({"command": "ls", "n": 3})).unwrap(),
             stream: Some(StreamDecl { id: 42 }),
+            meta: Payload::default(),
+        });
+        roundtrip(Envelope::Req {
+            id: 18,
+            method: "terminal.exec".into(),
+            params: Payload::from_typed(&serde_json::json!({"command": "ls"})).unwrap(),
+            stream: None,
+            meta: Payload::from_json(serde_json::json!({"session_id": "s-1"})),
         });
         roundtrip(Envelope::Res { id: 17, result: Payload::default() });
         roundtrip(Envelope::Err {
@@ -65,6 +73,29 @@ mod tests {
             error: WireError::new(ErrorCode::StreamLagged, "gap"),
         });
         roundtrip(Envelope::SCancel { stream: 4 });
+    }
+
+    /// `meta` is optional in both directions, and it has to stay that way: a peer built before the
+    /// field existed sends a `req` without it, and one built after sends a `req` an older peer must
+    /// ignore rather than reject. Requiring it — or serialising it when empty — would make every
+    /// call between mismatched versions a malformed frame.
+    #[test]
+    fn a_req_is_readable_by_a_peer_that_knows_nothing_of_meta() {
+        let without = r#"{"t":"req","id":1,"method":"terminal.exec","params":{"command":"ls"}}"#;
+        let Envelope::Req { meta, .. } = decode_text(without).unwrap() else { panic!("not a req") };
+        assert!(meta.is_nil(), "a req without meta reads as carrying none");
+
+        let empty = Envelope::Req {
+            id: 1,
+            method: "terminal.exec".into(),
+            params: Payload::default(),
+            stream: None,
+            meta: Payload::default(),
+        };
+        let WireMessage::Text(text) = encode_control(&empty, Serialization::Json).unwrap() else {
+            panic!("expected text")
+        };
+        assert!(!text.contains("meta"), "an empty meta puts nothing on the wire: {text}");
     }
 
     #[test]
@@ -191,6 +222,7 @@ mod tests {
             method: METHOD_ANNOUNCE.into(),
             params: Payload::from_typed(&params).unwrap(),
             stream: None,
+            meta: Payload::default(),
         };
         let WireMessage::Binary(bin) = encode_control(&env, Serialization::Msgpack).unwrap()
         else {
