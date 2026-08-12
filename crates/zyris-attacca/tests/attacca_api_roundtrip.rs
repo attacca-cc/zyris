@@ -417,6 +417,15 @@ impl AttaccaApi for StubApi {
         }])
     }
 
+    /// Refuses to delete the caller, the way the doc on the trait says a server must. This stub
+    /// knows itself as `self`, having no connection to read an identity from.
+    async fn delete_node(&self, node_id: String) -> zyris::Result<()> {
+        if node_id == "self" {
+            return Err(zyris::WireError::invalid_params("a node cannot delete itself").into());
+        }
+        Ok(())
+    }
+
     async fn peer_publish(&self, _endpoint_id: String, _addrs: Vec<String>) -> zyris::Result<()> {
         Ok(())
     }
@@ -464,7 +473,7 @@ fn descriptor_matches_the_reserved_name() {
     let descriptor = attacca_api_capability();
     assert_eq!(descriptor.name, ATTACCA_API_CAPABILITY);
     assert_eq!(descriptor.version, 1);
-    assert_eq!(descriptor.tools.len(), 37);
+    assert_eq!(descriptor.tools.len(), 38);
     assert_eq!(descriptor.tool("list_agents").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("me").unwrap().transfer, Transfer::Unary);
     assert_eq!(descriptor.tool("list_projects").unwrap().transfer, Transfer::Unary);
@@ -898,6 +907,20 @@ async fn sibling_nodes_round_trip() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].node_id, "sibling-1");
     assert!(listed[0].token.is_none(), "the one-time token must never come back in a listing");
+}
+
+/// **Registering without deleting is a one-way door.** A client that registers a node per window
+/// has to be able to take one back, or it can only ever add to an account it cannot tidy. The
+/// refusal is half of the contract: a node that deleted itself would have to answer down the
+/// connection it just revoked, so the caller could never tell "done" from "the socket died."
+#[tokio::test]
+async fn a_sibling_node_can_be_deleted_but_never_itself() {
+    let api = client().await;
+
+    api.delete_node("sibling-1".into()).await.expect("a sibling comes back off the account");
+
+    let err = api.delete_node("self".into()).await.expect_err("deleting the caller is refused");
+    assert!(err.to_string().contains("cannot delete itself"), "{err}");
 }
 
 /// The scope added alongside the sibling-node tools. `ZScope::ALL` is what a node asks for when it

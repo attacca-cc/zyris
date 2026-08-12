@@ -1,0 +1,55 @@
+   Compiling zyris v0.1.0 (/home/ruma/zyris/crates/zyris)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.93s
+     Running unittests src/lib.rs (target/debug/deps/zyris-ec33c08a31cf9f5a)
+
+running 28 tests
+test enroll::file_store::tests::paths_are_per_deployment_and_per_profile ... ok
+test enroll::file_store::tests::slugify_is_filename_safe ... ok
+test enroll::file_store::tests::a_file_from_the_future_is_refused_rather_than_guessed_at ... ok
+test enroll::file_store::tests::corrupt_json_is_discardable ... ok
+test enroll::file_store::tests::save_then_load_round_trips_through_the_trait ... ok
+test enroll::file_store::tests::the_file_is_private_and_a_permissive_one_is_refused ... ok
+test enroll::http::tests::a_stored_credential_outlives_an_unreachable_refresh ... ok
+test enroll::http::tests::a_disowned_grant_is_deleted_rather_than_presented_again ... ok
+test enroll::http::tests::an_unparseable_error_body_still_names_the_status ... ok
+test enroll::http::tests::http_base_is_derived_from_the_websocket_url ... ok
+test enroll::http::tests::an_outage_during_rotation_leaves_the_credential_alone ... ok
+test enroll::http::tests::the_client_hint_describes_this_machine ... ok
+test enroll::protocol::tests::a_server_having_a_bad_day_never_discards_a_credential ... ok
+test enroll::protocol::tests::a_smaller_server_hint_never_undoes_a_backoff ... ok
+test enroll::protocol::tests::an_unreadable_error_body_is_transient_not_fatal ... ok
+test enroll::protocol::tests::expiry_and_denial_are_distinct ... ok
+test enroll::protocol::tests::intervals_are_clamped_at_both_ends ... ok
+test enroll::protocol::tests::only_invalid_grant_kills_a_stored_credential ... ok
+test enroll::protocol::tests::pending_then_slow_down_then_still_pending ... ok
+test enroll::protocol::tests::slow_down_without_a_hint_still_widens ... ok
+test enroll::protocol::tests::the_success_line_names_the_account_and_the_grant ... ok
+test enroll::protocol::tests::the_notice_is_plain_ascii_and_selectable ... ok
+test enroll::protocol::tests::unknown_errors_are_fatal_and_keep_the_description ... ok
+test enroll::store::tests::bearer_expires_early_by_the_skew_allowance ... ok
+test enroll::store::tests::refresh_fires_at_eighty_percent_of_the_lifetime ... ok
+test enroll::store::tests::memory_store_round_trips ... ok
+test enroll::store::tests::only_unusable_may_be_thrown_away ... ok
+test enroll::http::tests::a_ui_receives_the_code_and_the_outcome ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 1.25s
+
+     Running tests/attachments.rs (target/debug/deps/attachments-819f40cbed8e96ed)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/capability_revocation.rs (target/debug/deps/capability_revocation-59ad37f5adca66c7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/macro_roundtrip.rs (target/debug/deps/macro_roundtrip-c29ac2a6f2382427)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+EXIT:0

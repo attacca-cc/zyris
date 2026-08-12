@@ -893,6 +893,19 @@ pub trait AttaccaApi {
     /// never includes a token.
     async fn list_nodes(&self) -> zyris::Result<Vec<ZNode>>;
 
+    /// Remove a sibling node registered under this node's authenticated device, revoking its
+    /// token. **The counterpart to [`AttaccaApi::register_node`]** — without it, every node a
+    /// program registers is permanent, and a client that registers one per window has no way to
+    /// tidy up after itself. Requires `nodes:write`.
+    ///
+    /// **A node cannot delete itself.** The answer would have to travel back down a connection the
+    /// deletion just revoked, so the caller could never tell the difference between "done" and
+    /// "the socket died." A request naming the calling node is refused.
+    ///
+    /// Deleting a node that is currently connected drops that connection: the token it dialled
+    /// with no longer exists.
+    async fn delete_node(&self, node_id: String) -> zyris::Result<()>;
+
     /// Publish this node's own iroh address. Call again whenever the address changes. `peers:write`.
     ///
     /// `endpoint_id` **keeps whatever value was published first.** A request to overwrite it with a
