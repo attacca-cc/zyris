@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -207,9 +207,12 @@ impl Default for FileTransferConfig {
 #[derive(Clone)]
 pub struct LocalFileTransfer {
     config: FileTransferConfig,
-    /// Behind an `Arc` because the generated capability clients are not `Clone` — and this type
-    /// has to be, since a node registers it and typically keeps a handle of its own.
-    api: Arc<AttaccaApiClient>,
+    /// Behind an `Arc<OnceLock>` for two reasons at once: the generated capability clients are not
+    /// `Clone` and this type has to be, and the client does not exist yet when a node builds its
+    /// capabilities. It arrives on the connection this node makes to Attacca, which is after
+    /// `Runner::run` has already been handed everything it announces. Same shape, and the same
+    /// reason, as `LocalPeerTransfer::set_peer`.
+    api: Arc<OnceLock<AttaccaApiClient>>,
     tofu: TofuStore,
     confirmer: Arc<dyn PeerConfirmer>,
     link: Arc<dyn PeerLink>,
@@ -223,7 +226,31 @@ impl LocalFileTransfer {
         confirmer: Arc<dyn PeerConfirmer>,
         link: Arc<dyn PeerLink>,
     ) -> LocalFileTransfer {
-        LocalFileTransfer { config, api: Arc::new(api), tofu, confirmer, link }
+        let transfer = LocalFileTransfer::pending(config, tofu, confirmer, link);
+        transfer.set_api(api);
+        transfer
+    }
+
+    /// The same thing, with the rendezvous client still to come.
+    ///
+    /// A node announces its capabilities before it connects, and the client is something the
+    /// connection hands back — so a node that registers this one has no client to give it yet.
+    /// Until [`Self::set_api`] is called, `send_to` refuses rather than pretending: there is no
+    /// way to find a peer without something to ask.
+    pub fn pending(
+        config: FileTransferConfig,
+        tofu: TofuStore,
+        confirmer: Arc<dyn PeerConfirmer>,
+        link: Arc<dyn PeerLink>,
+    ) -> LocalFileTransfer {
+        LocalFileTransfer { config, api: Arc::new(OnceLock::new()), tofu, confirmer, link }
+    }
+
+    /// Plugs in the rendezvous client. A second call is ignored, the same way `set_peer` is: a
+    /// connection has one client, and a slot that could be overwritten is a slot that could be
+    /// swapped.
+    pub fn set_api(&self, api: AttaccaApiClient) {
+        let _ = self.api.set(api);
     }
 
     /// Resolves a caller-supplied path **and refuses anything outside the root**.
@@ -299,7 +326,15 @@ impl LocalFileTransfer {
     /// tolerance; that one asks what the caller actually said, and folding there would quietly
     /// merge two slots into one.
     async fn look_up_peer(&self, node: &str) -> Result<ZPeerAddr> {
-        let addr = self.api.peer_lookup(node.to_string()).await?;
+        let Some(api) = self.api.get() else {
+            return Err(refuse(
+                "rendezvous_unavailable",
+                "this node is not connected to Attacca yet, so there is nothing to ask where \
+                 a peer is".to_string(),
+            )
+            .retriable(true));
+        };
+        let addr = api.peer_lookup(node.to_string()).await?;
         if !addr.slug.eq_ignore_ascii_case(node) {
             return Err(refuse(
                 "peer_lookup_mismatch",

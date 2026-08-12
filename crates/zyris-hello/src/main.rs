@@ -9,6 +9,8 @@
 //! this file is short: none of it was ever specific to *this* node.
 
 mod greeter;
+#[cfg(feature = "transfer")]
+mod transfer;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,7 +28,7 @@ use zyris_capkit::{EnigoInput, HostDisplays, HostScreenCapture};
 use zyris_caps::{ImageFormat, InputServer, ScreenCaptureServer};
 
 /// The server announces `attacca_api` immediately after the handshake; this is generous headroom.
-const CONSUME_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const CONSUME_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -51,8 +53,34 @@ async fn main() -> ExitCode {
     #[cfg(feature = "desktop")]
     let runner = with_desktop(runner);
 
+    // Built before `run`, because a node announces what it can do before it has anywhere to say it.
+    // The rendezvous client and the accept loop both arrive later, on the connection.
+    #[cfg(feature = "transfer")]
+    let transfer = match transfer::Transfer::bind(runner.node_name()).await {
+        Ok(transfer) => Some(std::sync::Arc::new(transfer)),
+        Err(error) => {
+            tracing::warn!(%error, "could not bind the peer endpoint; file transfer is off");
+            None
+        }
+    };
+    #[cfg(feature = "transfer")]
+    let runner = match &transfer {
+        Some(transfer) => runner.capability(transfer.capability()),
+        None => runner,
+    };
+
     runner
-        .on_connect(|conn| async move { report_server_capabilities(&conn).await })
+        .on_connect(move |conn| {
+            #[cfg(feature = "transfer")]
+            let transfer = transfer.clone();
+            async move {
+                report_server_capabilities(&conn).await;
+                #[cfg(feature = "transfer")]
+                if let Some(transfer) = transfer {
+                    transfer.on_connect(&conn).await;
+                }
+            }
+        })
         .run()
         .await
 }
