@@ -40,3 +40,30 @@ jobs:
       # missing, they are deliberately not run here.
       - name: cargo test
         run: cargo test --workspace --features zyris-capkit/transfer-send,zyris-capkit/transfer-listen
+
+  # Windows is a platform this repo makes claims about and has never run. `Terminal::exec`'s doc
+  # tells an agent how to run a PowerShell script without fighting quoting — that sentence *is* the
+  # tool description a model reads — and nothing has ever executed it. Agents reaching for
+  # `-EncodedCommand` instead is the symptom that says the advice might not work.
+  #
+  # Deliberately not `cargo test --workspace`: most of this suite is Unix-shaped (`/bin/sh`, `stty`,
+  # symlinks, `libc`), and a job that fails for those reasons teaches nothing and gets ignored. This
+  # runs the build, which catches the compile breakage a Linux-only CI cannot see, and the tests
+  # that are about Windows specifically.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+          cache-on-failure: true
+
+      # The whole workspace, so a Windows-only compile error surfaces here rather than in whatever
+      # a user is trying to do at the time.
+      - name: cargo build
+        run: cargo build --workspace
+
+      - name: cargo test (windows-specific)
+        run: cargo test -p zyris-capkit --test terminal_windows
