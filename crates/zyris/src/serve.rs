@@ -25,6 +25,11 @@ pub struct IncomingCall {
     pub tool: String,
     pub params: Payload,
     pub serialization: Serialization,
+    /// The side channel the caller attached, outside this tool's declared arguments — see
+    /// `zyris_proto::Envelope::Req`. Nil when the caller attached nothing, which is also how a
+    /// caller too old to know about the field looks, so a capability reading this must treat
+    /// absence as the ordinary case rather than a fault.
+    pub meta: Payload,
 }
 
 pub enum Outgoing {

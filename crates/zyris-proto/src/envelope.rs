@@ -128,6 +128,17 @@ pub enum Envelope {
         params: Payload,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<StreamDecl>,
+        /// **What the caller knows that the arguments do not say.** Free-form and opaque to this
+        /// crate on purpose: a relay routing calls on behalf of many conversations needs to tell
+        /// the served side which one asked, but that is the relay's own concern and has no
+        /// business in the tool's declared schema — otherwise a served capability has to accept a
+        /// field it never declared, and whatever drives that capability sees one.
+        ///
+        /// Optional in both directions, and it must stay so. A peer built before this field sends
+        /// no `meta` and reads one it does not understand as absent; requiring it, or writing it
+        /// when empty, would turn every call between mismatched versions into a malformed frame.
+        #[serde(default, skip_serializing_if = "Payload::is_nil")]
+        meta: Payload,
     },
     Res {
         id: u64,

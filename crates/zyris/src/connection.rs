@@ -376,7 +376,20 @@ impl Connection {
     }
 
     pub async fn call_raw(&self, method: &str, params: Payload) -> Result<Payload> {
-        self.request(method, params, None).await
+        self.request(method, params, None, Payload::default()).await
+    }
+
+    /// Like [`Connection::call_raw`], but attaches what the caller knows and the arguments do not
+    /// say — see `zyris_proto::Envelope::Req`'s `meta`. Separate from `call_raw` rather than an
+    /// extra argument on it because attaching nothing is by far the common case, and a peer that
+    /// predates the field ignores whatever is put here.
+    pub async fn call_raw_with_meta(
+        &self,
+        method: &str,
+        params: Payload,
+        meta: Payload,
+    ) -> Result<Payload> {
+        self.request(method, params, None, meta).await
     }
 
     async fn request(
@@ -384,12 +397,13 @@ impl Connection {
         method: &str,
         params: Payload,
         stream: Option<StreamDecl>,
+        meta: Payload,
     ) -> Result<Payload> {
         let shared = &self.shared;
         let id = shared.next_req_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         shared.pending.lock().unwrap().insert(id, tx);
-        let envelope = Envelope::Req { id, method: method.to_string(), params, stream };
+        let envelope = Envelope::Req { id, method: method.to_string(), params, stream, meta };
         if let Err(e) = shared.send_envelope(&envelope) {
             shared.pending.lock().unwrap().remove(&id);
             return Err(e);
@@ -413,7 +427,10 @@ impl Connection {
             .lock()
             .unwrap()
             .insert(stream_id, IncomingStreamEntry { tx, next_seq: 0 });
-        match self.request(method, params, Some(StreamDecl { id: stream_id })).await {
+        match self
+            .request(method, params, Some(StreamDecl { id: stream_id }), Payload::default())
+            .await
+        {
             Ok(head) => Ok((
                 head,
                 RawIncomingStream {
@@ -979,8 +996,8 @@ fn handle_frame(shared: &Arc<Shared>, frame: IncomingFrame) {
 fn handle_control(shared: &Arc<Shared>, envelope: Envelope) {
     match envelope {
         Envelope::Hello(_) | Envelope::HelloAck(_) => {}
-        Envelope::Req { id, method, params, stream } => {
-            handle_request(shared, id, method, params, stream)
+        Envelope::Req { id, method, params, stream, meta } => {
+            handle_request(shared, id, method, params, stream, meta)
         }
         Envelope::Res { id, result } => {
             // Before the payload leaves the reader. The peer starts sending chunks as soon as it
@@ -1058,6 +1075,7 @@ fn handle_request(
     method: String,
     params: Payload,
     stream: Option<StreamDecl>,
+    meta: Payload,
 ) {
     if method == METHOD_ANNOUNCE {
         handle_announce(shared, id, params);
@@ -1094,6 +1112,7 @@ fn handle_request(
             tool,
             params,
             serialization: task_shared.serialization,
+            meta,
         };
         match capability.dispatch(call).await {
             Ok(Outgoing::Response(result)) => {

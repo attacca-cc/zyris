@@ -61,7 +61,7 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::StreamExt;
     use serde::{Deserialize, Serialize};
-    use zyris_proto::{CapabilityDescriptor, ToolDescriptor, Transfer};
+    use zyris_proto::{CapabilityDescriptor, Payload, ToolDescriptor, Transfer};
 
     use crate::serve::{
         decode_call, encode_response, encode_streaming, IncomingCall, Outgoing, ServeCapability,
@@ -107,6 +107,14 @@ mod tests {
                     item_schema: None,
                 },
                 ToolDescriptor {
+                    name: "caller".into(),
+                    description: "Report the meta the caller attached.".into(),
+                    transfer: Transfer::Unary,
+                    request_schema: serde_json::json!({"type": "object"}),
+                    response_schema: None,
+                    item_schema: None,
+                },
+                ToolDescriptor {
                     name: "count".into(),
                     description: "Stream numbers.".into(),
                     transfer: Transfer::UniStream,
@@ -133,6 +141,9 @@ mod tests {
                     let req: EchoRequest = decode_call(&call)?;
                     encode_response(&EchoResponse { text: req.text })
                 }
+                "caller" => encode_response(&EchoResponse {
+                    text: call.meta.to_json().unwrap_or(serde_json::Value::Null).to_string(),
+                }),
                 "count" => {
                     let req: CountHead = decode_call(&call)?;
                     let total = req.total;
@@ -197,6 +208,38 @@ mod tests {
             .unwrap();
         let response = echo.say("hello zyris").await.unwrap();
         assert_eq!(response.text, "hello zyris");
+    }
+
+    /// **Who asked is not part of what was asked.** A caller that knows something about the call
+    /// its arguments do not say — which of its sessions wants it, which request it belongs to —
+    /// has nowhere to put it: folding it into the arguments changes the tool's own schema, so the
+    /// served capability would have to accept a field it never declared and the agent driving it
+    /// would see one. `meta` is the side channel that keeps the two apart.
+    #[tokio::test]
+    async fn a_call_carries_meta_the_arguments_never_mention() {
+        let dialer = bare_node("client");
+        let acceptor = node_with_echo(Arc::new(AtomicBool::new(false)));
+        let (client_conn, _server) = crate::testing::duplex(&dialer, &acceptor).await.unwrap();
+        let _echo: EchoClient = client_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+        let answer = client_conn
+            .call_raw_with_meta(
+                "echo.caller",
+                Payload::default(),
+                Payload::from_json(serde_json::json!({"session_id": "s-7"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            answer.to_typed::<EchoResponse>().unwrap().text,
+            r#"{"session_id":"s-7"}"#,
+            "the capability sees what the caller attached"
+        );
+
+        // And a caller that attaches nothing is not a caller that attached something empty — the
+        // served side has to be able to tell "no one said" from "someone said nothing".
+        let plain = client_conn.call_raw("echo.caller", Payload::default()).await.unwrap();
+        assert_eq!(plain.to_typed::<EchoResponse>().unwrap().text, "null");
     }
 
     #[tokio::test]
@@ -289,7 +332,7 @@ mod tests {
         let descriptors = client_conn.peer_descriptors();
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].name, "echo");
-        assert_eq!(descriptors[0].tools.len(), 2);
+        assert_eq!(descriptors[0].tools.len(), 3);
     }
 
     #[tokio::test]
