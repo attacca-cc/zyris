@@ -24,6 +24,10 @@ zyris = { version = "0.1.0", path = "../zyris", features = ["enroll"] }
 zyris-attacca = { version = "0.1.0", path = "../zyris-attacca" }
 zyris-caps = { version = "0.1.0", path = "../zyris-caps" }
 zyris-capkit = { version = "0.1.0", path = "../zyris-capkit" }
+zyris-p2p = { version = "0.1.0", path = "../zyris-p2p", optional = true }
+anyhow = { version = "1", optional = true }
+# For the `PeerConfirmer` impl below — the trait is `#[async_trait]`, so an implementor needs it too.
+async-trait = { workspace = true, optional = true }
 
 [features]
 # Off by default so `cargo build --workspace` needs no X11/Wayland development packages. Turn it on
@@ -31,3 +35,14 @@ zyris-capkit = { version = "0.1.0", path = "../zyris-capkit" }
 #     cargo run -p zyris-hello --features desktop
 # On Linux that build needs the libraries in this repo's `flake.nix`; `nix develop` provides them.
 desktop = ["zyris-capkit/desktop", "zyris-capkit/input-wayland"]
+# Node-to-node file transfer: announces `file_transfer`, publishes this node's peer endpoint so
+# others can look it up, and accepts incoming peer connections. Off by default because it binds a
+# UDP socket and writes to disk — a node should opt into both.
+#     cargo run -p zyris-hello --features transfer
+transfer = [
+    "zyris-capkit/transfer-send",
+    "zyris-capkit/transfer-listen",
+    "dep:zyris-p2p",
+    "dep:anyhow",
+    "dep:async-trait",
+]
