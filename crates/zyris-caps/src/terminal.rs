@@ -146,7 +146,9 @@ pub trait Terminal {
     /// - `command`: a shell one-liner, run through `/bin/sh -c` on Unix (honouring `shell`, which
     ///   defaults to `/bin/sh`) or `cmd /C` on Windows (`shell` is ignored there — use `argv` to
     ///   pick a Windows program). Use this only when you actually need shell features (pipes,
-    ///   redirection, globbing).
+    ///   redirection, globbing). On Unix the whole string is handed to the shell as **one argument**,
+    ///   so embedded single- or double-quotes reach the shell exactly as written — no escaping, no
+    ///   base64 encoding. `echo "hello"` and `echo 'hello'` run directly.
     /// - `argv`: a program and its argument list, run **without any shell**. Nothing is re-quoted
     ///   or re-interpreted: spaces, quotes, `$`, backticks and `%` inside an element reach the
     ///   program exactly as given. This is the escaping-free path — prefer it for anything longer
