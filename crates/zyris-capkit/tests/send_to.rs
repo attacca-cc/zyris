@@ -170,6 +170,9 @@ impl AttaccaApi for StubRendezvous {
     async fn list_nodes(&self) -> Result<Vec<ZNode>> {
         unused()
     }
+    async fn delete_node(&self, _node_id: String) -> Result<()> {
+        unused()
+    }
     async fn peer_publish(&self, _endpoint_id: String, _addrs: Vec<String>) -> Result<()> {
         unused()
     }
