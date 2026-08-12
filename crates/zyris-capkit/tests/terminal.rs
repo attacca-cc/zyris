@@ -42,6 +42,29 @@ async fn exec_runs_a_command() {
     assert!(!out.timed_out);
 }
 
+/// `command` 모드(셸 one-liner)는 한 문자열을 그대로 `sh -c`에 넘기므로, 안에 든
+/// 단일/이중 따옴표는 그대로 셸에 닿아야 한다 — Attacca가 따옴표 때문에 base64로
+/// 우회하지 않아도 되는 이유다.
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_command_mode_passes_embedded_quotes_to_the_shell() {
+    let term = connect(PtyTerminal::default()).await;
+
+    let out = term
+        .exec(Some("echo \"hello dq\"".into()), None, None, Some(5000), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout.trim(), "hello dq");
+
+    let out = term
+        .exec(Some("echo 'hello sq'".into()), None, None, Some(5000), None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout.trim(), "hello sq");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn exec_resolves_cwd() {
