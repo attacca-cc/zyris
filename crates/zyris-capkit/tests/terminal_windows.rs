@@ -50,12 +50,24 @@ fn powershell(script: &str) -> (Option<Vec<String>>, Option<String>) {
 ///
 /// Both quote kinds, a `$`, a backtick and a `%` — every one of them a character that means
 /// something to some layer between here and the interpreter.
+///
+/// **The backtick is doubled on purpose, and the first version of this test got it wrong.** Inside
+/// a PowerShell double-quoted string the backtick is *PowerShell's* escape character, so a lone
+/// `` ` `` before a `b` is the escape for backspace and the script asked for one. It duly arrived:
+/// the assertion failed with `\u{8}acktick`, which is not a transport mangling anything — it is
+/// the interpreter doing exactly what its own quoting rules say. Doubling it is how PowerShell
+/// spells a literal backtick, and that is what this asserts survives.
+///
+/// The distinction is the whole point of the file. This suite exists to catch the transport
+/// altering a script; a test that trips over the interpreter's own syntax reports a fault in the
+/// wrong place, and would have had someone rewriting `Terminal::exec`'s documentation over a
+/// mistake in the example.
 #[tokio::test]
 async fn the_documented_powershell_pattern_carries_a_script_with_quotes_in_it() {
     let term = connect(PtyTerminal::default()).await;
     let (argv, stdin) = powershell(
         r#"$x = 'single'
-Write-Output "double $x and `backtick` and 100% and 'nested'"
+Write-Output "double $x and ``backtick`` and 100% and 'nested'"
 "#,
     );
 
