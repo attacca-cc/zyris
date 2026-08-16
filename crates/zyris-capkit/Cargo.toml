@@ -92,3 +92,8 @@ zyris = { version = "0.1.0", path = "../zyris", default-features = false, featur
 # a dependency of the crate is not visible to its integration tests, hence the repeat.
 sha2 = "0.10"
 hex = "0.4"
+# `iroh::test_utils::run_relay_server`, for the one test that has to have a relay in the path.
+# A dev-dependency, so nothing a node ships carries it. Named here rather than reached through
+# `zyris_p2p::iroh` because `test-utils` is a feature of iroh itself, and a re-export cannot turn
+# on a feature of the crate it re-exports.
+iroh = { version = "1", features = ["test-utils"] }

@@ -898,3 +898,141 @@ async fn the_iroh_link_carries_a_real_transfer() {
     .await
     .expect("the iroh-backed transfer exceeded its deadline");
 }
+
+/// The same transfer as above, with **no direct path in existence** — the relay carries all of it.
+///
+/// This is the path nothing had ever run. Every other test that touches a real socket does it on
+/// loopback with `RelayMode::Disabled`, which is right for what those tests are about and left the
+/// relay fallback — the thing that makes a transfer possible at all between two machines behind
+/// NAT — carried by reasoning alone. The live run that finally exercised the stack hole-punched
+/// straight through, both directions, and so did not exercise it either.
+///
+/// It is the shape of defect this project has already been bitten by three times: something only
+/// one side needs, on a path the other side never takes, invisible while the common case keeps
+/// working. The day the relay is needed is the day two machines cannot reach each other, which is
+/// not the day to find out it never worked.
+///
+/// `clear_ip_transports()` is what makes the claim honest. It takes the direct path away rather
+/// than hoping the endpoints fail to find one, so a pass here cannot be a hole punch that happened
+/// to be quick. `iroh::test_utils::run_relay_server` supplies a real relay in-process — no network,
+/// no deployment.
+///
+/// The `direct` assertion is half the point. `send_to` fills it from `is_direct`, which reads
+/// iroh's address table after the fact; `true` here would mean that function claims a direct path
+/// on a connection that had none. A receipt that lies about where the bytes went is worse than a
+/// slow transfer.
+#[tokio::test]
+async fn a_transfer_completes_when_only_a_relay_can_carry_it() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let (relay_map, _relay_url, _relay_guard) =
+            iroh::test_utils::run_relay_server().await.unwrap();
+
+        // Both endpoints are built the same way, and the last two lines are the ones that matter:
+        // this relay is the only one that exists, and there is no direct transport at all.
+        async fn relay_only(map: iroh::RelayMap, key: iroh::SecretKey) -> iroh::Endpoint {
+            iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(key)
+                .alpns(vec![zyris_p2p::transport::ALPN.to_vec()])
+                // The test relay mints its own certificate, which normal verification refuses.
+                .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+                .relay_mode(iroh::RelayMode::Custom(map))
+                .clear_ip_transports()
+                .bind()
+                .await
+                .unwrap()
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let inbox = tempfile::tempdir().unwrap();
+        let undo = tempfile::tempdir().unwrap();
+        let pins = tempfile::tempdir().unwrap();
+        // Big enough to span many frames, so this is a transfer over the relay and not one packet
+        // that happened to arrive.
+        let content = b"through the relay".repeat(4000);
+        tokio::fs::write(root.path().join("report.pdf"), &content).await.unwrap();
+
+        let receiving_key = iroh::SecretKey::generate();
+        let receiving_id = receiving_key.public().to_string();
+        let receiving_endpoint = relay_only(relay_map.clone(), receiving_key).await;
+        // With no IP transports the relay home is the only address it has, so dialing before that
+        // exists is a race rather than a failure worth asserting on.
+        receiving_endpoint.online().await;
+        assert_eq!(
+            receiving_endpoint.addr().ip_addrs().count(),
+            0,
+            "the receiver still has a direct address, so this test would not be about the relay"
+        );
+
+        let receiver_config = TransferConfig {
+            inbox: inbox.path().to_path_buf(),
+            undo: undo.path().to_path_buf(),
+            ..TransferConfig::default()
+        };
+        let accepting = receiving_endpoint.clone();
+        let receiver_task = tokio::spawn(async move {
+            let pending = zyris_p2p::peer::accept_next(&accepting).await.unwrap();
+            let (_peer, transport) =
+                zyris_p2p::peer::establish(pending, Duration::from_secs(30)).await.unwrap();
+            let receiving = LocalPeerTransfer::receiver_pending(receiver_config, "a".to_string());
+            let node = Node::builder()
+                .name("b")
+                .kind(NodeKind::Cli)
+                .capability(PeerTransferServer(receiving.clone()))
+                .build()
+                .unwrap();
+            let conn = node.accept(transport, zyris::AcceptOptions::default()).await.unwrap();
+            let back: PeerTransferClient =
+                conn.wait_capability(Duration::from_secs(15)).await.unwrap();
+            receiving.set_peer(back);
+            conn
+        });
+
+        let sending_endpoint = relay_only(relay_map.clone(), iroh::SecretKey::generate()).await;
+        sending_endpoint.online().await;
+
+        // `addrs` is empty and `relay_url` is `None`, which is not a gap in the fixture — it is the
+        // situation a node behind NAT is actually in. There is nothing to publish, and the sending
+        // endpoint reaches the relay through its own relay map.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let transfer = LocalFileTransfer::new(
+            FileTransferConfig {
+                root: root.path().to_path_buf(),
+                inbox: inbox.path().to_path_buf(),
+                node_id: "sender-node".to_string(),
+                wire_deadline: Duration::from_secs(60),
+            },
+            rendezvous(Ok(ZPeerAddr {
+                node_id: "node-laptop".to_string(),
+                slug: "laptop".to_string(),
+                endpoint_id: receiving_id,
+                addrs: Vec::new(),
+                relay_url: None,
+                online: true,
+            }))
+            .await,
+            TofuStore::new(pins.path().join("peers.json")),
+            Arc::new(AlwaysConfirm { asked: asked.clone() }),
+            Arc::new(zyris_capkit::transfer::IrohPeerLink::new(sending_endpoint.clone())),
+        );
+
+        let receipt =
+            transfer.send_to("laptop".into(), "report.pdf".into(), None, None).await.unwrap();
+        let _receiving_conn = receiver_task.await.unwrap();
+
+        assert!(!receipt.pending, "{receipt:?}");
+        assert_eq!(receipt.bytes, content.len() as u64);
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "an unpinned peer is confirmed exactly once");
+        let landed = inbox.path().join("a").join("report.pdf");
+        assert_eq!(tokio::fs::read(&landed).await.unwrap(), content, "the bytes did not survive");
+        assert!(
+            !receipt.direct,
+            "there was no direct path to take, so a receipt claiming one means `is_direct` is \
+             misreading iroh's address table: {receipt:?}"
+        );
+
+        drop(sending_endpoint);
+        drop(receiving_endpoint);
+    })
+    .await
+    .expect("the relayed transfer exceeded its deadline");
+}
