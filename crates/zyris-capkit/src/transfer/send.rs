@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -117,15 +117,61 @@ impl IrohPeerLink {
     pub fn new(endpoint: iroh::Endpoint) -> IrohPeerLink {
         IrohPeerLink { endpoint }
     }
+
+    /// Dials the peer, with the rendezvous's addresses as hints and **iroh's own discovery as the
+    /// fallback**.
+    ///
+    /// The two steps are not redundant, and leaving the second one out is how a transfer that
+    /// should work fails. A peer publishes the addresses it can see on itself, and behind NAT — a
+    /// container, a laptop on wifi — those are private ones that mean nothing here. Handing iroh an
+    /// `EndpointAddr` carrying them is not a hint, it is an assertion: iroh takes it to mean the
+    /// caller knows where this peer is, dials only there, and never asks discovery. So a peer that
+    /// is perfectly reachable is refused because of the addresses it published about itself.
+    ///
+    /// Measured against a node in a Kubernetes sandbox on another continent: dialing its published
+    /// address failed, and dialing the same endpoint id with no hints at all connected in 1.1
+    /// seconds. Both machines were on public n0 relays, and neither had been told anything about
+    /// the other's.
+    ///
+    /// The hints are still tried first, because when they *are* reachable — two machines on one
+    /// desk — they are the direct path, and discovery would be a slower route to the same place.
+    async fn dial(&self, addr: &ZPeerAddr) -> Result<zyris_p2p::transport::IrohTransport> {
+        let hinted = endpoint_addr(addr)?;
+        let hinted_at_something = hinted.ip_addrs().next().is_some() || hinted.relay_urls().next().is_some();
+
+        let first = match zyris_p2p::peer::dial(&self.endpoint, hinted).await {
+            Ok(transport) => return Ok(transport),
+            Err(e) if !hinted_at_something => {
+                // Nothing was hinted, so that attempt already was the discovery one.
+                return Err(refuse("peer_unreachable", e.to_string()).retriable(true));
+            }
+            Err(e) => e,
+        };
+
+        let id = addr.endpoint_id.parse::<iroh::EndpointId>().map_err(|e| {
+            refuse("peer_unreachable", format!("{} is not a usable endpoint id: {e}", addr.endpoint_id))
+        })?;
+        tracing::debug!(
+            endpoint_id = %addr.endpoint_id,
+            error = %first,
+            "the peer's published addresses did not reach it; asking discovery"
+        );
+        zyris_p2p::peer::dial(&self.endpoint, iroh::EndpointAddr::new(id)).await.map_err(|second| {
+            // Both failures, because they usually say different things: the first is what the
+            // published addresses did, the second is what discovery could not find.
+            refuse(
+                "peer_unreachable",
+                format!("its published addresses: {first}; and by discovery: {second}"),
+            )
+            .retriable(true)
+        })
+    }
 }
 
 #[async_trait::async_trait]
 impl PeerLink for IrohPeerLink {
     async fn open(&self, addr: &ZPeerAddr, sender: LocalPeerTransfer) -> Result<PeerSession> {
-        let endpoint_addr = endpoint_addr(addr)?;
-        let transport = zyris_p2p::peer::dial(&self.endpoint, endpoint_addr)
-            .await
-            .map_err(|e| refuse("peer_unreachable", e.to_string()).retriable(true))?;
+        let transport = self.dial(addr).await?;
         // One capability on this link and one only. The peer link is not a general-purpose node
         // connection that happens to be filtered down — it is built with nothing else on it.
         let node = Node::builder()
@@ -203,16 +249,55 @@ impl Default for FileTransferConfig {
     }
 }
 
+/// The client this node asks Attacca where a peer is — **replaceable, because the connection it
+/// belongs to is**.
+///
+/// It used to be a `OnceLock`, on the reasoning that a connection has one client and a slot that
+/// can be overwritten is a slot that can be swapped. The first half is true and the second is the
+/// wrong conclusion: a node's websocket drops and comes back — a laptop sleeps, a server rolls, a
+/// network blips — and `Runner` reconnects and calls `set_api` again with a client for the new
+/// connection. A write-once slot ignores that call and keeps the client bound to the dead one, so
+/// every lookup after the first disconnect fails with `connection lost`, for good, on a node that
+/// otherwise looks perfectly healthy. Observed live: a send worked, the socket reset once, and
+/// every send after it failed identically until the process was restarted.
+///
+/// Nothing outside this node can reach `set`. The client always comes from a connection the node
+/// itself established, so "could be overwritten" was never a way in — only a way to stay broken.
+///
+/// Cloning shares the slot, which is what lets one client serve both the send side and
+/// [`super::listen::serve_peers`]'s directory.
+#[derive(Clone, Default)]
+pub struct Rendezvous(Arc<RwLock<Option<Arc<AttaccaApiClient>>>>);
+
+
+impl Rendezvous {
+    /// Replaces the client. Call on every connect.
+    pub fn set(&self, api: AttaccaApiClient) {
+        // A poisoned lock here would mean a panic while swapping a client, which is not a reason to
+        // take the node down with it — the worst case is one stale client, which the next connect
+        // replaces anyway.
+        if let Ok(mut slot) = self.0.write() {
+            *slot = Some(Arc::new(api));
+        }
+    }
+
+    /// The current client, or `None` before the first connect.
+    ///
+    /// Returns an owned handle rather than a guard, so no caller can hold the lock across an
+    /// `await` and block the next reconnect from installing its client.
+    pub fn get(&self) -> Option<Arc<AttaccaApiClient>> {
+        self.0.read().ok().and_then(|slot| slot.clone())
+    }
+}
+
 /// The reference `file_transfer` implementation.
 #[derive(Clone)]
 pub struct LocalFileTransfer {
     config: FileTransferConfig,
-    /// Behind an `Arc<OnceLock>` for two reasons at once: the generated capability clients are not
-    /// `Clone` and this type has to be, and the client does not exist yet when a node builds its
-    /// capabilities. It arrives on the connection this node makes to Attacca, which is after
-    /// `Runner::run` has already been handed everything it announces. Same shape, and the same
-    /// reason, as `LocalPeerTransfer::set_peer`.
-    api: Arc<OnceLock<AttaccaApiClient>>,
+    /// The rendezvous client, which does not exist yet when a node builds its capabilities: it
+    /// arrives on the connection to Attacca, after `Runner::run` has been handed everything this
+    /// node announces. See [`Rendezvous`] for why it is replaceable rather than write-once.
+    api: Rendezvous,
     tofu: TofuStore,
     confirmer: Arc<dyn PeerConfirmer>,
     link: Arc<dyn PeerLink>,
@@ -243,14 +328,21 @@ impl LocalFileTransfer {
         confirmer: Arc<dyn PeerConfirmer>,
         link: Arc<dyn PeerLink>,
     ) -> LocalFileTransfer {
-        LocalFileTransfer { config, api: Arc::new(OnceLock::new()), tofu, confirmer, link }
+        LocalFileTransfer { config, api: Rendezvous::default(), tofu, confirmer, link }
     }
 
-    /// Plugs in the rendezvous client. A second call is ignored, the same way `set_peer` is: a
-    /// connection has one client, and a slot that could be overwritten is a slot that could be
-    /// swapped.
+    /// Plugs in the rendezvous client for the connection this node is on now.
+    ///
+    /// Call it on **every** connect, not just the first. See [`Rendezvous`].
     pub fn set_api(&self, api: AttaccaApiClient) {
-        let _ = self.api.set(api);
+        self.api.set(api);
+    }
+
+    /// The same handle this transfer looks peers up through, for a node that also wants to hand it
+    /// to [`super::listen::serve_peers`] as its directory — one client, kept current in one place,
+    /// serving both directions.
+    pub fn rendezvous(&self) -> Rendezvous {
+        self.api.clone()
     }
 
     /// Resolves a caller-supplied path **and refuses anything outside the root**.
@@ -326,7 +418,8 @@ impl LocalFileTransfer {
     /// tolerance; that one asks what the caller actually said, and folding there would quietly
     /// merge two slots into one.
     async fn look_up_peer(&self, node: &str) -> Result<ZPeerAddr> {
-        let Some(api) = self.api.get() else {
+        let current = self.api.get();
+        let Some(api) = current else {
             return Err(refuse(
                 "rendezvous_unavailable",
                 "this node is not connected to Attacca yet, so there is nothing to ask where \

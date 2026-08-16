@@ -32,6 +32,13 @@ pub(crate) const CONSUME_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before anything opens a TLS connection, and before the logger, because the panic this avoids
+    // takes the whole node down on the first connect and leaves the reason in a backtrace rather
+    // than in the log. `zyris_p2p::tls` explains what the two providers are and why neither this
+    // node nor its configuration can settle it.
+    #[cfg(feature = "transfer")]
+    zyris_p2p::tls::install_default_provider();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -44,9 +51,23 @@ async fn main() -> ExitCode {
     // `$ZYRIS_NODE_NAME`, or this machine's hostname.
     let greeter = RandomGreeter::new(runner.node_name());
 
+    // `peers:write` is what lets a node publish its own peer address and look up another one on
+    // the same account. Without it `peer_publish` comes back `ForbiddenScope`, nothing is ever
+    // published, and `peer_lookup` has nothing to answer with — so no peer can find this node and
+    // no transfer can start. That is not a degraded transfer, it is the absence of one, and the
+    // only sign of it is a warning in the log at connect time.
+    //
+    // Asked for only when the feature is on, because the consent screen should name what this node
+    // will actually do. A node built without transfer has no use for it. Turning the feature on
+    // later means enrolling again — scopes are granted with the credential, not after it.
+    #[cfg(feature = "transfer")]
+    let scopes: &[&str] = &["agents:read", "peers:write"];
+    #[cfg(not(feature = "transfer"))]
+    let scopes: &[&str] = &["agents:read"];
+
     let runner = runner
         .kind(NodeKind::Service)
-        .request_scopes(["agents:read"])
+        .request_scopes(scopes.iter().copied())
         .capability(HelloServer(greeter))
         .capability(TerminalServer(PtyTerminal::default()));
 
