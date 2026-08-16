@@ -117,15 +117,61 @@ impl IrohPeerLink {
     pub fn new(endpoint: iroh::Endpoint) -> IrohPeerLink {
         IrohPeerLink { endpoint }
     }
+
+    /// Dials the peer, with the rendezvous's addresses as hints and **iroh's own discovery as the
+    /// fallback**.
+    ///
+    /// The two steps are not redundant, and leaving the second one out is how a transfer that
+    /// should work fails. A peer publishes the addresses it can see on itself, and behind NAT — a
+    /// container, a laptop on wifi — those are private ones that mean nothing here. Handing iroh an
+    /// `EndpointAddr` carrying them is not a hint, it is an assertion: iroh takes it to mean the
+    /// caller knows where this peer is, dials only there, and never asks discovery. So a peer that
+    /// is perfectly reachable is refused because of the addresses it published about itself.
+    ///
+    /// Measured against a node in a Kubernetes sandbox on another continent: dialing its published
+    /// address failed, and dialing the same endpoint id with no hints at all connected in 1.1
+    /// seconds. Both machines were on public n0 relays, and neither had been told anything about
+    /// the other's.
+    ///
+    /// The hints are still tried first, because when they *are* reachable — two machines on one
+    /// desk — they are the direct path, and discovery would be a slower route to the same place.
+    async fn dial(&self, addr: &ZPeerAddr) -> Result<zyris_p2p::transport::IrohTransport> {
+        let hinted = endpoint_addr(addr)?;
+        let hinted_at_something = hinted.ip_addrs().next().is_some() || hinted.relay_urls().next().is_some();
+
+        let first = match zyris_p2p::peer::dial(&self.endpoint, hinted).await {
+            Ok(transport) => return Ok(transport),
+            Err(e) if !hinted_at_something => {
+                // Nothing was hinted, so that attempt already was the discovery one.
+                return Err(refuse("peer_unreachable", e.to_string()).retriable(true));
+            }
+            Err(e) => e,
+        };
+
+        let id = addr.endpoint_id.parse::<iroh::EndpointId>().map_err(|e| {
+            refuse("peer_unreachable", format!("{} is not a usable endpoint id: {e}", addr.endpoint_id))
+        })?;
+        tracing::debug!(
+            endpoint_id = %addr.endpoint_id,
+            error = %first,
+            "the peer's published addresses did not reach it; asking discovery"
+        );
+        zyris_p2p::peer::dial(&self.endpoint, iroh::EndpointAddr::new(id)).await.map_err(|second| {
+            // Both failures, because they usually say different things: the first is what the
+            // published addresses did, the second is what discovery could not find.
+            refuse(
+                "peer_unreachable",
+                format!("its published addresses: {first}; and by discovery: {second}"),
+            )
+            .retriable(true)
+        })
+    }
 }
 
 #[async_trait::async_trait]
 impl PeerLink for IrohPeerLink {
     async fn open(&self, addr: &ZPeerAddr, sender: LocalPeerTransfer) -> Result<PeerSession> {
-        let endpoint_addr = endpoint_addr(addr)?;
-        let transport = zyris_p2p::peer::dial(&self.endpoint, endpoint_addr)
-            .await
-            .map_err(|e| refuse("peer_unreachable", e.to_string()).retriable(true))?;
+        let transport = self.dial(addr).await?;
         // One capability on this link and one only. The peer link is not a general-purpose node
         // connection that happens to be filtered down — it is built with nothing else on it.
         let node = Node::builder()
