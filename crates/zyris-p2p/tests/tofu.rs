@@ -684,6 +684,82 @@ async fn a_hand_edited_ledger_in_a_non_canonical_spelling_reads_the_same_as_cano
 /// Minimal RFC 4648 base32 (no padding) encoder — just enough to construct a second, valid
 /// spelling of an `EndpointId` for the test above, matching what `iroh::EndpointId::from_str`'s
 /// non-hex branch actually decodes (`decode_base32_hex` in `iroh-base`, which uppercases before
+#[tokio::test]
+async fn forgetting_a_pin_makes_the_next_key_a_first_sight_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    let old = fresh_endpoint_id();
+    let new = fresh_endpoint_id();
+    store.pin_preapproved("kitchen-pi", &old).await.unwrap();
+    assert!(matches!(store.check("kitchen-pi", &new).await, Err(TofuError::Changed { .. })));
+
+    assert!(store.forget("kitchen-pi").await.unwrap(), "there was a pin to remove");
+
+    // The point of the operation, and the reason it is not automatic: the refusal is gone, and
+    // whatever key turns up next is what gets pinned.
+    assert!(store.check("kitchen-pi", &new).await.is_ok());
+}
+
+/// Asking to forget something that is not pinned is already true, so it is not an error — but the
+/// answer has to say which of the two happened, or a caller cannot tell a person "there was no
+/// pin for that" from "removed it".
+#[tokio::test]
+async fn forgetting_what_was_never_pinned_says_so_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    assert!(!store.forget("never-seen").await.unwrap());
+}
+
+#[tokio::test]
+async fn forgetting_one_peer_leaves_the_others_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    let pi = fresh_endpoint_id();
+    let laptop = fresh_endpoint_id();
+    store.pin_preapproved("kitchen-pi", &pi).await.unwrap();
+    store.pin_preapproved("laptop", &laptop).await.unwrap();
+
+    store.forget("kitchen-pi").await.unwrap();
+
+    assert!(store.check("kitchen-pi", &fresh_endpoint_id()).await.is_ok(), "kitchen-pi is free");
+    assert!(
+        matches!(store.check("laptop", &fresh_endpoint_id()).await, Err(TofuError::Changed { .. })),
+        "laptop's pin was collateral damage"
+    );
+}
+
+/// It has to come off disk, not out of an in-memory copy — `forget` is the operation most likely
+/// to be run from a separate process (a CLI) while the node itself is running.
+#[tokio::test]
+async fn forgetting_reaches_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.json");
+    let key = fresh_endpoint_id();
+    TofuStore::new(&path).pin_preapproved("kitchen-pi", &key).await.unwrap();
+
+    TofuStore::new(&path).forget("kitchen-pi").await.unwrap();
+
+    assert!(TofuStore::new(&path).check("kitchen-pi", &fresh_endpoint_id()).await.is_ok());
+}
+
+#[tokio::test]
+async fn pins_lists_what_is_trusted_sorted_by_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TofuStore::new(dir.path().join("peers.json"));
+    assert!(store.pins().await.unwrap().is_empty(), "nothing is trusted before anything is pinned");
+
+    let pi = fresh_endpoint_id();
+    let laptop = fresh_endpoint_id();
+    store.pin_preapproved("kitchen-pi", &pi).await.unwrap();
+    store.pin_preapproved("laptop", &laptop).await.unwrap();
+
+    // Sorted, so the output a person reads does not reorder itself between runs.
+    assert_eq!(
+        store.pins().await.unwrap(),
+        vec![("kitchen-pi".to_string(), pi), ("laptop".to_string(), laptop)]
+    );
+}
+
 /// decoding, so the alphabet's case here does not matter to parsing). Not general-purpose —
 /// self-contained on purpose, to avoid pulling in `data_encoding` as a dependency for one test.
 fn base32_nopad(bytes: &[u8]) -> String {
