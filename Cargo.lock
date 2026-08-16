@@ -6181,6 +6181,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "iroh",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",

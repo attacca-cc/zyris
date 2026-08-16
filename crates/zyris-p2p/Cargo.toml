@@ -21,6 +21,9 @@ zyris-proto = { version = "0.1.0", path = "../zyris-proto" }
 
 [dev-dependencies]
 async-trait.workspace = true
+# Only so `tls`'s tests can ask whether a default provider exists. The module itself names no
+# rustls type: it installs whatever `iroh` picked, so the two can never disagree.
+rustls = { version = "0.23", default-features = false }
 schemars.workspace = true
 serde.workspace = true
 tempfile.workspace = true

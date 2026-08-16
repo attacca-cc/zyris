@@ -32,6 +32,13 @@ pub(crate) const CONSUME_WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Before anything opens a TLS connection, and before the logger, because the panic this avoids
+    // takes the whole node down on the first connect and leaves the reason in a backtrace rather
+    // than in the log. `zyris_p2p::tls` explains what the two providers are and why neither this
+    // node nor its configuration can settle it.
+    #[cfg(feature = "transfer")]
+    zyris_p2p::tls::install_default_provider();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

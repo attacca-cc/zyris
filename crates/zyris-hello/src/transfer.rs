@@ -50,13 +50,23 @@ impl Transfer {
         let inbox = dir("ZYRIS_TRANSFER_INBOX", "transfers/inbox")?;
         let undo = dir("ZYRIS_TRANSFER_UNDO", "transfers/undo")?;
         let pins = dir("ZYRIS_TRANSFER_PINS", "transfers")?;
+        let key_path = pins.join("peer_key");
 
         // `N0` brings relays and discovery, which is what makes a node behind NAT reachable at all
         // — but its relays are n0's public ones. They carry the connection, not its contents (the
         // QUIC session is end to end), yet they still see who talks to whom and when. A deployment
         // running its own relay says so with `ZYRIS_RELAY_URL`, and this logs which it ended up on
         // rather than leaving that to be discovered from a packet capture.
+        // **Handed a key, not left to generate one.** `zyris_p2p::key` writes it `0600` and reads
+        // the same one back next time, which is what makes this node the same node run to run.
+        // Without it iroh mints a fresh identity at every start, and a peer that pinned this one
+        // after comparing fingerprints would meet a stranger the next time it came up — the pin
+        // would expire with the process, which is not a pin. It hides well, too: the accept loop
+        // never consults a pin, so receiving keeps working and only sending breaks.
+        let secret = zyris_p2p::key::load_or_create(&key_path).await?;
+
         let builder = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(secret)
             .alpns(vec![zyris_p2p::transport::ALPN.to_vec()]);
         let builder = match std::env::var("ZYRIS_RELAY_URL").ok().filter(|u| !u.trim().is_empty()) {
             Some(url) => {
