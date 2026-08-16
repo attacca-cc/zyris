@@ -306,6 +306,43 @@ impl TofuStore {
         self.write(&ledger, &file_lock).await
     }
 
+    /// Removes a pin, and says whether there was one to remove.
+    ///
+    /// **Forgetting is not a small operation.** The next connection under this slug will be a
+    /// first sight again, so whatever key turns up then is what gets pinned — which is precisely
+    /// what [`Self::check`] refuses to let happen silently. That is the right behaviour for the
+    /// case this exists for (a peer was reinstalled, its key is legitimately new, and a human
+    /// established that out of band) and a hole in every other case. So this is deliberately not
+    /// reachable from anything automatic: it is for a person who has decided.
+    ///
+    /// `Ok(false)` for a slug that was not pinned. Not an error, because "make sure this is not
+    /// pinned" is a reasonable thing to ask and it is already true.
+    pub async fn forget(&self, peer_slug: &str) -> Result<bool, TofuError> {
+        let _guard = self.write_lock.lock().await;
+        self.ensure_parent_dir().await?;
+        let file_lock = self.acquire_lock_file().await?;
+        let mut ledger = self.read().await?;
+        if ledger.peers.remove(peer_slug).is_none() {
+            return Ok(false);
+        }
+        self.write(&ledger, &file_lock).await?;
+        Ok(true)
+    }
+
+    /// Every pin, as `(slug, endpoint_id)`, sorted by slug.
+    ///
+    /// For showing a person what this machine currently trusts. Reads without taking the write
+    /// lock: a listing that raced a concurrent pin would show the state from a moment earlier,
+    /// which is what any listing does, and blocking a writer to avoid that would be the worse
+    /// trade.
+    pub async fn pins(&self) -> Result<Vec<(String, String)>, TofuError> {
+        let ledger = self.read().await?;
+        let mut pins: Vec<(String, String)> =
+            ledger.peers.into_iter().map(|(slug, entry)| (slug, entry.endpoint_id)).collect();
+        pins.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(pins)
+    }
+
     /// The lock file's path. Appends a suffix rather than replacing the extension
     /// (`with_extension`) — a ledger that itself happened to end in `.lock` would make the
     /// lock and the ledger the same file, the same class of bug Phase 1 hit when a temp file
