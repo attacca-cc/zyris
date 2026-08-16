@@ -47,6 +47,7 @@ use zyris_p2p::iroh;
 use zyris_p2p::tofu::TofuStore;
 
 use super::peer::{LocalPeerTransfer, TransferConfig};
+use super::send::Rendezvous;
 
 /// How long a fetched node list is treated as current.
 pub const DEFAULT_DIRECTORY_TTL: Duration = Duration::from_secs(60);
@@ -71,6 +72,31 @@ pub trait PeerDirectory: Send + Sync {
 impl PeerDirectory for AttaccaApiClient {
     async fn peers(&self) -> Result<Vec<ZPeerEntry>> {
         AttaccaApi::peer_list(self).await
+    }
+}
+
+/// The accept loop starts once and runs for the life of the node, but the connection it was handed
+/// a client from does not: reconnects replace it. Handing `serve_peers` a bare `AttaccaApiClient`
+/// therefore pins the loop to the first connection, and after the first disconnect every refresh
+/// fails — so the cache goes stale and stays stale, and inbound peers are judged against whatever
+/// the account looked like at startup.
+///
+/// A [`Rendezvous`] is the same client kept current in one place. Give it to both this and the send
+/// side, call `set` on every connect, and neither has a connection of its own to go stale with.
+#[async_trait::async_trait]
+impl PeerDirectory for Rendezvous {
+    async fn peers(&self) -> Result<Vec<ZPeerEntry>> {
+        match self.get() {
+            Some(api) => AttaccaApi::peer_list(api.as_ref()).await,
+            // Not an empty list: that reads as "this account has no nodes" and would refuse every
+            // caller silently. An error keeps the cache's previous answer, which is the better
+            // guess while a reconnect is in flight.
+            None => Err(zyris::WireError::new(
+                zyris::ErrorCode::ConnectionLost,
+                "not connected to Attacca, so the peer list cannot be refreshed",
+            )
+            .into()),
+        }
     }
 }
 

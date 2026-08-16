@@ -143,11 +143,11 @@ impl Transfer {
         if self.listening.swap(true, Ordering::SeqCst) {
             return;
         }
-        let Ok(directory) = conn.wait_capability::<AttaccaApiClient>(super::CONSUME_WAIT).await
-        else {
-            self.listening.store(false, Ordering::SeqCst);
-            return;
-        };
+        // The loop below starts once and outlives this connection, so it is given the transfer's
+        // own rendezvous handle rather than this connection's client. `set_api` above keeps that
+        // handle current; a client captured here would be dead after the first reconnect and the
+        // cache behind it would never refresh again.
+        let directory = self.transfer.rendezvous();
         let endpoint = self.endpoint.clone();
         let config = self.config.clone();
         let tofu = self.tofu.clone();
