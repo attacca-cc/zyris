@@ -51,9 +51,23 @@ async fn main() -> ExitCode {
     // `$ZYRIS_NODE_NAME`, or this machine's hostname.
     let greeter = RandomGreeter::new(runner.node_name());
 
+    // `peers:write` is what lets a node publish its own peer address and look up another one on
+    // the same account. Without it `peer_publish` comes back `ForbiddenScope`, nothing is ever
+    // published, and `peer_lookup` has nothing to answer with — so no peer can find this node and
+    // no transfer can start. That is not a degraded transfer, it is the absence of one, and the
+    // only sign of it is a warning in the log at connect time.
+    //
+    // Asked for only when the feature is on, because the consent screen should name what this node
+    // will actually do. A node built without transfer has no use for it. Turning the feature on
+    // later means enrolling again — scopes are granted with the credential, not after it.
+    #[cfg(feature = "transfer")]
+    let scopes: &[&str] = &["agents:read", "peers:write"];
+    #[cfg(not(feature = "transfer"))]
+    let scopes: &[&str] = &["agents:read"];
+
     let runner = runner
         .kind(NodeKind::Service)
-        .request_scopes(["agents:read"])
+        .request_scopes(scopes.iter().copied())
         .capability(HelloServer(greeter))
         .capability(TerminalServer(PtyTerminal::default()));
 
