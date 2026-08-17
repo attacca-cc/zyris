@@ -301,8 +301,15 @@ impl Enroller {
     async fn authorize(&self) -> Result<AuthorizeResponse, EnrollError> {
         let response = self.post("/zyris/v1/device/authorize", &self.request).await?;
         if !response.status().is_success() {
+            // "The server rejected this node" is a claim about the account, and a human reading it
+            // goes looking at their settings. A 502 supports no such claim, so it is reported as
+            // what it is: the server could not be reached right now, try again.
             let error = parse_error(response).await;
-            return Err(EnrollError::Rejected(describe(&error)));
+            return Err(if error.is_transient() {
+                EnrollError::Transport(describe(&error))
+            } else {
+                EnrollError::Rejected(describe(&error))
+            });
         }
         response.json().await.map_err(|e| EnrollError::Transport(e.to_string()))
     }
@@ -404,12 +411,18 @@ impl Progress {
 }
 
 async fn parse_error(response: reqwest::Response) -> ErrorResponse {
-    let status = response.status();
-    response.json::<ErrorResponse>().await.unwrap_or(ErrorResponse {
-        error: format!("http_{}", status.as_u16()),
+    let status = response.status().as_u16();
+    let mut error = response.json::<ErrorResponse>().await.unwrap_or(ErrorResponse {
+        error: format!("http_{status}"),
         error_description: None,
         interval: None,
-    })
+        status: None,
+    });
+    // Stamped on both paths, not just the synthesised one: a proxy can return 503 with a
+    // perfectly well-formed error body, and that is still the transport failing rather than the
+    // grant being refused. `#[serde(skip)]` means the parsed value arrives here as `None`.
+    error.status = Some(status);
+    error
 }
 
 fn describe(error: &ErrorResponse) -> String {
@@ -613,6 +626,7 @@ mod tests {
             error: "http_503".into(),
             error_description: None,
             interval: None,
+            status: Some(503),
         };
         assert_eq!(describe(&error), "http_503");
     }
