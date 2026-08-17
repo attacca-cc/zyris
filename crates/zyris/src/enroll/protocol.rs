@@ -72,6 +72,22 @@ pub struct ErrorResponse {
     pub error_description: Option<String>,
     #[serde(default)]
     pub interval: Option<i32>,
+    /// The HTTP status the body arrived with. **Not part of the wire format** — the transport
+    /// stamps it on, because the body alone cannot distinguish the two things that matter here:
+    /// the server answering "no" and the server not answering at all. An edge returning 502 with
+    /// an HTML page is read as `http_502`, which looks exactly like an unrecognised error code.
+    #[serde(skip)]
+    pub status: Option<u16>,
+}
+
+impl ErrorResponse {
+    /// Whether the status says the server could not answer, rather than that it answered.
+    ///
+    /// 429 is in here with the 5xx family because it means the same thing to a caller deciding
+    /// whether to ask again: the request was never judged on its merits.
+    pub fn is_transient(&self) -> bool {
+        matches!(self.status, Some(status) if status == 429 || (500..600).contains(&status))
+    }
 }
 
 /// What one poll of the token endpoint means to the node.
@@ -128,6 +144,15 @@ impl PollState {
             }
             "expired_token" => PollOutcome::Expired,
             "access_denied" => PollOutcome::Denied,
+            // A 502 from an edge in front of Attacca is not an answer about this grant. The code
+            // is still unexpired and the person may not even have reached the screen yet, so
+            // giving up throws away a live code and makes them start over — which is what a
+            // single 502 mid-poll actually did. Back off and ask again; `expires_in` already
+            // bounds how long that can go on.
+            _ if response.is_transient() => {
+                self.interval = clamp_interval(self.interval + SLOW_DOWN_STEP);
+                PollOutcome::KeepWaiting(self.interval)
+            }
             other => PollOutcome::Fatal(match &response.error_description {
                 Some(description) => format!("{other}: {description}"),
                 None => other.to_string(),
@@ -171,6 +196,13 @@ pub fn classify_refresh_error(error: &ErrorResponse) -> RefreshOutcome {
         Some(description) => format!("{}: {description}", error.error),
         None => error.error.clone(),
     };
+    // The status outranks the body. Only `invalid_grant` kills a credential, and a server that
+    // could not answer has not told us the grant is dead — even if something in front of it put
+    // that word in the body. Both callers answer `Dead` by deleting the credential, so the cost
+    // of reading one 500 wrong is a fleet that has to re-enrol by hand.
+    if error.is_transient() {
+        return RefreshOutcome::Unavailable(described);
+    }
     match error.error.as_str() {
         "invalid_grant" => RefreshOutcome::Dead(described),
         _ => RefreshOutcome::Unavailable(described),
@@ -232,6 +264,7 @@ mod tests {
             error: kind.to_string(),
             error_description: Some("because".to_string()),
             interval,
+            status: None,
         }
     }
 
@@ -315,6 +348,48 @@ mod tests {
         assert!(message.contains("because"), "the server's reason must survive");
     }
 
+    /// Observed live: a Windows node polling with ~5 minutes left on its code took one 502 from
+    /// the edge and printed "the server rejected this node", ending the attempt. The code was
+    /// still good and the person had not yet approved it.
+    #[test]
+    fn a_transient_5xx_keeps_waiting_instead_of_ending_the_attempt() {
+        for status in [429u16, 500, 502, 503, 504] {
+            let mut state = PollState::new(5);
+            let response = ErrorResponse {
+                error: format!("http_{status}"),
+                error_description: None,
+                interval: None,
+                status: Some(status),
+            };
+            let PollOutcome::KeepWaiting(interval) = state.on_error(&response) else {
+                panic!("{status} ended the enrollment; it says nothing about the grant")
+            };
+            assert_eq!(
+                interval,
+                Duration::from_secs(10),
+                "an unreachable server should be asked less often, not given up on"
+            );
+        }
+    }
+
+    /// The other edge of the same rule. Retrying must not swallow answers the server actually
+    /// gave — a 400 naming an error code this client does not know is a real refusal, and polling
+    /// on until the code expires would hide it behind a timeout.
+    #[test]
+    fn a_four_hundred_with_an_unknown_code_is_still_fatal() {
+        let mut state = PollState::new(5);
+        let response = ErrorResponse {
+            error: "unsupported_grant_type".into(),
+            error_description: Some("because".into()),
+            interval: None,
+            status: Some(400),
+        };
+        let PollOutcome::Fatal(message) = state.on_error(&response) else {
+            panic!("a 400 is the server answering, and this client cannot honour that answer")
+        };
+        assert!(message.contains("unsupported_grant_type"));
+    }
+
     /// The one answer that means "this credential is gone" — and the reason has to survive, because
     /// it is what gets logged immediately before a file is deleted.
     #[test]
@@ -323,6 +398,23 @@ mod tests {
         let RefreshOutcome::Dead(reason) = outcome else { panic!("expected dead") };
         assert!(reason.contains("invalid_grant"));
         assert!(reason.contains("because"), "the server's reason must survive");
+    }
+
+    /// The status outranks the body. Both callers answer `Dead` by deleting the credential, so a
+    /// proxy that manages to put `invalid_grant` in front of a 500 — a cached body, a error page
+    /// assembled from the wrong template — must not be able to unenroll a fleet.
+    #[test]
+    fn a_five_hundred_cannot_kill_a_credential_whatever_the_body_says() {
+        let response = ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: Some("because".into()),
+            interval: None,
+            status: Some(500),
+        };
+        assert!(
+            matches!(classify_refresh_error(&response), RefreshOutcome::Unavailable(_)),
+            "a server that could not answer has not told us the grant is dead"
+        );
     }
 
     /// The asymmetry this classification exists for: an outage must never unenroll a node. Every one
@@ -342,7 +434,7 @@ mod tests {
     #[test]
     fn an_unreadable_error_body_is_transient_not_fatal() {
         let synthetic =
-            ErrorResponse { error: "http_503".into(), error_description: None, interval: None };
+            ErrorResponse { error: "http_503".into(), error_description: None, interval: None, status: Some(503) };
         let RefreshOutcome::Unavailable(reason) = classify_refresh_error(&synthetic) else {
             panic!("a body we could not read tells us nothing about the grant")
         };
