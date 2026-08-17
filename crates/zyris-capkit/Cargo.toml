@@ -13,10 +13,18 @@ hex = { version = "0.4", optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 sha2 = { version = "0.10", optional = true }
-# A fork, for one addition: `Enigo::move_mouse_on_output`. Absolute motion under
-# `wlr-virtual-pointer` is output-relative, so upstream's whole-desktop `move_mouse` can only ever
-# land on the output its pointer was created against — see `EnigoInput::move_to`.
-enigo = { version = "0.6.1", git = "https://github.com/mincomk/enigo", default-features = false, features = ["x11rb"], optional = true }
+# Our enigo fork. It carries two things upstream does not: `Enigo::move_mouse_on_output`, because
+# absolute motion under `wlr-virtual-pointer` is output-relative and upstream's whole-desktop
+# `move_mouse` can only ever land on the output its pointer was created against (see
+# `EnigoInput::move_to`); and Shift for level-1 keysyms on libei, without which `!` arrives as `1`
+# under GNOME.
+#
+# **Fixes belong in that repository, not in a `[patch]` here or downstream.** A local path patch
+# builds on exactly one machine, and the Shift fix sat uncommitted in one for a while.
+#
+# Pinned by rev for the same reason the three zyris consumers pin zyris: a floating default branch
+# means the desktop feature can change under a build nobody touched.
+enigo = { version = "0.6.1", git = "https://github.com/ridanit-ruma/enigo-zyris", rev = "98edfe35f3400f5e4c92df58840da2e7dfc9d879", default-features = false, features = ["x11rb"], optional = true }
 futures-util = { workspace = true, optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"], optional = true }
 # process-group kill (`kill(-pgid, SIGKILL)`) for `exec` timeouts on Unix.
