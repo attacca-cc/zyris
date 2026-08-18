@@ -9,7 +9,9 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use zyris::{Chunk, Node, NodeKind};
 use zyris_caps::peer_transfer::{PeerTransfer, PeerTransferClient, PeerTransferServer, TransferOffer};
-use zyris_capkit::transfer::{LocalPeerTransfer, TransferConfig, part_path};
+use zyris_capkit::transfer::{
+    InFlight, LocalPeerTransfer, TRANSFER_IN_FLIGHT, TransferConfig, part_path,
+};
 
 fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -802,4 +804,80 @@ async fn pull_streams_starting_from_the_offset() {
         received.extend_from_slice(&bytes);
     }
     assert_eq!(received, content[100_000..], "bytes must match from 100_000 to the end");
+}
+
+/// **Two calls for one transfer must not both write to its `.part`.**
+///
+/// `send_to` answers `pending: true` when a call outlives its wire deadline and tells the caller
+/// to call again to resume — while the bytes from the first call are still arriving. Each call
+/// takes the `.part`'s current length as its resume offset and counts only the bytes it writes
+/// itself, so with two of them appending, neither sees the file pass the size that was offered.
+///
+/// Measured on two nodes before this guard existed: a 1,073,741,824-byte file landed as
+/// 1,078,657,024 bytes. One call hashed what it had seen, got a mismatch and reported the
+/// failure; the other finished first and renamed the corrupt file into place under the right name
+/// — an error to the caller *and* a wrong file in the inbox.
+///
+/// The claim is taken by hand rather than by racing two real transfers: what has to be locked down
+/// is that the second offer is refused, and a test that depends on winning a race reports that
+/// badly.
+#[tokio::test]
+async fn a_second_offer_for_a_transfer_already_being_received_is_turned_away() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let inbox_dir = tempfile::tempdir().unwrap();
+    let undo = tempfile::tempdir().unwrap();
+    let content = b"one writer only".repeat(100);
+    let source = source_dir.path().join("once.bin");
+    tokio::fs::write(&source, &content).await.unwrap();
+
+    let config = TransferConfig {
+        inbox: inbox_dir.path().to_path_buf(),
+        undo: undo.path().to_path_buf(),
+        ..TransferConfig::default()
+    };
+    // The receiving side is built from a clone of this config, and the set is shared through it —
+    // which is the only reason a claim taken out here is visible in there.
+    let in_flight = config.in_flight.clone();
+    let (a_conn, _b_conn) =
+        wire_up_peers("t1", &source, content.len() as u64, &hash(&content), config).await;
+    let b: PeerTransferClient = a_conn.wait_capability(Duration::from_secs(2)).await.unwrap();
+
+    let offer = || TransferOffer {
+        transfer_id: "t1".into(),
+        name: "once.bin".into(),
+        size: content.len() as u64,
+        sha256: hash(&content),
+        overwrite: false,
+    };
+
+    let held = in_flight.claim("t1").expect("nothing holds this transfer yet");
+    let refused = b.push_offer(offer()).await.expect_err("a second offer has to be refused");
+    assert_eq!(
+        refused.code,
+        zyris::ErrorCode::Other(TRANSFER_IN_FLIGHT.to_string()),
+        "the sending side tells this apart from a real failure by its code: {refused:?}"
+    );
+    assert!(refused.retriable, "it succeeds as soon as the one in front of it is done");
+    assert!(
+        !inbox_dir.path().join("a").join("once.bin").exists(),
+        "nothing may be written while another call holds the transfer"
+    );
+
+    // And the refusal lasts exactly as long as the claim does — a guard that leaked would turn one
+    // interrupted transfer into a file that can never be received again.
+    drop(held);
+    let done = b.push_offer(offer()).await.expect("the transfer is free again");
+    assert_eq!(tokio::fs::read(&done.written).await.unwrap(), content);
+}
+
+/// The claim is released however the call that took it ends, including the seven error paths
+/// `push_offer` has. `Drop` is what makes that true, so this watches `Drop`.
+#[test]
+fn a_claim_is_held_until_it_is_dropped_and_no_longer() {
+    let in_flight = InFlight::default();
+    let held = in_flight.claim("t1").expect("the first claim takes it");
+    assert!(in_flight.claim("t1").is_none(), "a second claim on the same transfer is refused");
+    assert!(in_flight.claim("t2").is_some(), "a different transfer is unaffected");
+    drop(held);
+    assert!(in_flight.claim("t1").is_some(), "dropping the claim frees the transfer");
 }

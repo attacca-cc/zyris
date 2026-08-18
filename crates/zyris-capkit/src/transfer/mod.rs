@@ -42,7 +42,7 @@ pub use listen::{
     serve_peers, PeerCache, PeerDirectory, DEFAULT_DIRECTORY_TTL, DEFAULT_REFRESH_INTERVAL,
 };
 pub use name::safe_name;
-pub use peer::{LocalPeerTransfer, TransferConfig, part_path};
+pub use peer::{InFlight, LocalPeerTransfer, TRANSFER_IN_FLIGHT, TransferConfig, part_path};
 #[cfg(feature = "transfer-send")]
 pub use send::{
     FileTransferConfig, IrohPeerLink, LocalFileTransfer, PeerLink, PeerSession,

@@ -36,7 +36,7 @@ use zyris_p2p::fingerprint::PeerConfirmer;
 use zyris_p2p::iroh;
 use zyris_p2p::tofu::{TofuError, TofuStore};
 
-use super::peer::LocalPeerTransfer;
+use super::peer::{LocalPeerTransfer, TRANSFER_IN_FLIGHT};
 
 /// How long the whole of `send_to` gets before it answers `pending` instead of finishing.
 ///
@@ -520,7 +520,7 @@ impl LocalFileTransfer {
         // From here on the peer can be holding bytes, so a deadline that lands after this line has
         // something for the next call to come back to.
         at.store(phase::SENDING, Ordering::SeqCst);
-        let done = session
+        let offered = session
             .client
             .push_offer(TransferOffer {
                 transfer_id,
@@ -529,7 +529,33 @@ impl LocalFileTransfer {
                 sha256,
                 overwrite: overwrite.unwrap_or(false),
             })
-            .await?;
+            .await;
+        let done = match offered {
+            Ok(done) => done,
+            // **Not a failure — the answer.** The peer is still writing the bytes an earlier call
+            // for this same transfer handed it, so it turned this one away rather than letting a
+            // second stream append into the same file. That is exactly what `pending` already
+            // means here, and the caller was told to call again by the receipt that produced this
+            // call; answering with an error would make that instruction a lie.
+            Err(e) if e.code == ErrorCode::Other(TRANSFER_IN_FLIGHT.to_string()) => {
+                return Ok(SendReceipt {
+                    node: node.to_string(),
+                    written: String::new(),
+                    bytes: 0,
+                    sha256: String::new(),
+                    replaced: false,
+                    undo: None,
+                    direct: self.link.is_direct(&addr.endpoint_id).await,
+                    pending: true,
+                    next: Some(
+                        "the peer is still receiving an earlier call for this same file. Call \
+                         send_to again with the same arguments once it settles."
+                            .to_string(),
+                    ),
+                })
+            }
+            Err(e) => return Err(e),
+        };
 
         Ok(SendReceipt {
             node: node.to_string(),
