@@ -104,6 +104,55 @@ pub fn part_path(dest: &Path, transfer_id: &str) -> PathBuf {
     temp
 }
 
+/// The error code a second offer for a transfer already being received comes back as.
+///
+/// Named rather than folded into `Internal`, because the sending side has to be able to tell this
+/// apart from a real failure: it is the answer "still going", and `send_to` turns it back into the
+/// same `pending: true` receipt its own deadline produces.
+pub const TRANSFER_IN_FLIGHT: &str = "transfer_in_flight";
+
+/// The transfers being received right now, keyed by `transfer_id`.
+///
+/// **Clones share one set, and that is the whole point.** Every accepted connection builds its own
+/// [`LocalPeerTransfer`] from a clone of [`TransferConfig`], so the two writers that have to be
+/// kept apart are never the same object — only something shared through the config can see both.
+///
+/// This is what makes "one writer per transfer" true. Without it, `push_offer` takes the length of
+/// the `.part` as its resume offset and appends from there, and a second call that arrives while
+/// the first is still appending does the same thing from a different offset. Both then believe
+/// they are inside the declared size while the file on disk grows past it.
+#[derive(Debug, Clone, Default)]
+pub struct InFlight(Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl InFlight {
+    /// Takes `transfer_id`, or answers `None` because somebody else already holds it.
+    ///
+    /// The claim lasts as long as the returned guard, which releases it however the call ends —
+    /// including the error paths, of which `push_offer` has seven.
+    pub fn claim(&self, transfer_id: &str) -> Option<InFlightClaim> {
+        // A panic while holding this would otherwise wedge every later transfer of the process
+        // behind a poisoned lock, and there is nothing in here that a panic could corrupt.
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        held.insert(transfer_id.to_string()).then(|| InFlightClaim {
+            held: self.clone(),
+            transfer_id: transfer_id.to_string(),
+        })
+    }
+}
+
+/// Holds one transfer open. Dropping it lets the next offer for that transfer through.
+pub struct InFlightClaim {
+    held: InFlight,
+    transfer_id: String,
+}
+
+impl Drop for InFlightClaim {
+    fn drop(&mut self) {
+        let mut held = self.held.0.lock().unwrap_or_else(|e| e.into_inner());
+        held.remove(&self.transfer_id);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferConfig {
     pub inbox: PathBuf,
@@ -111,6 +160,8 @@ pub struct TransferConfig {
     pub audit: Option<PathBuf>,
     pub max_file_bytes: u64,
     pub max_inbox_bytes: u64,
+    /// Shared by every clone of this config — see [`InFlight`].
+    pub in_flight: InFlight,
 }
 
 impl Default for TransferConfig {
@@ -121,6 +172,7 @@ impl Default for TransferConfig {
             audit: None,
             max_file_bytes: 8 * 1024 * 1024 * 1024,
             max_inbox_bytes: 32 * 1024 * 1024 * 1024,
+            in_flight: InFlight::default(),
         }
     }
 }
@@ -209,6 +261,30 @@ impl PeerTransfer for LocalPeerTransfer {
             )
             .retriable(false));
         }
+        // **One writer per transfer.** `send_to` answers `pending: true` when a call outlives its
+        // wire deadline and tells the caller to call again to resume — but the bytes from the
+        // first call are still arriving. The second call then read the `.part`'s length as its
+        // resume offset and appended from there while the first was still appending too, and
+        // because each call only ever counts the bytes *it* wrote, neither noticed the file
+        // passing the size that was offered.
+        //
+        // Measured on two nodes: a 1,073,741,824-byte file landed as 1,078,657,024 bytes. One of
+        // the two hashed what it had seen, got a mismatch and reported the failure; the other
+        // finished first and renamed the corrupt file into place under the right name.
+        let Some(_claim) = self.config.in_flight.claim(&offer.transfer_id) else {
+            return Err(WireError::new(
+                ErrorCode::Other(TRANSFER_IN_FLIGHT.to_string()),
+                format!(
+                    "{} is already being received on this node. Its bytes are still arriving; \
+                     call again once that settles.",
+                    offer.name
+                ),
+            )
+            // Nothing is wrong with the request — it will succeed as soon as the one in front of
+            // it is done.
+            .retriable(true));
+        };
+
         let peer = self.peer.get().ok_or_else(|| {
             WireError::internal("this node is not set up as a receiver".to_string())
         })?;
@@ -320,6 +396,21 @@ impl PeerTransfer for LocalPeerTransfer {
             // bytes that came through this time, not the request itself, so receiving again can
             // still succeed. `ErrorCode::Internal`'s default is `false`, so this comes out the
             // wrong way if left unstated.
+            .retriable(true));
+        }
+
+        // **What this call hashed is not the same claim as what is on disk.** The hash covers the
+        // leftover it read at the start plus the chunks it wrote itself; anything a second writer
+        // put there is outside both. `in_flight` is what stops that from happening, and this is
+        // the check that would have caught it if it ever does again — a file whose length does not
+        // match the offer is not the file that was offered, whatever its hash says.
+        let on_disk = tokio::fs::metadata(&temp).await.map(|m| m.len()).unwrap_or(0);
+        if on_disk != offer.size {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(WireError::internal(format!(
+                "{on_disk} bytes are on disk but {} were offered; not renaming it into place",
+                offer.size
+            ))
             .retriable(true));
         }
 
