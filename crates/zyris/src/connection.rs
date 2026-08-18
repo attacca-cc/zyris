@@ -118,6 +118,13 @@ pub struct ConnectionInfo {
     pub resumed: bool,
     pub serialization: Serialization,
     pub peer_agent: Option<String>,
+    /// What the peer said it is, when it said. `None` on the dialing side (the acceptor sends no
+    /// hello) and on any connection from a peer built before `Hello::kind` existed.
+    ///
+    /// Beside `peer_agent` rather than parsed out of it: the agent string is prose for a log, and
+    /// an acceptor deciding how to treat a connection should not be reading it with a substring
+    /// match.
+    pub peer_kind: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -640,7 +647,7 @@ impl Features {
 }
 
 pub(crate) enum Role {
-    Dial { agent: String },
+    Dial { agent: String, kind: String },
     Accept { options: AcceptOptions },
 }
 
@@ -652,7 +659,7 @@ pub(crate) async fn establish(
     let (mut sink, mut stream) = transport.split();
 
     let (serialization, limits, info, reserved, features, heartbeat) = match role {
-        Role::Dial { agent } => {
+        Role::Dial { agent, kind } => {
             let local = vec![
                 FEATURE_CANCEL.to_string(),
                 FEATURE_ATTACHMENTS.to_string(),
@@ -662,6 +669,7 @@ pub(crate) async fn establish(
                 protocol: HelloProtocol { major: PROTOCOL_MAJOR, minors_supported: vec![PROTOCOL_MINOR] },
                 serialization: vec![Serialization::Msgpack, Serialization::Json],
                 agent,
+                kind: Some(kind),
                 features: local.clone(),
                 resume: None,
             });
@@ -689,6 +697,7 @@ pub(crate) async fn establish(
                 resumed: ack.resumed,
                 serialization: ack.serialization,
                 peer_agent: None,
+                peer_kind: None,
             };
             (
                 ack.serialization,
@@ -745,6 +754,7 @@ pub(crate) async fn establish(
                 resumed: options.resumed,
                 serialization,
                 peer_agent: Some(hello.agent),
+                peer_kind: hello.kind,
             };
             (
                 serialization,
