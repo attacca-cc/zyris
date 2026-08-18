@@ -88,6 +88,17 @@ pub struct Hello {
     pub protocol: HelloProtocol,
     pub serialization: Vec<Serialization>,
     pub agent: String,
+    /// What the dialer is — a [`NodeKind`](../../zyris/node/enum.NodeKind.html) as a string.
+    ///
+    /// It has always been *in* `agent` (`zyris/0.1.0 (zyrisd-cli; cli)`), which is a sentence
+    /// meant for a log line, not a field to branch on. An acceptor that has to treat a consumer
+    /// differently from a node — and Attacca does, because a consumer must not be mistaken for
+    /// the node it borrows a credential from — should not be parsing that string to find out.
+    ///
+    /// Optional because a peer built before this field simply will not send one, and absent has
+    /// to keep meaning "did not say" rather than any particular kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub features: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

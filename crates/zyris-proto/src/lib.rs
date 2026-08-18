@@ -98,12 +98,47 @@ mod tests {
         assert!(!text.contains("meta"), "an empty meta puts nothing on the wire: {text}");
     }
 
+    /// A peer built before `Hello::kind` sends no such field, and it has to keep connecting.
+    ///
+    /// This is the whole reason the field is `Option` rather than a defaulted string: absent must
+    /// stay distinguishable from any particular kind, so an acceptor that treats one kind
+    /// specially treats an old peer as "did not say" instead of as that kind.
+    #[test]
+    fn a_hello_from_before_the_kind_field_still_parses() {
+        let older = r#"{"t":"hello","protocol":{"major":1,"minors_supported":[0]},
+            "serialization":["json"],"agent":"zyris/0.1.0 (old; desktop)","features":[]}"#;
+        let Envelope::Hello(hello) = decode_text(older).expect("an older hello must parse") else {
+            panic!("expected a hello")
+        };
+        assert_eq!(hello.kind, None, "absent has to read as absent, not as a default kind");
+        assert_eq!(hello.agent, "zyris/0.1.0 (old; desktop)");
+    }
+
+    /// And the field is left off the wire entirely when there is nothing to say, so a peer that
+    /// does not set one costs no bytes and reads the same to an old acceptor.
+    #[test]
+    fn an_unset_kind_is_absent_from_the_wire() {
+        let hello = Envelope::Hello(Hello {
+            protocol: HelloProtocol { major: 1, minors_supported: vec![0] },
+            serialization: vec![Serialization::Json],
+            agent: "zyris-test/0.1".into(),
+            kind: None,
+            features: vec![],
+            resume: None,
+        });
+        let WireMessage::Text(text) = encode_control(&hello, Serialization::Json).unwrap() else {
+            panic!("expected text")
+        };
+        assert!(!text.contains("kind"), "an unset kind puts nothing on the wire: {text}");
+    }
+
     #[test]
     fn handshake_roundtrips() {
         roundtrip(Envelope::Hello(Hello {
             protocol: HelloProtocol { major: 1, minors_supported: vec![0] },
             serialization: vec![Serialization::Msgpack, Serialization::Json],
             agent: "zyris-test/0.1".into(),
+            kind: Some("cli".into()),
             features: vec!["cancel".into()],
             resume: None,
         }));

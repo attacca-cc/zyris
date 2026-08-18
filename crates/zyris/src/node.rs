@@ -15,7 +15,11 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
-    fn as_str(&self) -> &'static str {
+    /// The wire spelling, as it travels in `Hello::kind`.
+    ///
+    /// Public so an acceptor can compare against `NodeKind::Cli.as_str()` rather than a bare
+    /// `"cli"` — the two ends of that comparison should not be able to drift apart silently.
+    pub fn as_str(&self) -> &'static str {
         match self {
             NodeKind::Desktop => "desktop",
             NodeKind::Server => "server",
@@ -80,7 +84,7 @@ impl Node {
     pub async fn connect_over(&self, transport: impl Transport) -> Result<Connection> {
         establish(
             Box::new(transport),
-            Role::Dial { agent: self.agent() },
+            Role::Dial { agent: self.agent(), kind: self.kind.as_str().to_string() },
             self.capabilities.clone(),
         )
         .await
