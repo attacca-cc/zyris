@@ -1,0 +1,11 @@
+packages:
+  - "ui"
+# pnpm 11 refuses packages published inside its default cooldown window.
+# These entries are the pinned versions we accept anyway; pnpm regenerates
+# this list on install. Do not delete it.
+minimumReleaseAgeExclude:
+  - '@types/react-dom@19.3.0'
+  - '@types/react@19.3.0'
+  - react-dom@19.3.0
+  - react@19.3.0
+  - scheduler@0.28.0
