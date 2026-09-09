@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/attacca-cc/zyris"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = "2.11.5"
+tauri-build = "2.6.3"
+tauri-plugin-single-instance = "2.4.4"
+tokio = "1.53.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+# Full debug info is what makes the link stage expensive on a 3.6 GB machine.
+# `line-tables-only` keeps file and line in every backtrace frame and drops the rest.
+[profile.dev]
+debug = "line-tables-only"
