@@ -1,0 +1,49 @@
+# Rust
+/target/
+**/target/
+*.pdb
+*.rs.bk
+
+# Frontend
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# Tauri
+/ui/dist/
+gen/
+
+# Credentials, secrets, local state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+peer_key
+
+# Voice model cache — downloaded on first run, never committed
+/models/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Agent and assistant instructions. This repository holds source only.
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.windsurfrules
+
+# Design notes and documentation drafts
+docs/
