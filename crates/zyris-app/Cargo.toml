@@ -1,0 +1,18 @@
+[package]
+name = "zyris-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zyris"
+path = "src/main.rs"
+
+[dependencies]
+zyris-core = { path = "../zyris-core" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
