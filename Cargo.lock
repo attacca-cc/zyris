@@ -6026,6 +6026,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a231eb37a5f282c34373dd6fdb85b8269173187b48c3f5b475bace6e63fd7a90"
 dependencies = [
+ "zyris-caps",
  "zyris-core",
 ]
 
@@ -6043,6 +6044,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zyris-runtime",
+]
+
+[[package]]
+name = "zyris-caps"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41d9a0cb7a240dc505bd6744b33d3cb5168e27977fee29ab104e6f1fa0ab5544"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "zyris-core",
 ]
 
 [[package]]
@@ -6108,6 +6121,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "zyris",
+]
+
+[[package]]
+name = "zyris-tools"
+version = "0.1.0"
+dependencies = [
  "tracing",
  "zyris",
 ]

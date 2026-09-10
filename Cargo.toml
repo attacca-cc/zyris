@@ -26,7 +26,7 @@ tempfile = "3.24.0"
 tokio = "1.53.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-zyris = { version = "0.2.0", default-features = false, features = ["client", "hostname", "enroll"] }
+zyris = { version = "0.2.0", default-features = false, features = ["caps", "client", "hostname", "enroll"] }
 
 # Full debug info is what makes the link stage expensive on a 3.6 GB machine.
 # `line-tables-only` keeps file and line in every backtrace frame and drops the rest.
