@@ -4,6 +4,7 @@
 //! `EventBus`, because the difference between them is only whether anything is watching.
 
 mod cli;
+mod gui;
 mod headless;
 
 use clap::Parser;
@@ -28,9 +29,6 @@ fn main() -> anyhow::Result<()> {
         cli::Mode::Headless => {
             tokio::runtime::Runtime::new()?.block_on(headless::run(bus))
         }
-        cli::Mode::Gui => {
-            tracing::error!("the window is not built yet; run with --headless");
-            Ok(())
-        }
+        cli::Mode::Gui => gui::run(bus),
     }
 }
