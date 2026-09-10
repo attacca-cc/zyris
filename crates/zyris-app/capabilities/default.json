@@ -4,8 +4,7 @@
   "description": "What the Zyris window is allowed to do.",
   "windows": ["main"],
   "permissions": [
-    "core:event:default",
-    "core:window:allow-show",
-    "core:window:allow-hide"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }
