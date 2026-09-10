@@ -4,7 +4,8 @@
 //! Secret Service is a normal deployment, not an error, and refusing to run there would be worse
 //! than the weaker storage.
 //!
-//! This module knows nothing about Zyris. It stores a string under a name.
+//! The module stores a named string and does not know what is in it; only the default file
+//! location (when no directory is pinned explicitly) is this product's.
 
 use std::io;
 use std::path::PathBuf;
@@ -100,8 +101,7 @@ impl SecretStore {
             Some(dir) => {
                 std::fs::create_dir_all(dir)?;
                 let path = dir.join(name);
-                std::fs::write(&path, value)?;
-                restrict(&path)?;
+                write_restricted(&path, value)?;
                 Ok(())
             }
             None => self
@@ -138,17 +138,27 @@ fn default_file_dir(service: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".").join(".zyris-secrets"))
 }
 
+/// Writes `value` to `path` such that the file is never, even momentarily, readable by anyone
+/// but its owner. `OpenOptions::mode` only restricts permissions at creation time, so a file that
+/// already existed with looser permissions is tightened explicitly before any content is written
+/// to it — closing the window on both a brand-new file and an overwrite of a pre-existing one.
 #[cfg(unix)]
-fn restrict(path: &std::path::Path) -> io::Result<()> {
+fn write_restricted(path: &std::path::Path, value: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(value.as_bytes())
 }
 
 /// On Windows the file inherits the user profile's ACL, which is already owner-only. There is no
 /// mode to set, and pretending otherwise by returning an error would be worse than doing nothing.
 #[cfg(not(unix))]
-fn restrict(_path: &std::path::Path) -> io::Result<()> {
-    Ok(())
+fn write_restricted(path: &std::path::Path, value: &str) -> io::Result<()> {
+    std::fs::write(path, value)
 }
 
 #[cfg(test)]
@@ -230,5 +240,24 @@ mod tests {
 
         let mode = std::fs::metadata(dir.path().join("token")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "a refresh token in a world-readable file is the failure this prevents");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwriting_a_loosely_permissioned_file_still_ends_at_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let path = dir.path().join("token");
+
+        // Simulate a file that ended up world-readable some other way — the case `OpenOptions::mode`
+        // alone does not cover, since it only restricts permissions at creation time.
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.set("token", "fresh").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "overwriting a pre-existing loosely-permissioned file must still tighten it");
     }
 }
