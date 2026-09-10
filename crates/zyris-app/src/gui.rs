@@ -1,17 +1,20 @@
 //! The windowed runtime: the same core as `headless`, with something watching it.
 //!
+//! Starting and stopping the core goes through `zyris_core::lifecycle`, the same entry point
+//! `headless.rs` calls.
+//!
 //! Tauri owns the main thread and runs its own event loop: `app.run` never returns, on any
 //! platform or exit path. Anything that must happen before the process ends — publishing
 //! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
 //! Tauri delivers right before the process goes away.
 
 use tauri::{RunEvent, WindowEvent};
-use zyris_core::{CoreEvent, EventBus};
+use zyris_core::{lifecycle, EventBus};
 
 use crate::tray;
 
 pub fn run(bus: EventBus) -> anyhow::Result<()> {
-    bus.publish(CoreEvent::Started);
+    lifecycle::start(&bus);
     tracing::info!("running with a window");
 
     let app = tauri::Builder::default()
@@ -49,7 +52,7 @@ pub fn run(bus: EventBus) -> anyhow::Result<()> {
         // tray's Quit. This is the only place in this function that runs after `app.run` starts,
         // since `app.run` itself never returns.
         RunEvent::Exit => {
-            bus.publish(CoreEvent::ShuttingDown);
+            lifecycle::shutdown(&bus);
             tracing::info!("stopped");
         }
         _ => {}

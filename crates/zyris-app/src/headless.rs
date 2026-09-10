@@ -1,16 +1,18 @@
-//! The windowless runtime. This is the whole program when `--headless` is passed, and it is also
-//! what the GUI runtime wraps — so nothing that matters may live only in `gui.rs`.
+//! The windowless runtime. This is the whole program when `--headless` is passed.
+//!
+//! Starting and stopping the core goes through `zyris_core::lifecycle`, the same entry point
+//! `gui.rs` calls — so nothing that matters can live only in one runtime's copy-pasted code.
 
-use zyris_core::{CoreEvent, EventBus};
+use zyris_core::{lifecycle, EventBus};
 
 /// Runs until interrupted. Ctrl-C is this program's decision, not the core's.
 pub async fn run(bus: EventBus) -> anyhow::Result<()> {
-    bus.publish(CoreEvent::Started);
+    lifecycle::start(&bus);
     tracing::info!("running headless");
 
     tokio::signal::ctrl_c().await?;
 
     tracing::info!("stopping");
-    bus.publish(CoreEvent::ShuttingDown);
+    lifecycle::shutdown(&bus);
     Ok(())
 }
