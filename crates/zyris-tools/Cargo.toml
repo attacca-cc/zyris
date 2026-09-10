@@ -14,6 +14,7 @@ time = { workspace = true }
 tracing = { workspace = true }
 zyris = { workspace = true }
 zyris-fs = { workspace = true }
+zyris-runtime = { path = "../zyris-runtime" }
 zyris-terminal = { workspace = true }
 
 [dev-dependencies]

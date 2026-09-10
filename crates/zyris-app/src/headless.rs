@@ -17,7 +17,20 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
     tracing::info!("running headless");
 
     tokio::spawn(async move {
-        while let Ok(event) = events.recv().await {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                // A slow reader missed events. Dropping the oldest is the bus's intended
+                // behaviour and the next event still arrives, so this must not end the loop —
+                // `while let Ok(..)` would have stopped logging for the rest of the run, and
+                // tool calls arrive fast enough to make that a real possibility rather than a
+                // theoretical one.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "the log fell behind on core events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             match event {
                 CoreEvent::NeedsEnrolment => tracing::info!("this node is not enrolled yet"),
                 CoreEvent::EnrolmentCode { user_code, verification_uri } => tracing::info!(
@@ -40,6 +53,14 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
                 }
                 CoreEvent::SetupFailed { reason } => {
                     tracing::error!(%reason, "setup failed; restart to try again")
+                }
+                CoreEvent::Paused { paused } => tracing::info!(paused, "the pause switch moved"),
+                // `debug!`, not `info!`. An agent working through a task calls tools several
+                // times a second, and at `info!` this log becomes a transcript of everything
+                // that touched the machine. The durable record is the audit file, whose path
+                // `main.rs` already logs once at startup.
+                CoreEvent::ToolCall { capability, tool, detail, outcome } => {
+                    tracing::debug!(%capability, %tool, %detail, %outcome, "a tool call")
                 }
                 CoreEvent::Started | CoreEvent::ShuttingDown => {}
             }

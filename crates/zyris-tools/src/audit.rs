@@ -25,6 +25,21 @@ pub enum Outcome {
     Failed,
 }
 
+impl Outcome {
+    /// The wire spelling, identical to what `serde` writes for this value.
+    ///
+    /// `CoreEvent::ToolCall` carries the outcome as a plain `String` rather than this enum, so
+    /// the window reads the live event and the stored entry through the same three words. The
+    /// test below is what keeps the two spellings from drifting.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Allowed => "allowed",
+            Outcome::Refused => "refused",
+            Outcome::Failed => "failed",
+        }
+    }
+}
+
 /// One call.
 ///
 /// `detail` is a short, human-readable summary of what was asked for — a command line, a path.
@@ -212,5 +227,18 @@ mod tests {
             json,
             r#"{"at":"2026-09-11T00:00:00Z","capability":"terminal","tool":"exec","detail":"ls -la","outcome":"refused"}"#
         );
+    }
+
+    #[test]
+    fn every_outcome_spells_itself_the_same_way_twice() {
+        // `as_str` and `serde` are two independent spellings of the same three words, and the
+        // window reads a live `CoreEvent::ToolCall` through the first and a stored `Entry`
+        // through the second. Nothing but this test stops them drifting apart.
+        for outcome in [Outcome::Allowed, Outcome::Refused, Outcome::Failed] {
+            assert_eq!(
+                serde_json::to_string(&outcome).unwrap(),
+                format!(r#""{}""#, outcome.as_str())
+            );
+        }
     }
 }

@@ -6294,5 +6294,6 @@ dependencies = [
  "tracing",
  "zyris",
  "zyris-fs",
+ "zyris-runtime",
  "zyris-terminal",
 ]

@@ -11,6 +11,7 @@
 use tauri::{Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, EventBus};
+use zyris_tools::Tools;
 
 use crate::{bridge, tray};
 
@@ -18,6 +19,7 @@ pub fn run(
     bus: EventBus,
     runtime: tokio::runtime::Handle,
     connector: Connector,
+    tools: Tools,
 ) -> anyhow::Result<()> {
     tracing::info!("running with a window");
 
@@ -32,9 +34,19 @@ pub fn run(
         }))
         .manage(bus.clone())
         .manage(runtime)
+        // Clones, not the `Tools` itself: both are handles on the state `main` built, so the
+        // switch the window moves is the one every announced capability reads, and the log it
+        // reads is the one they write. Managed here rather than passed into `tray::build` and
+        // the commands separately, because Tauri's state is the only thing both a command and a
+        // menu handler can reach.
+        .manage(tools.gate().clone())
+        .manage(tools.log().clone())
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
+            bridge::set_paused,
+            bridge::is_paused,
+            bridge::recent_tool_calls,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:
@@ -59,7 +71,10 @@ pub fn run(
                 }
             }
 
-            tray::build(app.handle())?;
+            // After the `manage` calls above, which is what lets the tray reach the gate and the
+            // bus: `tray::build` reads both out of Tauri's state to label its pause item and to
+            // keep that label following the switch.
+            tray::build(app.handle(), &setup_runtime)?;
             // The bridge must be subscribed before the connector can publish anything, and
             // before `lifecycle::start` below — for the same reason `headless.rs` subscribes
             // before either fires: the connector publishes `NeedsEnrolment` (or dials straight

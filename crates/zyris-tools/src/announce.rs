@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use zyris::ServeCapability;
 use zyris::caps::{FileIoServer, TerminalServer};
+use zyris_runtime::EventBus;
 
 use crate::guarded::Guarded;
 use crate::{AuditLog, Gate};
@@ -34,11 +35,22 @@ pub struct Tools {
     gate: Gate,
     log: AuditLog,
     root: PathBuf,
+    /// Handed to every [`Guarded`] so a call announces itself as it happens. Optional for the
+    /// same reason it is optional there: the audit file is the record, and a `Tools` with no bus
+    /// is a complete one.
+    bus: Option<EventBus>,
 }
 
 impl Tools {
     pub fn new(gate: Gate, log: AuditLog, root: PathBuf) -> Tools {
-        Tools { gate, log, root }
+        Tools { gate, log, root, bus: None }
+    }
+
+    /// Also publish every call, so the window and the tray see what is happening rather than
+    /// having to poll the file.
+    pub fn with_bus(mut self, bus: EventBus) -> Tools {
+        self.bus = Some(bus);
+        self
     }
 
     pub fn gate(&self) -> &Gate {
@@ -84,19 +96,20 @@ impl Tools {
     /// an agent sends would resolve somewhere different every launch.
     fn capabilities(&self) -> Vec<Arc<dyn ServeCapability>> {
         vec![
-            Guarded::new(
-                FileIoServer(zyris_fs::LocalFileIo::rooted(self.root.clone())),
-                self.gate.clone(),
-                self.log.clone(),
-            )
-            .into_arc(),
-            Guarded::new(
-                TerminalServer(zyris_terminal::PtyTerminal::rooted(self.root.clone())),
-                self.gate.clone(),
-                self.log.clone(),
-            )
-            .into_arc(),
+            self.guard(FileIoServer(zyris_fs::LocalFileIo::rooted(self.root.clone()))),
+            self.guard(TerminalServer(zyris_terminal::PtyTerminal::rooted(self.root.clone()))),
         ]
+    }
+
+    /// The one place a capability is put behind the switch and the log, so a capability added
+    /// later cannot quietly be announced without them.
+    fn guard<C: ServeCapability>(&self, inner: C) -> Arc<dyn ServeCapability> {
+        let guarded = Guarded::new(inner, self.gate.clone(), self.log.clone());
+        match self.bus.clone() {
+            Some(bus) => guarded.with_bus(bus),
+            None => guarded,
+        }
+        .into_arc()
     }
 }
 

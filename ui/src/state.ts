@@ -12,9 +12,25 @@ export type CoreEvent =
   | { kind: "connecting" }
   | { kind: "connected"; nodeId: string; nodeName: string }
   | { kind: "disconnected"; reason: string; retrying: boolean }
-  | { kind: "setupFailed"; reason: string };
+  | { kind: "setupFailed"; reason: string }
+  | { kind: "paused"; paused: boolean }
+  | ({ kind: "toolCall" } & ToolCall);
+
+// One call an agent made. `outcome` is "allowed", "refused" or "failed", spelled the same way in
+// a live event and in a stored line of the audit log — Outcome::as_str and its serde form in
+// crates/zyris-tools/src/audit.rs, which a test there keeps in agreement.
+export type ToolCall = {
+  capability: string;
+  tool: string;
+  detail: string;
+  outcome: string;
+};
 
 export type Screen = "starting" | "onboarding" | "status";
+
+// How many calls the window keeps. This is a tail, not a record: the whole history is the audit
+// file on disk, and an unbounded list would grow for as long as the app is left running.
+const MAX_TOOL_CALLS = 50;
 
 export type State = {
   screen: Screen;
@@ -25,6 +41,13 @@ export type State = {
   // Only meaningful alongside `problem` on the status screen: whether the link is redialling on
   // its own (true) or this is a dead end that needs a restart (false). See `disconnected` below.
   retrying: boolean;
+  // Whether the machine is refusing new tool calls. "No new calls" is the whole of it — a call
+  // already running and a stream already open both continue, so nothing here may be worded as
+  // "nothing is running".
+  paused: boolean;
+  // Newest first, capped at MAX_TOOL_CALLS. Only the calls this window saw live; the durable
+  // tail comes from the audit file through a command.
+  toolCalls: ToolCall[];
 };
 
 export const initialState: State = {
@@ -34,6 +57,8 @@ export const initialState: State = {
   connected: false,
   problem: null,
   retrying: false,
+  paused: false,
+  toolCalls: [],
 };
 
 // Applying the same event twice in a row must leave state exactly as applying it once did — the
@@ -41,6 +66,12 @@ export const initialState: State = {
 // way to tell in advance whether it will. Every arm below either fully determines the next state
 // from the event alone (so a repeat is a no-op) or falls through untouched (`default`), which is
 // what makes that safe.
+//
+// `toolCall` is the one arm that appends rather than replaces, so a duplicate would show the
+// same call twice. It is safe only because the Rust side publishes tool calls through
+// `EventBus::publish_transient`, which deliberately leaves them out of the one-slot value
+// `fetchLatestEvent` reads — so a `toolCall` can never arrive by that second route. If that ever
+// changes, this arm has to change with it.
 export function reduce(state: State, event: CoreEvent): State {
   switch (event.kind) {
     case "needsEnrolment":
@@ -82,6 +113,16 @@ export function reduce(state: State, event: CoreEvent): State {
         connected: false,
         problem: event.reason,
         retrying: event.retrying,
+      };
+    case "paused":
+      return { ...state, paused: event.paused };
+    case "toolCall":
+      return {
+        ...state,
+        toolCalls: [
+          { capability: event.capability, tool: event.tool, detail: event.detail, outcome: event.outcome },
+          ...state.toolCalls,
+        ].slice(0, MAX_TOOL_CALLS),
       };
     default:
       return state;

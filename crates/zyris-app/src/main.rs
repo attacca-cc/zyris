@@ -85,7 +85,10 @@ fn main() -> anyhow::Result<()> {
         zyris_tools::Gate::running(),
         zyris_tools::AuditLog::new(audit_path()),
         zyris_tools::default_root(),
-    );
+    )
+    // Every call is published as well as written down. The bus is the only way the window and
+    // the tray hear about a call while it happens; the file is what outlives the process.
+    .with_bus(bus.clone());
     // Both paths, once, at startup. The root matters as much as the log's own path: an entry
     // records the caller's path string rather than the resolved one, so a line reading
     // `path=notes/x.txt` cannot be read without knowing what it resolved against.
@@ -107,8 +110,12 @@ fn main() -> anyhow::Result<()> {
     }
 
     match mode {
+        // Headless is handed no `Tools`: it has no surface to move the switch from, and the
+        // gate it would need is already inside every capability the connector announces. The
+        // window gets one so the tray and the Tools tab can reach the same gate and the same
+        // log — the same ones, not copies, because `Tools` holds handles on shared state.
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
-        cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector),
+        cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector, tools),
     }
 }
 

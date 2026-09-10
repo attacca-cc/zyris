@@ -61,6 +61,16 @@ pub enum CoreEvent {
     /// keeps that split in one place.
     #[serde(rename_all = "camelCase")]
     SetupFailed { reason: String },
+    /// The switch moved. Published on every change so the tray and the window agree without
+    /// either of them asking.
+    Paused { paused: bool },
+    /// A tool call happened. The window shows a tail of these; the durable record is the audit
+    /// log on disk, which outlives the process.
+    ///
+    /// Published through [`EventBus::publish_transient`], never [`EventBus::publish`] — see that
+    /// method for why this one must stay out of the catch-up slot.
+    #[serde(rename_all = "camelCase")]
+    ToolCall { capability: String, tool: String, detail: String, outcome: String },
 }
 
 /// A fan-out channel the core owns and everything else borrows.
@@ -99,6 +109,21 @@ impl EventBus {
         // `latest()` — so it would always have zero. `send_replace` updates the stored value
         // unconditionally, which is the one thing this channel exists for.
         self.latest.send_replace(Some(event.clone()));
+        self.tx.send(event).unwrap_or(0)
+    }
+
+    /// Broadcasts without touching the catch-up slot. For events that are worth telling a live
+    /// watcher about but are not state a latecomer has to be caught up on.
+    ///
+    /// The slot holds exactly one event, and `latest()` is the window's only way to learn what it
+    /// missed while its listener was being registered. An event published far more often than the
+    /// connection changes — a tool call — would own that slot almost all the time, and the window
+    /// would catch up on something its reducer has no arm for and stay on its starting screen.
+    /// Anything published this way is therefore lost to a subscriber that was not already
+    /// listening, which is the trade: for tool calls the durable record is the audit log on disk.
+    ///
+    /// Returns how many subscribers received it; zero is a normal answer, as for [`Self::publish`].
+    pub fn publish_transient(&self, event: CoreEvent) -> usize {
         self.tx.send(event).unwrap_or(0)
     }
 
@@ -256,5 +281,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(json, r#"{"kind":"setupFailed","reason":"secret store: no keyring"}"#);
+    }
+
+    #[test]
+    fn paused_pins_its_wire_shape() {
+        let json = serde_json::to_string(&CoreEvent::Paused { paused: true }).unwrap();
+
+        assert_eq!(json, r#"{"kind":"paused","paused":true}"#);
+    }
+
+    #[test]
+    fn a_tool_call_pins_its_wire_shape() {
+        let json = serde_json::to_string(&CoreEvent::ToolCall {
+            capability: "terminal".into(),
+            tool: "exec".into(),
+            detail: "ls -la".into(),
+            outcome: "allowed".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"kind":"toolCall","capability":"terminal","tool":"exec","detail":"ls -la","outcome":"allowed"}"#
+        );
+    }
+
+    #[test]
+    fn a_transient_publish_leaves_the_catch_up_slot_alone() {
+        // The window's one-shot `latest_event` is the only thing closing the gap between the core
+        // publishing and the webview's listener being registered. Tool calls arrive far more often
+        // than connection events, so if they shared that slot the window would almost always catch
+        // up on a `toolCall` — which its reducer ignores — and sit on "Starting." for good.
+        let bus = EventBus::new(8);
+        let connected = CoreEvent::Connected { node_id: "n_1".into(), node_name: "laptop".into() };
+        bus.publish(connected.clone());
+
+        bus.publish_transient(CoreEvent::ToolCall {
+            capability: "terminal".into(),
+            tool: "exec".into(),
+            detail: "ls -la".into(),
+            outcome: "allowed".into(),
+        });
+
+        assert_eq!(
+            bus.latest(),
+            Some(connected),
+            "a transient publish must leave the catch-up slot holding the last real state"
+        );
     }
 }

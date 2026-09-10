@@ -15,6 +15,7 @@
 
 use tauri::{AppHandle, Emitter, State};
 use zyris_runtime::{CoreEvent, EventBus};
+use zyris_tools::{AuditLog, Entry, Gate};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
@@ -58,6 +59,43 @@ pub fn open_verification_url(url: String) -> Result<(), String> {
         return Err("refusing to open a non-https url".to_string());
     }
     open::that(url).map_err(|error| error.to_string())
+}
+
+/// Moves the switch and tells everything watching, in that order.
+///
+/// The one path both the tray and the window go through, so the two can never end up disagreeing
+/// about where the switch is. Published with the ordinary [`EventBus::publish`], unlike a tool
+/// call: this is real state, and a window whose listener came up late has to catch up on it.
+///
+/// Not a method on `Gate`. The gate is a flag every wrapped capability reads on the request
+/// path, and it stays a flag; who is told about a change is this layer's business.
+pub fn apply_paused(gate: &Gate, bus: &EventBus, paused: bool) {
+    gate.set_paused(paused);
+    bus.publish(CoreEvent::Paused { paused });
+}
+
+/// Stop or resume tool calls.
+///
+/// "Paused" means **no new calls**. A call already in flight is not stopped and an already-open
+/// stream keeps delivering; `zyris_tools::gate` records exactly what the switch does and does
+/// not cover, and the window's copy has to say the same thing.
+#[tauri::command]
+pub fn set_paused(paused: bool, gate: State<Gate>, bus: State<EventBus>) {
+    apply_paused(&gate, &bus, paused);
+}
+
+/// Where the switch is right now. For a window that opened long after the last change and so
+/// never saw the event that made it.
+#[tauri::command]
+pub fn is_paused(gate: State<Gate>) -> bool {
+    gate.is_paused()
+}
+
+/// The durable tail, newest first. Read from the audit file rather than from the bus, so the
+/// list is not empty after a restart — live `toolCall` events only cover this run.
+#[tauri::command]
+pub fn recent_tool_calls(limit: usize, log: State<AuditLog>) -> Vec<Entry> {
+    log.recent(limit)
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use zyris::{CapabilityDescriptor, IncomingCall, Outgoing, ServeCapability};
+use zyris_runtime::{CoreEvent, EventBus};
 
 use crate::Gate;
 use crate::audit::{self, AuditLog, Entry, Outcome};
@@ -23,6 +24,12 @@ pub struct Guarded<C> {
     capability: String,
     gate: Gate,
     log: AuditLog,
+    /// Where a call announces itself as it happens, on top of being written down.
+    ///
+    /// Optional because the log is the record and the bus is only a tail: a `Guarded` built
+    /// without one still refuses, still runs and still writes every line to disk. The crate's
+    /// own tests use that shape.
+    bus: Option<EventBus>,
 }
 
 impl<C: ServeCapability> Guarded<C> {
@@ -31,7 +38,13 @@ impl<C: ServeCapability> Guarded<C> {
         // in the capability on each call — about a millisecond for `file_io` — so the name is
         // taken once here rather than on the request path.
         let capability = inner.descriptor().name;
-        Guarded { inner, capability, gate, log }
+        Guarded { inner, capability, gate, log, bus: None }
+    }
+
+    /// Also tell everything watching, as each call happens.
+    pub fn with_bus(mut self, bus: EventBus) -> Guarded<C> {
+        self.bus = Some(bus);
+        self
     }
 
     pub fn into_arc(self) -> Arc<dyn ServeCapability> {
@@ -39,6 +52,25 @@ impl<C: ServeCapability> Guarded<C> {
     }
 
     fn record(&self, tool: &str, detail: String, outcome: Outcome) {
+        if let Some(bus) = &self.bus {
+            // **`publish_transient`, never `publish`.** `publish` also writes the bus's one-slot
+            // catch-up value, which the window reads exactly once through `latest_event` to
+            // learn what it missed while its listener was being registered. Tool calls arrive
+            // far more often than connection events, so sharing that slot would mean the window
+            // almost always catches up on a `toolCall` — a kind its reducer has no arm for — and
+            // never leaves its starting screen.
+            //
+            // The cost is that a tool call published while nothing is subscribed is gone, and
+            // that a burst past the bus's capacity drops the oldest — logged by the forwarder as
+            // the window falling behind. Both are acceptable and neither is a bug: the record
+            // that has to survive is the audit file, and the window shows a tail, not a ledger.
+            bus.publish_transient(CoreEvent::ToolCall {
+                capability: self.capability.clone(),
+                tool: tool.to_string(),
+                detail: detail.clone(),
+                outcome: outcome.as_str().to_string(),
+            });
+        }
         self.log.record(Entry {
             at: audit::now(),
             capability: self.capability.clone(),
@@ -335,5 +367,42 @@ mod tests {
             .await;
 
         assert!(out.is_ok(), "absolute paths address the host directly; see the spec");
+    }
+
+    #[tokio::test]
+    async fn a_call_reaches_the_bus_without_taking_over_the_catch_up_slot() {
+        // Two things at once, because they fail together. The window learns about a call from
+        // the bus, so a `Guarded` that only writes to disk shows nothing live; and a call that
+        // went out through `publish` rather than `publish_transient` would leave a `toolCall`
+        // sitting in the slot the window reads once at startup, which its reducer ignores.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let bus = EventBus::new(8);
+        let mut events = bus.subscribe();
+        let cap = Guarded::new(
+            FileIoServer(zyris_fs::LocalFileIo::rooted(dir.path())),
+            crate::Gate::running(),
+            crate::AuditLog::new(dir.path().join("audit.jsonl")),
+        )
+        .with_bus(bus.clone());
+
+        let _ = cap
+            .dispatch(call("stat", serde_json::json!({ "path": "hello.txt" })))
+            .await;
+
+        assert_eq!(
+            events.recv().await.unwrap(),
+            CoreEvent::ToolCall {
+                capability: "file_io".to_string(),
+                tool: "stat".to_string(),
+                detail: "path=hello.txt".to_string(),
+                outcome: "allowed".to_string(),
+            }
+        );
+        assert_eq!(
+            bus.latest(),
+            None,
+            "a tool call must not become the thing a late window catches up on"
+        );
     }
 }
