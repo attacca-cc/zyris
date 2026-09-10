@@ -48,8 +48,14 @@ fn main() -> anyhow::Result<()> {
     // runtime is built by hand and only driven with `block_on` on the branch that needs that.
     let runtime = tokio::runtime::Runtime::new()?;
 
+    // Built once, here: both runtimes need the same connector, and building it in `main` keeps
+    // `gui.rs` and `headless.rs` from each inventing their own.
+    let identity =
+        zyris_core::identity::Identity::new(zyris_core::secret::SecretStore::new("zyris"));
+    let connector = zyris_core::connection::Connector::new(identity, bus.clone());
+
     match cli::Cli::parse().mode() {
-        cli::Mode::Headless => runtime.block_on(headless::run(bus)),
-        cli::Mode::Gui => gui::run(bus, runtime.handle().clone()),
+        cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
+        cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector),
     }
 }

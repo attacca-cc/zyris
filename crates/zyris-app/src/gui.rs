@@ -9,14 +9,20 @@
 //! Tauri delivers right before the process goes away.
 
 use tauri::{RunEvent, WindowEvent};
+use zyris_core::connection::Connector;
 use zyris_core::{lifecycle, EventBus};
 
 use crate::tray;
 
-pub fn run(bus: EventBus, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
+pub fn run(
+    bus: EventBus,
+    runtime: tokio::runtime::Handle,
+    connector: Connector,
+) -> anyhow::Result<()> {
     tracing::info!("running with a window");
 
     let setup_bus = bus.clone();
+    let setup_runtime = runtime.clone();
     let app = tauri::Builder::default()
         // Must be registered first: a second launch has to reach the running instance before
         // anything else in this process starts.
@@ -34,6 +40,9 @@ pub fn run(bus: EventBus, runtime: tokio::runtime::Handle) -> anyhow::Result<()>
             // fires. Publishing earlier would return 0 and nobody would ever learn the core
             // started. Do not move this back above `setup`.
             lifecycle::start(&setup_bus);
+            // The GUI has no async context of its own; this is what the shared runtime handle
+            // from step 1 exists for.
+            setup_runtime.spawn(connector.run());
             Ok(())
         })
         .on_window_event(|window, event| {

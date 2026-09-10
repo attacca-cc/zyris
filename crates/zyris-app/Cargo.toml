@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 zyris-core = { path = "../zyris-core" }
+zyris = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 tauri = { workspace = true }
