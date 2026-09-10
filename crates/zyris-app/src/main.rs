@@ -26,7 +26,8 @@ fn main() -> anyhow::Result<()> {
     // another instance holds the lock (parsing after it meant a running instance made `--help`
     // print nothing and exit 0) and before `SecretStore::new` gets anywhere near the keychain,
     // which can raise an unlock dialog on some platforms.
-    let mode = cli::Cli::parse().mode();
+    let cli = cli::Cli::parse();
+    let mode = cli.mode();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -94,8 +95,16 @@ fn main() -> anyhow::Result<()> {
         "tools are announced: what ran is written here, and a relative path starts at the root"
     );
 
-    let connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
+    let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(tools.clone().into_capabilities());
+
+    // Said out loud, in the first lines of output: a run pointed at a local server is a run
+    // whose node and tokens live somewhere other than the real account, and a person who
+    // forgets which one they are on will read every later line wrongly.
+    if let Some(server) = cli.server() {
+        tracing::info!(%server, "dialling this server instead of Attacca, as --server asked");
+        connector = connector.with_server(server.to_string());
+    }
 
     match mode {
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
