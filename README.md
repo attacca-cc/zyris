@@ -74,9 +74,19 @@ pnpm --filter zyris-ui build
 Then, from the workspace root:
 
 ```bash
-cargo run -p zyris-app              # the window
+pnpm tauri dev                        # the window, with the dev server and hot reload
 cargo run -p zyris-app -- --headless  # no window, no tray
-cargo test                          # the frontend has to be built first, same as above
+cargo test                            # the frontend has to be built first, same as above
+```
+
+**Use `pnpm tauri dev` rather than `cargo run` for the window.** A debug build resolves the
+frontend through `devUrl` — Vite on `localhost:5173` — so `cargo run -p zyris-app` on its own
+opens a window that cannot reach anything and shows a connection error. `pnpm tauri dev` starts
+Vite first, which is what `beforeDevCommand` exists for. Only a release build embeds `ui/dist`:
+
+```bash
+cargo run --release -p zyris-app      # the window, running against the built assets
+pnpm tauri build                      # a .deb or .exe you can install
 ```
 
 ## Status
