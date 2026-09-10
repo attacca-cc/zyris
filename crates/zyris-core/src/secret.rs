@@ -65,8 +65,13 @@ impl SecretStore {
         match probe {
             Ok(()) => SecretStore { service: service.to_string(), file_dir: None },
             Err(error) => {
-                tracing::warn!(%error, "no usable keychain; keeping secrets in a 0600 file instead");
-                SecretStore { service: service.to_string(), file_dir: Some(default_file_dir(service)) }
+                let dir = default_file_dir(service);
+                tracing::warn!(
+                    %error,
+                    path = %dir.display(),
+                    "no usable keychain; keeping secrets in a 0600 file instead"
+                );
+                SecretStore { service: service.to_string(), file_dir: Some(dir) }
             }
         }
     }
@@ -133,9 +138,22 @@ impl SecretStore {
 }
 
 fn default_file_dir(service: &str) -> PathBuf {
-    directories::ProjectDirs::from("cc", "attacca", service)
-        .map(|dirs| dirs.config_dir().join("secrets"))
-        .unwrap_or_else(|| PathBuf::from(".").join(".zyris-secrets"))
+    if let Some(dirs) = directories::ProjectDirs::from("cc", "attacca", service) {
+        return dirs.config_dir().join("secrets");
+    }
+    // `ProjectDirs` failed to find a config directory (the platform's usual env vars for it are
+    // unset or malformed). The process's current working directory is not an acceptable
+    // fallback: it is `/` under a systemd unit and whatever a shortcut happens to set for a
+    // desktop launch, so a secret written there lands somewhere different — or unwritable —
+    // every launch, reads back as absent, and mints a second node token. The user's home
+    // directory is stable across launches and present whenever the platform can name one at all.
+    if let Some(dirs) = directories::BaseDirs::new() {
+        return dirs.home_dir().join(format!(".{service}")).join("secrets");
+    }
+    // No home directory either. `SecretStore::new` returns `SecretStore`, not a `Result`, so
+    // there is no `Err` to hand back here without changing that for every caller; `temp_dir` is
+    // at least an absolute, OS-chosen path rather than the CWD this function exists to avoid.
+    std::env::temp_dir().join(format!(".{service}-secrets"))
 }
 
 /// Writes `value` to `path` such that the file is never, even momentarily, readable by anyone
