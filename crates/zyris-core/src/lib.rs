@@ -2,5 +2,6 @@
 
 pub mod event;
 pub mod lifecycle;
+pub mod secret;
 
 pub use event::{CoreEvent, EventBus};
