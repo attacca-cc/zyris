@@ -204,9 +204,11 @@ impl Connector {
     ///
     /// The common case is that only the node was removed from Attacca, not the account
     /// authorized to run nodes on it — that account credential mints a fresh token with no
-    /// browser and no user action at all. Only when the credential is dead too
-    /// (`RegisterError::Revoked`) does this fall back to a full enrolment, at which point
-    /// `credential()` is what puts the onboarding screen up.
+    /// browser and no user action at all. Only when the credential itself cannot mint this node
+    /// (see [`credential_cannot_mint_this_node`]: revoked, or its grant too narrow for what a
+    /// node needs) does this fall back to a full enrolment, at which point `credential()` is
+    /// what puts the onboarding screen up. `mint_node_token` makes that same call for whichever
+    /// credential ends up being tried, so it is made in exactly one place.
     ///
     /// Called at most once per `run()`; see the comment at its one call site for why. Every
     /// failure here goes through `report_setup_failure` rather than publishing `SetupFailed`
@@ -222,7 +224,7 @@ impl Connector {
             return None;
         }
 
-        let credential = match self.identity.load() {
+        let stored_credential = match self.identity.load() {
             Ok(stored) => stored.credential,
             Err(error) => {
                 tracing::warn!(%error, "could not read stored identity while recovering from a dead node token");
@@ -231,46 +233,14 @@ impl Connector {
             }
         };
 
-        if let Some(credential) = credential {
-            match self.register(&self.account(credential)).await {
-                Ok(token) => {
-                    if token.is_some() {
-                        tracing::info!(
-                            "this node's token was refused; registered a replacement node with \
-                             the account already on file"
-                        );
-                    }
-                    return token;
-                }
-                // The credential itself is dead, not merely the token — fall through to a full
-                // enrolment below rather than reporting this as the final answer.
-                Err(RegisterError::Revoked) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "recovering with the existing account credential failed; not falling \
-                         back to enrolment for this"
-                    );
-                    self.report_setup_failure(error.to_string());
-                    return None;
-                }
-            }
-        }
-
-        // Either nothing was stored to try, or what was stored is dead too: the account grant
-        // itself needs a person again. `forget` also clears the node token, which is already
-        // gone, so a failed enrolment here leaves nothing stale behind to retry against next
-        // launch.
-        if let Err(error) = self.identity.forget() {
-            tracing::warn!(
-                %error,
-                "could not discard the dead account credential while falling back to enrolment"
-            );
-            self.report_setup_failure(error.to_string());
-            return None;
-        }
-
-        let credential = self.credential().await?;
+        // With nothing stored to try, go straight to a fresh enrolment; otherwise try the
+        // credential already on disk first. Either way, `mint_node_token` is what discards a
+        // credential that cannot mint this node and falls back to enrolment itself — see its
+        // doc comment — so there is nothing left to special-case here.
+        let credential = match stored_credential {
+            Some(credential) => credential,
+            None => self.credential().await?,
+        };
         self.mint_node_token(&self.account(credential)).await
     }
 
@@ -409,12 +379,44 @@ impl Connector {
             .build()
     }
 
-    /// Mints a node token and reports the outcome — the terminal path, reached when there is no
-    /// further recovery to attempt: either nothing was on disk yet, or a dead token was just
-    /// discarded and even a fresh enrolment's credential could not mint a replacement.
+    /// Mints a node token against `account` and reports the outcome.
+    ///
+    /// Ordinarily terminal: there is no further recovery to attempt for either caller — `token`,
+    /// on the very first run, or `recover_from_dead_token`'s own fallback. The one exception is a
+    /// credential that cannot mint this node at all ([`credential_cannot_mint_this_node`]):
+    /// revoked, or granted a scope too narrow for what a node asks for. A stored credential
+    /// already in that state, or one a person just granted too narrowly at the approval screen,
+    /// would otherwise dead-end forever — every future launch reads back the same unusable
+    /// credential, and the only way out today is deleting it by hand. So for exactly those
+    /// failures this discards the credential and enrols exactly once more before giving up for
+    /// good. That retry is bounded, not a loop: it cannot itself trigger another one, so this
+    /// still enrols at most a small, fixed number of times per call, never repeatedly.
     async fn mint_node_token(&self, account: &Account) -> Option<zyris::NodeToken> {
         match self.register(account).await {
             Ok(token) => token,
+            Err(error) if credential_cannot_mint_this_node(&error) => {
+                tracing::warn!(
+                    %error,
+                    "the account grant on disk cannot mint this node; discarding it and \
+                     enrolling again"
+                );
+                if let Err(error) = self.identity.forget() {
+                    tracing::warn!(
+                        %error,
+                        "could not discard the unusable credential; recovery cannot proceed"
+                    );
+                    self.report_setup_failure(error.to_string());
+                    return None;
+                }
+                let credential = self.credential().await?;
+                match self.register(&self.account(credential)).await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        self.report_setup_failure(error.to_string());
+                        None
+                    }
+                }
+            }
             Err(error) => {
                 self.report_setup_failure(error.to_string());
                 None
@@ -424,10 +426,11 @@ impl Connector {
 
     /// Mints a node token against `account` and stores it.
     ///
-    /// Returns the `RegisterError` rather than reporting it, so `recover_from_dead_token` can
-    /// tell `RegisterError::Revoked` — the account credential is dead too — apart from every
-    /// other failure, which recovery cannot do anything more about. `Ok(None)` is the one outcome
-    /// that distinction cannot help with: the mint itself succeeded but the token could not be
+    /// Returns the `RegisterError` rather than reporting it, so `mint_node_token` can tell which
+    /// failures mean the credential itself cannot mint this node
+    /// ([`credential_cannot_mint_this_node`]) apart from every other failure, which no amount of
+    /// discarding and re-enrolling can do anything about. `Ok(None)` is the one outcome that
+    /// distinction cannot help with: the mint itself succeeded but the token could not be
     /// written to disk, which is already reported below and terminal regardless of who called
     /// this.
     async fn register(&self, account: &Account) -> Result<Option<zyris::NodeToken>, RegisterError> {
@@ -483,6 +486,19 @@ enum DialEnd {
 /// recovery must not trigger for them.
 fn is_permanent_refusal(error: &zyris::ConnectError) -> bool {
     matches!(error, zyris::ConnectError::Revoked | zyris::ConnectError::Unauthorized)
+}
+
+/// Whether a registration failure means the credential itself cannot mint this node — a dead
+/// grant chain (`Revoked`), or a grant too narrow for what a node asks for (`ScopeExceeded`, the
+/// server clamping the request to what the account holds, or `Forbidden`, the account never
+/// having `nodes:write` at all) — as opposed to something discarding the credential and
+/// re-enrolling cannot fix either (the server being unreachable). `mint_node_token` discards the
+/// credential and enrols again for exactly these three; every other `RegisterError` is terminal.
+fn credential_cannot_mint_this_node(error: &RegisterError) -> bool {
+    matches!(
+        error,
+        RegisterError::Revoked | RegisterError::ScopeExceeded { .. } | RegisterError::Forbidden
+    )
 }
 
 #[cfg(test)]
@@ -587,6 +603,21 @@ mod tests {
         assert!(
             !is_permanent_refusal(&zyris::ConnectError::NoTlsProvider),
             "a missing TLS provider is a build problem, not a token problem"
+        );
+    }
+
+    #[test]
+    fn only_a_dead_or_too_narrow_grant_is_treated_as_unusable() {
+        assert!(credential_cannot_mint_this_node(&RegisterError::Revoked));
+        assert!(credential_cannot_mint_this_node(&RegisterError::Forbidden));
+        assert!(credential_cannot_mint_this_node(&RegisterError::ScopeExceeded {
+            requested: vec!["nodes:write".to_string()],
+            granted: vec!["agents:read".to_string()],
+        }));
+
+        assert!(
+            !credential_cannot_mint_this_node(&RegisterError::Unreachable(zyris::TransportError::Closed)),
+            "an unreachable server needs retrying, not a fresh enrolment"
         );
     }
 
