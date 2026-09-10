@@ -64,13 +64,30 @@ impl Connector {
                         node_id: conn.info().node_id.clone(),
                         node_name,
                     });
+
+                    // `conn` is this hook's own clone of the connection, spawned concurrently
+                    // with it — so awaiting its close does not race the link's own bookkeeping,
+                    // it just observes the same close. The link always dials again after an
+                    // established connection closes (it only stops redialling on a *dial*
+                    // refusal no retry can fix, checked before a connection ever came up, or on
+                    // being asked to disconnect — this app never asks), so a close seen here is
+                    // always followed by another attempt: `retrying: true`, then `Connecting`.
+                    let reason = conn.closed().await;
+                    bus.publish(CoreEvent::Disconnected {
+                        reason: reason.to_string(),
+                        retrying: true,
+                    });
+                    bus.publish(CoreEvent::Connecting);
                 }
             })
             .build()
         {
             Ok(node) => node,
             Err(error) => {
-                self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
+                self.bus.publish(CoreEvent::Disconnected {
+                    reason: error.to_string(),
+                    retrying: false,
+                });
                 return;
             }
         };
@@ -79,23 +96,28 @@ impl Connector {
             Ok(link) => link,
             Err(error) => {
                 // A refusal no retry can fix — a revoked token, a rejected node. Saying so is
-                // more useful than a spinner that never stops.
-                self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
+                // more useful than a spinner that never stops, and there is no link yet for
+                // anything to retry on.
+                self.bus.publish(CoreEvent::Disconnected {
+                    reason: error.to_string(),
+                    retrying: false,
+                });
                 return;
             }
         };
 
         // Nothing further is published here: `Connecting` already went out before the dial, and
-        // `on_connect` above reports the real thing — a connection actually established — for
-        // as long as this link keeps reconnecting.
+        // `on_connect` above reports the real thing — a connection actually established, and
+        // every disconnect and redial after it — for as long as this link keeps reconnecting.
 
-        // The link reconnects underneath us; this resolves only when it has given up for good.
+        // The link reconnects underneath us; this resolves only when it has given up for good,
+        // which `on_connect`'s own `Disconnected { retrying: true }` never claims.
         let ending = link.wait_closed().await;
         let reason = match ending {
             Ok(()) => "the link was closed".to_string(),
             Err(error) => error.to_string(),
         };
-        self.bus.publish(CoreEvent::Disconnected { reason });
+        self.bus.publish(CoreEvent::Disconnected { reason, retrying: false });
     }
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
@@ -182,7 +204,12 @@ impl Connector {
                 }
             }
             Err(error) => {
-                self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
+                // No link exists yet — this is the secret store itself refusing to answer, which
+                // has nothing to do with a connection going up or down. Publishing this as
+                // `Disconnected` would send the window to a "not connected" status screen for a
+                // failure that happened before a dial was ever attempted; `SetupFailed` is the
+                // channel the UI can tell apart from an ordinary connection problem.
+                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
                 return None;
             }
         }
@@ -221,15 +248,33 @@ impl Connector {
         match account.register_node(spec).await {
             Ok(token) => {
                 if let Err(error) = self.identity.save_node_token(&token) {
-                    // Not saving it means the next launch mints another. Say so loudly.
-                    self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
+                    // A node now exists in this person's Attacca account and its token has just
+                    // been thrown away: nothing on disk remembers it, so the very next launch
+                    // calls `register_node` again and mints a second node for the same machine —
+                    // silently, unless this is loud about it. The account-integrity constraint
+                    // this violates is the whole reason node tokens are read back before minting;
+                    // say exactly what happened and what to do about it.
+                    tracing::error!(
+                        %error,
+                        node_id = %token.node_id,
+                        "a node was registered with Attacca but its token could not be stored; \
+                         the next launch will register a duplicate node for this machine. Remove \
+                         the orphaned node from this account in Attacca, then restart Zyris."
+                    );
+                    self.bus.publish(CoreEvent::SetupFailed {
+                        reason: format!(
+                            "a node was registered but its token could not be saved ({error}); \
+                             restarting will register a duplicate. Remove the orphaned node in \
+                             Attacca first."
+                        ),
+                    });
                     return None;
                 }
                 tracing::info!("registered this node");
                 Some(token)
             }
             Err(error) => {
-                self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
+                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
                 None
             }
         }

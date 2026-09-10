@@ -11,7 +11,8 @@ export type CoreEvent =
   | { kind: "enrolmentFailed"; reason: string }
   | { kind: "connecting" }
   | { kind: "connected"; nodeId: string; nodeName: string }
-  | { kind: "disconnected"; reason: string };
+  | { kind: "disconnected"; reason: string; retrying: boolean }
+  | { kind: "setupFailed"; reason: string };
 
 export type Screen = "starting" | "onboarding" | "status";
 
@@ -21,6 +22,9 @@ export type State = {
   node: { nodeId: string; nodeName: string } | null;
   connected: boolean;
   problem: string | null;
+  // Only meaningful alongside `problem` on the status screen: whether the link is redialling on
+  // its own (true) or this is a dead end that needs a restart (false). See `disconnected` below.
+  retrying: boolean;
 };
 
 export const initialState: State = {
@@ -29,6 +33,7 @@ export const initialState: State = {
   node: null,
   connected: false,
   problem: null,
+  retrying: false,
 };
 
 // Applying the same event twice in a row must leave state exactly as applying it once did — the
@@ -52,6 +57,11 @@ export function reduce(state: State, event: CoreEvent): State {
       // Clear the code: a failure means it is no longer live, and the screen must not show a
       // dead code as though it were still waiting for approval.
       return { ...state, screen: "onboarding", code: null, problem: event.reason };
+    case "setupFailed":
+      // Reached only before a link ever came up (a stored secret could not be read, or this
+      // node could not be registered), so the onboarding screen — not status — is the honest
+      // place to show it; Onboarding.tsx explains that a restart is needed.
+      return { ...state, screen: "onboarding", code: null, problem: event.reason };
     case "connecting":
       // Leaving the node in place: during a reconnect it is still the same node, and blanking
       // the name would make the screen flicker between identities.
@@ -66,7 +76,13 @@ export function reduce(state: State, event: CoreEvent): State {
         problem: null,
       };
     case "disconnected":
-      return { ...state, screen: "status", connected: false, problem: event.reason };
+      return {
+        ...state,
+        screen: "status",
+        connected: false,
+        problem: event.reason,
+        retrying: event.retrying,
+      };
     default:
       return state;
   }

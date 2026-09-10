@@ -24,12 +24,22 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
                     url = %verification_uri,
                     "authorize this node: open the url and enter the code"
                 ),
-                CoreEvent::EnrolmentFailed { reason } => tracing::error!(%reason, "enrolment failed"),
+                CoreEvent::EnrolmentFailed { reason } => {
+                    tracing::error!(%reason, "enrolment failed; restart to try again")
+                }
                 CoreEvent::Connecting => tracing::info!("connecting"),
                 CoreEvent::Connected { node_id, node_name } => {
                     tracing::info!(%node_id, %node_name, "connected")
                 }
-                CoreEvent::Disconnected { reason } => tracing::warn!(%reason, "disconnected"),
+                CoreEvent::Disconnected { reason, retrying: true } => {
+                    tracing::warn!(%reason, "disconnected; the link is redialling on its own")
+                }
+                CoreEvent::Disconnected { reason, retrying: false } => {
+                    tracing::warn!(%reason, "disconnected; this will not retry, restart to reconnect")
+                }
+                CoreEvent::SetupFailed { reason } => {
+                    tracing::error!(%reason, "setup failed; restart to try again")
+                }
                 CoreEvent::Started | CoreEvent::ShuttingDown => {}
             }
         }

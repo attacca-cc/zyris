@@ -24,18 +24,34 @@ pub enum CoreEvent {
     /// event of this kind.
     #[serde(rename_all = "camelCase")]
     EnrolmentCode { user_code: String, verification_uri: String },
-    /// Enrolment ended without a credential — declined, or the request could not be made.
+    /// Enrolment ended without a credential — declined, or the request could not be made. This is
+    /// terminal: `Connector::run` has already returned, and only a restart tries again.
     #[serde(rename_all = "camelCase")]
     EnrolmentFailed { reason: String },
-    /// A dial is in flight. Also the state during every reconnect the link makes on its own.
+    /// A dial is in flight. Also the state during every reconnect the link makes on its own —
+    /// published right after the `Disconnected` that reports the link going down, whenever that
+    /// `Disconnected` says `retrying: true`.
     Connecting,
     /// The link is up. Published again on every reconnect, so a watcher that missed the first one
     /// still learns the node's identity.
     #[serde(rename_all = "camelCase")]
     Connected { node_id: String, node_name: String },
-    /// The link went down. The library reconnects on its own; this is not a request to retry.
+    /// The link went down.
+    ///
+    /// `retrying` tells apart two situations that look the same from a single event but are not:
+    /// `true` means the *link* went down and is backing off to dial again on its own — nothing to
+    /// do but wait, and a `Connecting` follows immediately. `false` means the *actor* has stopped
+    /// — a refusal no retry can fix, or the link giving up for good after exhausting its own
+    /// retries — and the only way back is to restart the process.
     #[serde(rename_all = "camelCase")]
-    Disconnected { reason: String },
+    Disconnected { reason: String, retrying: bool },
+    /// Something needed before this node could even attempt to connect failed, terminally: a
+    /// stored secret could not be read, or this node could not be registered with Attacca.
+    /// Kept apart from `Disconnected` because neither situation involves a link that ever came
+    /// up — reusing that channel is what previously sent a storage failure to a "not connected"
+    /// status screen. Like `EnrolmentFailed`, this is terminal and needs a restart.
+    #[serde(rename_all = "camelCase")]
+    SetupFailed { reason: String },
 }
 
 /// A fan-out channel the core owns and everything else borrows.

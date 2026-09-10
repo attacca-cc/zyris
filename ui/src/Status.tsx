@@ -24,7 +24,11 @@ export function Status({ state }: { state: State }) {
         <p className="problem">
           {state.problem}
           <br />
-          <span className="muted">Zyris keeps trying on its own.</span>
+          <span className="muted">
+            {state.retrying
+              ? "Zyris keeps trying on its own."
+              : "Zyris has stopped trying. Restart it to reconnect."}
+          </span>
         </p>
       )}
     </main>

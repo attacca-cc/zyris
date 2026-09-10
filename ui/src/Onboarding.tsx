@@ -5,9 +5,11 @@ import type { State } from "./state";
 export function Onboarding({ state }: { state: State }) {
   const code = state.code;
 
-  // Local, UI-only feedback for a failed "open the browser" click — the core has no notion
-  // of this, so it does not belong in `state`. It shares the same problem slot as
-  // `state.problem` so the screen has one spot for things that went wrong, not two.
+  // Local, UI-only feedback for a failed "open the browser" click — the core has no notion of
+  // this, so it does not belong in `state`. Rendered in the same spot as `state.problem`, but
+  // never at the same time as it and without the "restart needed" note: a core problem here
+  // means the connector has already stopped, but a failed browser-open is just that, and
+  // clicking again is a fine way to retry it.
   const [openError, setOpenError] = useState<string | null>(null);
 
   // Guards a rejection that arrives after what it was answering is no longer current.
@@ -46,8 +48,6 @@ export function Onboarding({ state }: { state: State }) {
     });
   }
 
-  const problem = state.problem ?? openError;
-
   return (
     <main className="screen">
       <h1>Authorize this computer</h1>
@@ -77,7 +77,17 @@ export function Onboarding({ state }: { state: State }) {
         !state.problem && <p className="muted">Asking Attacca for a code.</p>
       )}
 
-      {problem && <p className="problem">{problem}</p>}
+      {state.problem ? (
+        // A core-originated problem here (EnrolmentFailed or SetupFailed) means the connector
+        // has already stopped — unlike `openError` below, clicking again will not help.
+        <p className="problem">
+          {state.problem}
+          <br />
+          <span className="muted">Restart Zyris to try again.</span>
+        </p>
+      ) : (
+        openError && <p className="problem">{openError}</p>
+      )}
     </main>
   );
 }
