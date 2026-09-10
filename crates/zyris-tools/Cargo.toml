@@ -7,11 +7,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-zyris = { workspace = true }
+directories = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
 tracing = { workspace = true }
+zyris = { workspace = true }
+zyris-fs = { workspace = true }
+zyris-terminal = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
