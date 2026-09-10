@@ -39,26 +39,7 @@ impl Connector {
     /// connect is still a running program with a window to show, and an `Err` here would take
     /// the whole app down with it.
     pub async fn run(self) {
-        let credential = match self.credential().await {
-            Some(credential) => credential,
-            None => return,
-        };
-
-        let identity = self.identity.clone();
-        let account = Account::restore(&self.server, credential)
-            .on_rotate(move |rotated: AccountCredential| {
-                let identity = identity.clone();
-                async move {
-                    // Ok only after the write lands: a refresh token is single-use, and a crash
-                    // between "used" and "saved" is how a node gets revoked.
-                    identity
-                        .save_credential(&rotated)
-                        .map_err(|error| RotateError(error.to_string()))
-                }
-            })
-            .build();
-
-        let token = match self.node_token(&account).await {
+        let token = match self.token().await {
             Some(token) => token,
             None => return,
         };
@@ -66,7 +47,27 @@ impl Connector {
         let name = zyris::machine_name().unwrap_or_else(|| "zyris".to_string());
         self.bus.publish(CoreEvent::Connecting);
 
-        let node = match Node::builder().name(name.as_str()).kind(NodeKind::Desktop).build() {
+        let bus = self.bus.clone();
+        let node_name = name.clone();
+        let node = match Node::builder()
+            .name(name.as_str())
+            .kind(NodeKind::Desktop)
+            // `Ok(link)` below only means the link is running, not that a connection is up —
+            // `Node::connect` returns it even when the first dial merely failed and is retrying
+            // in the background. This hook is what actually fires per established connection,
+            // the first one and every reconnect, which is the only place `node_id` is real.
+            .on_connect(move |conn| {
+                let bus = bus.clone();
+                let node_name = node_name.clone();
+                async move {
+                    bus.publish(CoreEvent::Connected {
+                        node_id: conn.info().node_id.clone(),
+                        node_name,
+                    });
+                }
+            })
+            .build()
+        {
             Ok(node) => node,
             Err(error) => {
                 self.bus.publish(CoreEvent::Disconnected { reason: error.to_string() });
@@ -84,10 +85,9 @@ impl Connector {
             }
         };
 
-        self.bus.publish(CoreEvent::Connected {
-            node_id: link.node_id().to_string(),
-            node_name: name,
-        });
+        // Nothing further is published here: `Connecting` already went out before the dial, and
+        // `on_connect` above reports the real thing — a connection actually established — for
+        // as long as this link keeps reconnecting.
 
         // The link reconnects underneath us; this resolves only when it has given up for good.
         let ending = link.wait_closed().await;
@@ -168,9 +168,12 @@ impl Connector {
         });
     }
 
-    /// The stored node token, or one minted once and kept. Minting per launch would fill the
-    /// account with nodes, and the per-user cap is real.
-    async fn node_token(&self, account: &Account) -> Option<zyris::NodeToken> {
+    /// The stored node token, if there is one — dialling needs nothing else. A missing or
+    /// unparseable credential is not this actor's problem when a working token is already on
+    /// disk; see `identity.rs`, which documents this exact combination and leaves deciding what
+    /// to do about it to this module. Only when there is no token does a credential — and the
+    /// `Account` built from it — enter the picture at all, to mint one.
+    async fn token(&self) -> Option<zyris::NodeToken> {
         match self.identity.load() {
             Ok(stored) => {
                 if let Some(token) = stored.node_token {
@@ -184,6 +187,32 @@ impl Connector {
             }
         }
 
+        let credential = match self.credential().await {
+            Some(credential) => credential,
+            None => return None,
+        };
+
+        let identity = self.identity.clone();
+        let account = Account::restore(&self.server, credential)
+            .on_rotate(move |rotated: AccountCredential| {
+                let identity = identity.clone();
+                async move {
+                    // Ok only after the write lands: a refresh token is single-use, and a crash
+                    // between "used" and "saved" is how a node gets revoked.
+                    identity
+                        .save_credential(&rotated)
+                        .map_err(|error| RotateError(error.to_string()))
+                }
+            })
+            .build();
+
+        self.mint_node_token(&account).await
+    }
+
+    /// Mints a node token against this account and stores it. Reached only when nothing was
+    /// already on disk — minting on every launch would fill the account with nodes, and the
+    /// per-user cap is real.
+    async fn mint_node_token(&self, account: &Account) -> Option<zyris::NodeToken> {
         let spec = NodeSpec {
             name: zyris::machine_name().unwrap_or_else(|| "zyris".to_string()),
             platform: Some(std::env::consts::OS.to_string()),
@@ -230,6 +259,38 @@ mod tests {
             .expect("the connector published nothing within 5s")
             .unwrap();
         assert_eq!(first, CoreEvent::NeedsEnrolment);
+    }
+
+    /// The combination `identity.rs` documents and this module is the only place that decides
+    /// what to do about: a node token on disk with no credential beside it. Enrolling again would
+    /// send someone to a browser for a node that could dial right now.
+    #[tokio::test]
+    async fn a_stored_node_token_is_dialled_directly_without_a_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let token: zyris::NodeToken =
+            serde_json::from_str(r#"{"node_id":"n_1","slug":"laptop","token":"znt_abc"}"#)
+                .expect("NodeToken's shape changed; update this fixture");
+        identity.save_node_token(&token).unwrap();
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+
+        // Same unreachable server as above: what matters is what is published before the token
+        // is even handed to the network.
+        let connector = Connector::new(identity, bus).with_server("wss://127.0.0.1:1/ws".into());
+        tokio::spawn(connector.run());
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("the connector published nothing within 5s")
+            .unwrap();
+        assert_eq!(
+            first,
+            CoreEvent::Connecting,
+            "a stored token must be dialled directly, not sent through enrolment first"
+        );
     }
 
     #[test]
