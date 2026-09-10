@@ -1,6 +1,10 @@
 // Generates a plain 1024x1024 PNG for `tauri icon` to derive every platform size from.
 // Deliberately dependency-free: it is a placeholder, and pulling an image library in to draw a
 // solid square would be the wrong trade.
+//
+// `tauri icon assets/icon.png -o crates/zyris-app/icons` also emits Android, iOS, and Windows
+// Store (Square*.png, StoreLogo.png) assets with no flag to suppress them. This product targets
+// only Windows and Linux today, so prune those directories/files after regenerating.
 import { deflateSync } from "node:zlib";
 import { mkdirSync, writeFileSync } from "node:fs";
 
