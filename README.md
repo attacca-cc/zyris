@@ -79,14 +79,18 @@ cargo run -p zyris-app -- --headless  # no window, no tray
 cargo test                            # the frontend has to be built first, same as above
 ```
 
-**Use `pnpm tauri dev` rather than `cargo run` for the window.** A debug build resolves the
-frontend through `devUrl` — Vite on `localhost:5173` — so `cargo run -p zyris-app` on its own
-opens a window that cannot reach anything and shows a connection error. `pnpm tauri dev` starts
-Vite first, which is what `beforeDevCommand` exists for. Only a release build embeds `ui/dist`:
+**`cargo run` on its own never shows the interface.** Tauri decides between the dev server and
+the embedded assets from one cargo feature, not from the profile — `tauri::is_dev()` is
+`!cfg!(feature = "custom-protocol")`. Without that feature the app loads the frontend from
+`devUrl` (Vite on `localhost:5173`) and shows a connection error when nothing is serving there,
+in release builds just as much as in debug ones.
+
+So the window comes up through the Tauri CLI, or through cargo with the feature named:
 
 ```bash
-cargo run --release -p zyris-app      # the window, running against the built assets
-pnpm tauri build                      # a .deb or .exe you can install
+pnpm tauri dev                                        # starts Vite first, then the app
+pnpm tauri build                                      # a .deb or .exe, assets embedded
+cargo run --release --features custom-protocol -p zyris-app   # the same, without the bundler
 ```
 
 ## Status

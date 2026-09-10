@@ -22,3 +22,10 @@ tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 tauri-build = { workspace = true }
+
+[features]
+# Tauri decides dev-vs-production from this feature alone, not from the cargo profile:
+# `tauri::is_dev()` is `!cfg!(feature = "custom-protocol")`. Without it, even a release build
+# loads the frontend from `devUrl` and shows a connection error when no dev server is running.
+# `tauri build` enables it for you; a plain `cargo build --release` does not.
+custom-protocol = ["tauri/custom-protocol"]
