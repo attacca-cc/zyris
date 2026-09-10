@@ -10,9 +10,20 @@ use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RotateError};
 use crate::event::{CoreEvent, EventBus};
 use crate::identity::Identity;
 
-/// What the account grant asks for. `nodes:write` is the one that matters: without it
-/// `register_node` comes back forbidden and this node has no token to dial with.
-pub const ACCOUNT_SCOPES: &[&str] = &["agents:read", "nodes:write"];
+/// What the account grant asks for.
+///
+/// It must be a superset of [`NODE_SCOPES`] plus `nodes:write`. The server refuses to mint a
+/// node that asks for more than its account holds — `RegisterError::ScopeExceeded`, whose own
+/// documentation says the request is clamped to what the grant covers — so an account narrower
+/// than the node it is minting cannot mint it at all. `nodes:write` is what lets it mint one.
+pub const ACCOUNT_SCOPES: &[&str] = &[
+    "agents:read",
+    "sessions:read",
+    "sessions:write",
+    "events:read",
+    "peers:write",
+    "nodes:write",
+];
 
 /// What the node token carries, which is deliberately less. A static token must never be able to
 /// mint another one, so `nodes:write` stops at the account layer.
@@ -345,5 +356,20 @@ mod tests {
             "a static node token that can mint node tokens is an escalation"
         );
         assert!(ACCOUNT_SCOPES.contains(&"nodes:write"));
+    }
+
+    #[test]
+    fn the_account_grant_covers_everything_a_node_asks_for() {
+        // The server refuses to mint a node that requests more than its account holds, so an
+        // account narrower than NODE_SCOPES cannot register anything at all. This is not
+        // theoretical: the first real enrolment failed with ScopeExceeded because the account
+        // asked for two scopes and the node asked for five.
+        let missing: Vec<_> =
+            NODE_SCOPES.iter().filter(|scope| !ACCOUNT_SCOPES.contains(scope)).collect();
+
+        assert!(
+            missing.is_empty(),
+            "the account grant is missing scopes its own node will ask for: {missing:?}"
+        );
     }
 }
