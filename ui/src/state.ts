@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-// Mirrors CoreEvent in crates/zyris-core/src/event.rs. Serialized there as a tagged union with
+// Mirrors CoreEvent in crates/zyris-runtime/src/event.rs. Serialized there as a tagged union with
 // camelCase fields, so this is a transcription rather than a parse.
 export type CoreEvent =
   | { kind: "started" }

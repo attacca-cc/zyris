@@ -1,6 +1,6 @@
 //! The windowed runtime: the same core as `headless`, with something watching it.
 //!
-//! Starting and stopping the core goes through `zyris_core::lifecycle`, the same entry point
+//! Starting and stopping the core goes through `zyris_runtime::lifecycle`, the same entry point
 //! `headless.rs` calls.
 //!
 //! Tauri owns the main thread and runs its own event loop: `app.run` never returns, on any
@@ -9,8 +9,8 @@
 //! Tauri delivers right before the process goes away.
 
 use tauri::{RunEvent, WindowEvent};
-use zyris_core::connection::Connector;
-use zyris_core::{lifecycle, EventBus};
+use zyris_runtime::connection::Connector;
+use zyris_runtime::{lifecycle, EventBus};
 
 use crate::{bridge, tray};
 

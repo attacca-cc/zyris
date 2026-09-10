@@ -14,7 +14,7 @@
 //! it gets through the same reducer as a normal event.
 
 use tauri::{AppHandle, Emitter, State};
-use zyris_core::{CoreEvent, EventBus};
+use zyris_runtime::{CoreEvent, EventBus};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";

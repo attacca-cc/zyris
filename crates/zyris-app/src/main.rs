@@ -15,7 +15,7 @@ mod tray;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use zyris_core::EventBus;
+use zyris_runtime::EventBus;
 
 /// How many events a subscriber may fall behind before it loses the oldest.
 const EVENT_CAPACITY: usize = 64;
@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     // Before anything else does work: a second instance must not mint a second node token.
     // The GUI's single-instance plugin only covers window-to-window; this covers every mode.
     // Held for the rest of `main` — its drop, at process exit, is what releases the lock.
-    let _instance = match zyris_core::lock::InstanceLock::acquire("zyris") {
+    let _instance = match zyris_runtime::lock::InstanceLock::acquire("zyris") {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => {
             tracing::info!("another Zyris is already running on this machine; exiting");
@@ -59,8 +59,8 @@ fn main() -> anyhow::Result<()> {
     // Built once, here: both runtimes need the same connector, and building it in `main` keeps
     // `gui.rs` and `headless.rs` from each inventing their own.
     let identity =
-        zyris_core::identity::Identity::new(zyris_core::secret::SecretStore::new("zyris"));
-    let connector = zyris_core::connection::Connector::new(identity, bus.clone());
+        zyris_runtime::identity::Identity::new(zyris_runtime::secret::SecretStore::new("zyris"));
+    let connector = zyris_runtime::connection::Connector::new(identity, bus.clone());
 
     match mode {
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),

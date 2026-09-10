@@ -11,7 +11,7 @@ name = "zyris"
 path = "src/main.rs"
 
 [dependencies]
-zyris-core = { path = "../zyris-core" }
+zyris-runtime = { path = "../zyris-runtime" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 open = { workspace = true }

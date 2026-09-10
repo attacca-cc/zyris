@@ -6026,7 +6026,7 @@ version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a231eb37a5f282c34373dd6fdb85b8269173187b48c3f5b475bace6e63fd7a90"
 dependencies = [
- "zyris-core 0.2.0",
+ "zyris-core",
 ]
 
 [[package]]
@@ -6042,22 +6042,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "zyris-core 0.1.0",
-]
-
-[[package]]
-name = "zyris-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "fs4",
- "keyring",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "zyris",
+ "zyris-runtime",
 ]
 
 [[package]]
@@ -6110,4 +6095,19 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "zyris-runtime"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "fs4",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "zyris",
 ]
