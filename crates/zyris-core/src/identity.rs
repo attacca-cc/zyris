@@ -83,6 +83,17 @@ mod tests {
             .expect("NodeToken's shape changed; update this fixture")
     }
 
+    fn a_credential() -> AccountCredential {
+        AccountCredential::new(
+            "at_abc".to_string(),
+            "rt_abc".to_string(),
+            "n_1".to_string(),
+            "laptop".to_string(),
+            "person@example.com".to_string(),
+            4_102_444_800,
+        )
+    }
+
     #[test]
     fn nothing_stored_reads_as_a_clean_slate() {
         let dir = tempfile::tempdir().unwrap();
@@ -116,6 +127,34 @@ mod tests {
 
         let stored = identity.load().unwrap();
         assert!(stored.node_token.is_some());
+        assert!(stored.credential.is_none());
+    }
+
+    #[test]
+    fn a_saved_credential_reads_back() {
+        // The credential is the secret that *rotates*: `on_rotate` in `connection.rs` saves a
+        // fresh one on every refresh, and a failed save there revokes the node. It deserves the
+        // same round-trip coverage the node token already has.
+        let dir = tempfile::tempdir().unwrap();
+        let identity = identity(dir.path());
+
+        identity.save_credential(&a_credential()).unwrap();
+
+        let stored = identity.load().unwrap();
+        assert_eq!(stored.credential, Some(a_credential()));
+    }
+
+    #[test]
+    fn unreadable_stored_credential_json_reads_as_absent_rather_than_failing() {
+        // Mirrors `unreadable_stored_json_reads_as_absent_rather_than_failing` below, but for the
+        // credential file rather than the node token — the same corruption can happen to either.
+        let dir = tempfile::tempdir().unwrap();
+        let identity = identity(dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("account-credential"), "{ this is not json").unwrap();
+
+        let stored = identity.load().unwrap();
+
         assert!(stored.credential.is_none());
     }
 

@@ -59,3 +59,17 @@ pub fn open_verification_url(url: String) -> Result<(), String> {
     }
     open::that(url).map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_event_name_is_what_ui_src_state_ts_hardcodes() {
+        // `ui/src/state.ts` has no way to import this constant across the IPC boundary, so it
+        // duplicates the literal instead. Nothing else catches a rename on either side; this is
+        // the Rust half of that guard, and the comment beside the TypeScript literal is the
+        // other half.
+        assert_eq!(EVENT_NAME, "core-event");
+    }
+}

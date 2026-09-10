@@ -200,4 +200,52 @@ mod tests {
 
         assert_eq!(serde_json::from_str::<CoreEvent>(&json).unwrap(), event);
     }
+
+    #[test]
+    fn started_and_shutting_down_pin_their_wire_shape() {
+        assert_eq!(serde_json::to_string(&CoreEvent::Started).unwrap(), r#"{"kind":"started"}"#);
+        assert_eq!(
+            serde_json::to_string(&CoreEvent::ShuttingDown).unwrap(),
+            r#"{"kind":"shuttingDown"}"#
+        );
+    }
+
+    #[test]
+    fn enrolment_failed_pins_its_wire_shape() {
+        let json = serde_json::to_string(&CoreEvent::EnrolmentFailed {
+            reason: "the request was declined".into(),
+        })
+        .unwrap();
+
+        assert_eq!(json, r#"{"kind":"enrolmentFailed","reason":"the request was declined"}"#);
+    }
+
+    #[test]
+    fn connecting_pins_its_wire_shape() {
+        assert_eq!(serde_json::to_string(&CoreEvent::Connecting).unwrap(), r#"{"kind":"connecting"}"#);
+    }
+
+    #[test]
+    fn disconnected_pins_its_wire_shape_including_retrying() {
+        let json = serde_json::to_string(&CoreEvent::Disconnected {
+            reason: "transport closed: eof".into(),
+            retrying: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"kind":"disconnected","reason":"transport closed: eof","retrying":true}"#
+        );
+    }
+
+    #[test]
+    fn setup_failed_pins_its_wire_shape() {
+        let json = serde_json::to_string(&CoreEvent::SetupFailed {
+            reason: "secret store: no keyring".into(),
+        })
+        .unwrap();
+
+        assert_eq!(json, r#"{"kind":"setupFailed","reason":"secret store: no keyring"}"#);
+    }
 }
