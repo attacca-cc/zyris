@@ -13,10 +13,10 @@ use zyris_core::{lifecycle, EventBus};
 
 use crate::tray;
 
-pub fn run(bus: EventBus) -> anyhow::Result<()> {
-    lifecycle::start(&bus);
+pub fn run(bus: EventBus, runtime: tokio::runtime::Handle) -> anyhow::Result<()> {
     tracing::info!("running with a window");
 
+    let setup_bus = bus.clone();
     let app = tauri::Builder::default()
         // Must be registered first: a second launch has to reach the running instance before
         // anything else in this process starts.
@@ -25,8 +25,15 @@ pub fn run(bus: EventBus) -> anyhow::Result<()> {
             tray::show_main_window(app);
         }))
         .manage(bus.clone())
-        .setup(|app| {
+        .manage(runtime)
+        .setup(move |app| {
             tray::build(app.handle())?;
+            // Published here, after the tray (and anything else `setup` does) is built, rather
+            // than before the builder: `broadcast` never replays a send, so a subscriber wired
+            // up during setup — the Status tab, from step 2 on — has to already exist when this
+            // fires. Publishing earlier would return 0 and nobody would ever learn the core
+            // started. Do not move this back above `setup`.
+            lifecycle::start(&setup_bus);
             Ok(())
         })
         .on_window_event(|window, event| {

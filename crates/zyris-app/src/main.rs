@@ -2,6 +2,10 @@
 //!
 //! This file picks a runtime and does nothing else. Both runtimes are handed the same
 //! `EventBus`, because the difference between them is only whether anything is watching.
+//!
+//! The tokio runtime is built here, once, for both modes: from step 2 on, everything the core
+//! owns — a websocket, reconnect, token refresh — is async, and in GUI mode it needs somewhere
+//! to run since Tauri owns the main thread synchronously.
 
 mod cli;
 mod gui;
@@ -23,13 +27,12 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let bus = EventBus::new(EVENT_CAPACITY);
+    // Not `#[tokio::main]`: the GUI runtime has to own the main thread synchronously, so the
+    // runtime is built by hand and only driven with `block_on` on the branch that needs that.
+    let runtime = tokio::runtime::Runtime::new()?;
 
     match cli::Cli::parse().mode() {
-        // Not `#[tokio::main]`: the GUI runtime has to own the main thread, so the async
-        // runtime is built only on the branch that needs one.
-        cli::Mode::Headless => {
-            tokio::runtime::Runtime::new()?.block_on(headless::run(bus))
-        }
-        cli::Mode::Gui => gui::run(bus),
+        cli::Mode::Headless => runtime.block_on(headless::run(bus)),
+        cli::Mode::Gui => gui::run(bus, runtime.handle().clone()),
     }
 }
