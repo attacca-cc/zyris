@@ -1,7 +1,9 @@
 //! The windowed runtime: the same core as `headless`, with something watching it.
 //!
-//! Tauri owns the main thread and runs its own event loop, so this function does not return
-//! until the application exits.
+//! Tauri owns the main thread and runs its own event loop: `app.run` never returns, on any
+//! platform or exit path. Anything that must happen before the process ends — publishing
+//! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
+//! Tauri delivers right before the process goes away.
 
 use tauri::{RunEvent, WindowEvent};
 use zyris_core::{CoreEvent, EventBus};
@@ -35,17 +37,23 @@ pub fn run(bus: EventBus) -> anyhow::Result<()> {
         })
         .build(tauri::generate_context!())?;
 
-    app.run(|_app, event| {
+    app.run(move |_app, event| match event {
         // `code: None` means the last window closed rather than someone asking to quit.
         // Quitting goes through the tray, which calls `app.exit(0)` and arrives here with a code.
-        if let RunEvent::ExitRequested { api, code, .. } = event {
+        RunEvent::ExitRequested { api, code, .. } => {
             if code.is_none() {
                 api.prevent_exit();
             }
         }
+        // The event loop's final event, on every platform and every exit path — including the
+        // tray's Quit. This is the only place in this function that runs after `app.run` starts,
+        // since `app.run` itself never returns.
+        RunEvent::Exit => {
+            bus.publish(CoreEvent::ShuttingDown);
+            tracing::info!("stopped");
+        }
+        _ => {}
     });
 
-    bus.publish(CoreEvent::ShuttingDown);
-    tracing::info!("stopped");
     Ok(())
 }

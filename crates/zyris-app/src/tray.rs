@@ -4,7 +4,7 @@
 //! that has more than two states, belongs in the window instead.
 
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 /// Brings the window back, whether it was hidden or merely behind something.
@@ -31,9 +31,20 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         )
         .tooltip("Zyris")
         .menu(&menu)
-        // Left click opens the window; the menu is the right-click surface. Showing the menu on
-        // both leaves no way to open the window with one click.
+        // On Windows and macOS this keeps the menu off the left click, so left click can open
+        // the window instead. Tauri documents this as unsupported on Linux, where the menu may
+        // appear on any click regardless — there, "Open Zyris" in the menu is the reliable path.
         .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_main_window(app),
             // The only path that actually ends the process. Everything else is prevented in
