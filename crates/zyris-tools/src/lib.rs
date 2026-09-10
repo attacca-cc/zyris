@@ -5,7 +5,7 @@ pub mod audit;
 pub mod gate;
 pub mod guarded;
 
-pub use announce::{Announced, Tools, default_root};
+pub use announce::{Announced, Announcement, Tools, default_root};
 pub use audit::{AuditLog, Entry, Outcome};
 pub use gate::Gate;
 pub use guarded::Guarded;

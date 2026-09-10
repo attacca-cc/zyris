@@ -25,6 +25,21 @@ pub struct Announced {
     pub tools: Vec<String>,
 }
 
+/// Everything the window's Tools screen lists, in one answer.
+///
+/// The two paths travel with the capabilities because neither list can be read without them: an
+/// audit line says `path=notes/x.txt` rather than the resolved path, so the root is what makes it
+/// legible, and the file is the record the screen only shows a tail of. The root is **where a
+/// relative path starts, not a boundary** — an absolute path addresses the host directly and a
+/// command may `cd` anywhere — and anything rendering it has to say it that way.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Announcement {
+    pub capabilities: Vec<Announced>,
+    pub root: String,
+    pub audit_log: String,
+}
+
 /// Everything this machine announces, behind one switch and one log.
 ///
 /// `Clone` because the connector may rebuild its node on every dial. What survives a rebuild is
@@ -90,6 +105,19 @@ impl Tools {
             .collect()
     }
 
+    /// [`Self::announced`] and the two paths that make it readable, for the window.
+    ///
+    /// Answered on every ask rather than snapshotted at startup: rebuilding the descriptors costs
+    /// about a millisecond, and a snapshot is a list that can quietly disagree with what is
+    /// actually announced.
+    pub fn announcement(&self) -> Announcement {
+        Announcement {
+            capabilities: self.announced(),
+            root: self.root.display().to_string(),
+            audit_log: self.log.path().display().to_string(),
+        }
+    }
+
     /// Both capabilities are rooted explicitly. `PtyTerminal::default()` roots itself at
     /// `std::env::current_dir()` — `/` under a systemd unit and whatever a desktop launcher
     /// happened to set otherwise — and `LocalFileIo` has no default at all, so a relative path
@@ -130,4 +158,46 @@ pub fn default_root() -> PathBuf {
         "no home directory; relative paths from an agent will start here instead"
     );
     fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tools(dir: &Path) -> Tools {
+        Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
+    }
+
+    #[test]
+    fn both_capabilities_are_announced_with_their_tools() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let announced = tools(dir.path()).announced();
+
+        let names: Vec<&str> = announced.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["file_io", "terminal"]);
+        for capability in &announced {
+            assert!(
+                !capability.tools.is_empty(),
+                "{} announced no tools; the window would show a capability with nothing in it",
+                capability.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_announcement_is_shaped_the_way_the_window_reads_it() {
+        // `ui/src/Tools.tsx` transcribes this rather than parsing it, so the field names are the
+        // contract. Nothing else catches a rename on either side.
+        let dir = tempfile::tempdir().unwrap();
+        let announcement = tools(dir.path()).announcement();
+
+        let json = serde_json::to_value(&announcement).unwrap();
+
+        assert!(json["capabilities"][0]["name"].is_string());
+        assert!(json["capabilities"][0]["version"].is_number());
+        assert!(json["capabilities"][0]["tools"].is_array());
+        assert_eq!(json["root"], dir.path().display().to_string());
+        assert!(json["auditLog"].as_str().unwrap().ends_with("audit.jsonl"));
+    }
 }

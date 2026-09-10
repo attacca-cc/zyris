@@ -15,7 +15,7 @@
 
 use tauri::{AppHandle, Emitter, State};
 use zyris_runtime::{CoreEvent, EventBus};
-use zyris_tools::{AuditLog, Entry, Gate};
+use zyris_tools::{Announcement, AuditLog, Entry, Gate, Tools};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
@@ -89,6 +89,18 @@ pub fn set_paused(paused: bool, gate: State<Gate>, bus: State<EventBus>) {
 #[tauri::command]
 pub fn is_paused(gate: State<Gate>) -> bool {
     gate.is_paused()
+}
+
+/// What this machine announces, and the two paths that make the rest of the screen readable.
+///
+/// A command rather than an event, and it breaks no rule about core state living behind one: the
+/// capabilities were built in `main` and handed to the connector long before any window existed,
+/// `--headless` announces exactly the same ones without ever calling this, and nothing the core
+/// does depends on the answer. It only changes when the app restarts, so a window that asks once
+/// when the Tools screen opens is asking at the only moment that matters.
+#[tauri::command]
+pub fn announced_tools(tools: State<Tools>) -> Announcement {
+    tools.announcement()
 }
 
 /// The durable tail, newest first. Read from the audit file rather than from the bus, so the
