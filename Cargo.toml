@@ -5,6 +5,8 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# 1.85 is the first toolchain that understands edition 2024, which this workspace requires.
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/attacca-cc/zyris"
 

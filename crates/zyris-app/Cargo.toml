@@ -2,6 +2,7 @@
 name = "zyris-app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
@@ -15,7 +16,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

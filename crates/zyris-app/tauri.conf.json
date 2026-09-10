@@ -23,16 +23,18 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["deb", "nsis"],
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
+      "icons/icon.png",
       "icons/128x128@2x.png",
+      "icons/128x128.png",
+      "icons/64x64.png",
+      "icons/32x32.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]
