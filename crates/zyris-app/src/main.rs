@@ -21,6 +21,13 @@ use zyris_core::EventBus;
 const EVENT_CAPACITY: usize = 64;
 
 fn main() -> anyhow::Result<()> {
+    // Parsed before anything else touches the system. `clap` prints help or version text and
+    // exits the process by itself on `--help`/`--version`, and that has to work even while
+    // another instance holds the lock (parsing after it meant a running instance made `--help`
+    // print nothing and exit 0) and before `SecretStore::new` gets anywhere near the keychain,
+    // which can raise an unlock dialog on some platforms.
+    let mode = cli::Cli::parse().mode();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "zyris=info".into()),
@@ -55,7 +62,7 @@ fn main() -> anyhow::Result<()> {
         zyris_core::identity::Identity::new(zyris_core::secret::SecretStore::new("zyris"));
     let connector = zyris_core::connection::Connector::new(identity, bus.clone());
 
-    match cli::Cli::parse().mode() {
+    match mode {
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
         cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector),
     }
