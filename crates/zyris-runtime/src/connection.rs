@@ -5,7 +5,7 @@
 //! and reports what it observes.
 
 use zyris::enroll::{EnrollRequest, Progress};
-use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RotateError};
+use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RegisterError, RotateError};
 
 use crate::event::{CoreEvent, EventBus};
 use crate::identity::Identity;
@@ -55,6 +55,36 @@ impl Connector {
             None => return,
         };
 
+        let DialEnd::Refused(error) = self.dial(token).await else { return };
+
+        // A refusal `dial` cannot retry its way out of. Recover at most once: discard the dead
+        // token and try again with whatever credential is already on disk, minting a fresh token
+        // with no browser and no person involved when that credential is still good, and falling
+        // all the way back to enrolment only when it is not. A second refusal after that is
+        // treated as final rather than recovered from again — a server that refuses every token
+        // it is handed would otherwise mint a new node on every pass and fill the account, which
+        // is the exact failure the whole token-reuse design exists to prevent.
+        let Some(token) = self.recover_from_dead_token(&error).await else { return };
+
+        if let DialEnd::Refused(error) = self.dial(token).await {
+            self.bus.publish(CoreEvent::Disconnected {
+                reason: format!(
+                    "{error}, even after registering a new node with Attacca; giving up rather \
+                     than retrying forever"
+                ),
+                retrying: false,
+            });
+        }
+    }
+
+    /// Builds the node, dials once, and stays until the link is down for good.
+    ///
+    /// The library reconnects by itself underneath this — `on_connect` below reports every
+    /// established connection and every ordinary redial — so what this returns is only how the
+    /// link's life *ended*: [`DialEnd::Refused`] for the two `ConnectError` shades no retry can
+    /// fix (`Revoked`, `Unauthorized`), [`DialEnd::Stopped`] for everything else, which is
+    /// already published by the time this returns.
+    async fn dial(&self, token: zyris::NodeToken) -> DialEnd {
         let name = zyris::machine_name().unwrap_or_else(|| "zyris".to_string());
         self.bus.publish(CoreEvent::Connecting);
 
@@ -99,21 +129,23 @@ impl Connector {
                     reason: error.to_string(),
                     retrying: false,
                 });
-                return;
+                return DialEnd::Stopped;
             }
         };
 
         let link = match node.connect(&self.server, token.as_str()).await {
             Ok(link) => link,
+            Err(error) if is_permanent_refusal(&error) => return DialEnd::Refused(error),
             Err(error) => {
-                // A refusal no retry can fix — a revoked token, a rejected node. Saying so is
-                // more useful than a spinner that never stops, and there is no link yet for
-                // anything to retry on.
+                // A refusal no retry can fix, but not one recovery can do anything about either
+                // — a version mismatch or a missing TLS provider needs a different build, not a
+                // new token. Saying so is more useful than a spinner that never stops, and there
+                // is no link yet for anything to retry on.
                 self.bus.publish(CoreEvent::Disconnected {
                     reason: error.to_string(),
                     retrying: false,
                 });
-                return;
+                return DialEnd::Stopped;
             }
         };
 
@@ -123,12 +155,84 @@ impl Connector {
 
         // The link reconnects underneath us; this resolves only when it has given up for good,
         // which `on_connect`'s own `Disconnected { retrying: true }` never claims.
-        let ending = link.wait_closed().await;
-        let reason = match ending {
-            Ok(()) => "the link was closed".to_string(),
-            Err(error) => error.to_string(),
+        match link.wait_closed().await {
+            Ok(()) => {
+                self.bus.publish(CoreEvent::Disconnected {
+                    reason: "the link was closed".to_string(),
+                    retrying: false,
+                });
+                DialEnd::Stopped
+            }
+            Err(error) if is_permanent_refusal(&error) => DialEnd::Refused(error),
+            Err(error) => {
+                self.bus.publish(CoreEvent::Disconnected {
+                    reason: error.to_string(),
+                    retrying: false,
+                });
+                DialEnd::Stopped
+            }
+        }
+    }
+
+    /// Recovers from a node token that Attacca refused outright: discards it, then tries to mint
+    /// a replacement with whatever account credential is already on disk, before ever asking a
+    /// person for anything.
+    ///
+    /// The common case is that only the node was removed from Attacca, not the account
+    /// authorized to run nodes on it — that account credential mints a fresh token with no
+    /// browser and no user action at all. Only when the credential is dead too
+    /// (`RegisterError::Revoked`) does this fall back to a full enrolment, at which point
+    /// `credential()` is what puts the onboarding screen up.
+    ///
+    /// Called at most once per `run()`; see the comment at its one call site for why.
+    async fn recover_from_dead_token(&self, error: &zyris::ConnectError) -> Option<zyris::NodeToken> {
+        tracing::warn!(%error, "the stored node token was refused; discarding it and recovering");
+
+        if let Err(error) = self.identity.forget_node_token() {
+            self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+            return None;
+        }
+
+        let credential = match self.identity.load() {
+            Ok(stored) => stored.credential,
+            Err(error) => {
+                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                return None;
+            }
         };
-        self.bus.publish(CoreEvent::Disconnected { reason, retrying: false });
+
+        if let Some(credential) = credential {
+            match self.register(&self.account(credential)).await {
+                Ok(token) => {
+                    if token.is_some() {
+                        tracing::info!(
+                            "this node's token was refused; registered a replacement node with \
+                             the account already on file"
+                        );
+                    }
+                    return token;
+                }
+                // The credential itself is dead, not merely the token — fall through to a full
+                // enrolment below rather than reporting this as the final answer.
+                Err(RegisterError::Revoked) => {}
+                Err(error) => {
+                    self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                    return None;
+                }
+            }
+        }
+
+        // Either nothing was stored to try, or what was stored is dead too: the account grant
+        // itself needs a person again. `forget` also clears the node token, which is already
+        // gone, so a failed enrolment here leaves nothing stale behind to retry against next
+        // launch.
+        if let Err(error) = self.identity.forget() {
+            self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+            return None;
+        }
+
+        let credential = self.credential().await?;
+        self.mint_node_token(&self.account(credential)).await
     }
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
@@ -230,8 +334,15 @@ impl Connector {
             None => return None,
         };
 
+        self.mint_node_token(&self.account(credential)).await
+    }
+
+    /// Wraps a stored credential in the `Account` handle that can mint node tokens and refreshes
+    /// its own access token — the same wiring `token` and `recover_from_dead_token` both need,
+    /// extracted so the "Ok only after the write lands" rule lives in one place.
+    fn account(&self, credential: AccountCredential) -> Account {
         let identity = self.identity.clone();
-        let account = Account::restore(&self.server, credential)
+        Account::restore(&self.server, credential)
             .on_rotate(move |rotated: AccountCredential| {
                 let identity = identity.clone();
                 async move {
@@ -242,54 +353,85 @@ impl Connector {
                         .map_err(|error| RotateError(error.to_string()))
                 }
             })
-            .build();
-
-        self.mint_node_token(&account).await
+            .build()
     }
 
-    /// Mints a node token against this account and stores it. Reached only when nothing was
-    /// already on disk — minting on every launch would fill the account with nodes, and the
-    /// per-user cap is real.
+    /// Mints a node token and reports the outcome — the terminal path, reached when there is no
+    /// further recovery to attempt: either nothing was on disk yet, or a dead token was just
+    /// discarded and even a fresh enrolment's credential could not mint a replacement.
     async fn mint_node_token(&self, account: &Account) -> Option<zyris::NodeToken> {
-        let spec = NodeSpec {
-            name: zyris::machine_name().unwrap_or_else(|| "zyris".to_string()),
-            platform: Some(std::env::consts::OS.to_string()),
-            scopes: NODE_SCOPES.iter().map(|scope| scope.to_string()).collect(),
-        };
-        match account.register_node(spec).await {
-            Ok(token) => {
-                if let Err(error) = self.identity.save_node_token(&token) {
-                    // A node now exists in this person's Attacca account and its token has just
-                    // been thrown away: nothing on disk remembers it, so the very next launch
-                    // calls `register_node` again and mints a second node for the same machine —
-                    // silently, unless this is loud about it. The account-integrity constraint
-                    // this violates is the whole reason node tokens are read back before minting;
-                    // say exactly what happened and what to do about it.
-                    tracing::error!(
-                        %error,
-                        node_id = %token.node_id,
-                        "a node was registered with Attacca but its token could not be stored; \
-                         the next launch will register a duplicate node for this machine. Remove \
-                         the orphaned node from this account in Attacca, then restart Zyris."
-                    );
-                    self.bus.publish(CoreEvent::SetupFailed {
-                        reason: format!(
-                            "a node was registered but its token could not be saved ({error}); \
-                             restarting will register a duplicate. Remove the orphaned node in \
-                             Attacca first."
-                        ),
-                    });
-                    return None;
-                }
-                tracing::info!("registered this node");
-                Some(token)
-            }
+        match self.register(account).await {
+            Ok(token) => token,
             Err(error) => {
                 self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
                 None
             }
         }
     }
+
+    /// Mints a node token against `account` and stores it.
+    ///
+    /// Returns the `RegisterError` rather than reporting it, so `recover_from_dead_token` can
+    /// tell `RegisterError::Revoked` — the account credential is dead too — apart from every
+    /// other failure, which recovery cannot do anything more about. `Ok(None)` is the one outcome
+    /// that distinction cannot help with: the mint itself succeeded but the token could not be
+    /// written to disk, which is already reported below and terminal regardless of who called
+    /// this.
+    async fn register(&self, account: &Account) -> Result<Option<zyris::NodeToken>, RegisterError> {
+        let spec = NodeSpec {
+            name: zyris::machine_name().unwrap_or_else(|| "zyris".to_string()),
+            platform: Some(std::env::consts::OS.to_string()),
+            scopes: NODE_SCOPES.iter().map(|scope| scope.to_string()).collect(),
+        };
+        let token = account.register_node(spec).await?;
+        match self.identity.save_node_token(&token) {
+            Ok(()) => {
+                tracing::info!("registered this node");
+                Ok(Some(token))
+            }
+            Err(error) => {
+                // A node now exists in this person's Attacca account and its token has just
+                // been thrown away: nothing on disk remembers it, so the very next launch
+                // calls `register_node` again and mints a second node for the same machine —
+                // silently, unless this is loud about it. The account-integrity constraint
+                // this violates is the whole reason node tokens are read back before minting;
+                // say exactly what happened and what to do about it.
+                tracing::error!(
+                    %error,
+                    node_id = %token.node_id,
+                    "a node was registered with Attacca but its token could not be stored; \
+                     the next launch will register a duplicate node for this machine. Remove \
+                     the orphaned node from this account in Attacca, then restart Zyris."
+                );
+                self.bus.publish(CoreEvent::SetupFailed {
+                    reason: format!(
+                        "a node was registered but its token could not be saved ({error}); \
+                         restarting will register a duplicate. Remove the orphaned node in \
+                         Attacca first."
+                    ),
+                });
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// How [`Connector::dial`] ended.
+enum DialEnd {
+    /// The link is down for good and there is nothing more this actor can do — already
+    /// published.
+    Stopped,
+    /// The link is down for good because of a refusal that discarding the token and trying
+    /// again might fix. Not yet published: the caller decides what to do about it.
+    Refused(zyris::ConnectError),
+}
+
+/// The two `ConnectError` shades that mean "no retry will fix this" — a dead grant chain, or a
+/// token the server flatly refused. Every other variant means something a fresh token cannot
+/// help with either (a version mismatch, an unreachable server, a missing TLS provider), so
+/// recovery must not trigger for them.
+fn is_permanent_refusal(error: &zyris::ConnectError) -> bool {
+    matches!(error, zyris::ConnectError::Revoked | zyris::ConnectError::Unauthorized)
 }
 
 #[cfg(test)]
@@ -370,6 +512,108 @@ mod tests {
         assert!(
             missing.is_empty(),
             "the account grant is missing scopes its own node will ask for: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_dead_grant_chain_or_a_refused_token_triggers_recovery() {
+        assert!(is_permanent_refusal(&zyris::ConnectError::Revoked));
+        assert!(is_permanent_refusal(&zyris::ConnectError::Unauthorized));
+
+        assert!(
+            !is_permanent_refusal(&zyris::ConnectError::VersionMismatch {
+                ours: "1".to_string(),
+                theirs: Some("2".to_string()),
+            }),
+            "a version mismatch needs a different build, not a new token"
+        );
+        assert!(
+            !is_permanent_refusal(&zyris::ConnectError::Unreachable(
+                zyris::TransportError::Closed
+            )),
+            "an unreachable server is exactly what the link's own retries already handle"
+        );
+        assert!(
+            !is_permanent_refusal(&zyris::ConnectError::NoTlsProvider),
+            "a missing TLS provider is a build problem, not a token problem"
+        );
+    }
+
+    fn a_credential() -> AccountCredential {
+        AccountCredential::new(
+            "at_abc".to_string(),
+            "rt_abc".to_string(),
+            "n_1".to_string(),
+            "laptop".to_string(),
+            "person@example.com".to_string(),
+            4_102_444_800,
+        )
+    }
+
+    /// Recovery must not skip straight to enrolment when a perfectly good credential is sitting
+    /// on disk — that would send someone to a browser for a node that a stored account could
+    /// re-register on its own. This is checked without a real server: the only network call this
+    /// path makes is the mint itself, and an unreachable server answers that quickly enough to
+    /// prove the credential was tried at all, without needing to prove the mint succeeds.
+    #[tokio::test]
+    async fn recovery_tries_the_stored_credential_before_asking_a_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        identity.save_credential(&a_credential()).unwrap();
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+
+        let connector = Connector::new(identity.clone(), bus).with_server("wss://127.0.0.1:1/ws".into());
+        let token = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connector.recover_from_dead_token(&zyris::ConnectError::Revoked),
+        )
+        .await
+        .expect("recovery did not finish within 5s");
+
+        assert!(token.is_none(), "an unreachable server cannot mint anything");
+        let published = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("recovery published nothing within 5s")
+            .unwrap();
+        assert!(
+            matches!(published, CoreEvent::SetupFailed { .. }),
+            "the credential must be tried — and reported on — before any onboarding event fires, \
+             got {published:?}"
+        );
+        assert_eq!(
+            identity.load().unwrap().credential,
+            Some(a_credential()),
+            "a credential that was merely unreachable, not revoked, must not be discarded"
+        );
+    }
+
+    /// The other half of the same decision: with no credential to fall back on, recovery must go
+    /// straight to enrolment rather than reporting a bare failure and stopping.
+    #[tokio::test]
+    async fn recovery_with_no_credential_goes_straight_to_enrolment() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+
+        let connector = Connector::new(identity, bus).with_server("wss://127.0.0.1:1/ws".into());
+        tokio::spawn(async move {
+            connector.recover_from_dead_token(&zyris::ConnectError::Unauthorized).await;
+        });
+
+        let published = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("recovery published nothing within 5s")
+            .unwrap();
+        assert_eq!(
+            published,
+            CoreEvent::NeedsEnrolment,
+            "recovery with nothing to fall back on must ask a person, not just give up"
         );
     }
 }

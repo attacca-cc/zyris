@@ -53,6 +53,15 @@ impl Identity {
         self.store.delete(NODE_TOKEN)
     }
 
+    /// Discards only the node token, keeping the credential beside it.
+    ///
+    /// What recovering from a dead token needs: the node itself can be gone from Attacca while
+    /// the account that minted it is still good, and re-minting a replacement only needs that
+    /// credential to still be on disk.
+    pub fn forget_node_token(&self) -> Result<(), SecretError> {
+        self.store.delete(NODE_TOKEN)
+    }
+
     fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>, SecretError> {
         let Some(raw) = self.store.get(name)? else { return Ok(None) };
         match serde_json::from_str(&raw) {
@@ -181,5 +190,26 @@ mod tests {
         identity.forget().unwrap();
 
         assert!(identity.load().unwrap().node_token.is_none());
+    }
+
+    #[test]
+    fn forget_node_token_discards_only_the_token() {
+        // The whole point of having this apart from `forget`: recovering from a node Attacca
+        // refused must not also throw away a credential that is still good, or every recovery
+        // would send someone to a browser instead of quietly minting a replacement node.
+        let dir = tempfile::tempdir().unwrap();
+        let identity = identity(dir.path());
+        identity.save_node_token(&a_token()).unwrap();
+        identity.save_credential(&a_credential()).unwrap();
+
+        identity.forget_node_token().unwrap();
+
+        let stored = identity.load().unwrap();
+        assert!(stored.node_token.is_none(), "the dead token must be gone");
+        assert_eq!(
+            stored.credential,
+            Some(a_credential()),
+            "the credential must survive discarding the token"
+        );
     }
 }
