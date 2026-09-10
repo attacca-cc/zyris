@@ -40,6 +40,7 @@ CLAUDE.local.md
 AGENTS.md
 GEMINI.md
 .claude/
+.superpowers/
 .cursor/
 .cursorrules
 .aider*
