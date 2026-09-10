@@ -50,6 +50,15 @@ pub enum CoreEvent {
     /// Kept apart from `Disconnected` because neither situation involves a link that ever came
     /// up — reusing that channel is what previously sent a storage failure to a "not connected"
     /// status screen. Like `EnrolmentFailed`, this is terminal and needs a restart.
+    ///
+    /// Published only when no connection has come up yet during the current run — which
+    /// includes the automatic recovery a dead node token triggers (`connection.rs`'s
+    /// `recover_from_dead_token`), right up until it succeeds. The same kind of failure *after*
+    /// a connection has been live — recovery hitting trouble on a redial that was permanently
+    /// refused, say — is reported as `Disconnected { retrying: false }` instead: the person may
+    /// already be on the status screen by then, and this event's onboarding screen would wrongly
+    /// tell them their account needs reauthorizing. `Connector::report_setup_failure` is what
+    /// keeps that split in one place.
     #[serde(rename_all = "camelCase")]
     SetupFailed { reason: String },
 }

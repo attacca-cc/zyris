@@ -4,6 +4,9 @@
 //! again — so nothing here retries. This actor establishes the identity, hands it to the link,
 //! and reports what it observes.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use zyris::enroll::{EnrollRequest, Progress};
 use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RegisterError, RotateError};
 
@@ -34,11 +37,21 @@ pub struct Connector {
     identity: Identity,
     bus: EventBus,
     server: String,
+    /// Whether a connection has come up at least once during this `run()`. `dial`'s `on_connect`
+    /// hook sets this, before publishing `Connected`; `report_setup_failure` reads it to decide
+    /// whether a failure belongs on the onboarding screen (nothing has connected yet) or the
+    /// status screen the person may already be looking at (something did, before this happened).
+    ever_connected: Arc<AtomicBool>,
 }
 
 impl Connector {
     pub fn new(identity: Identity, bus: EventBus) -> Connector {
-        Connector { identity, bus, server: zyris::DEFAULT_SERVER_URL.to_string() }
+        Connector {
+            identity,
+            bus,
+            server: zyris::DEFAULT_SERVER_URL.to_string(),
+            ever_connected: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn with_server(mut self, url: String) -> Connector {
@@ -67,6 +80,11 @@ impl Connector {
         let Some(token) = self.recover_from_dead_token(&error).await else { return };
 
         if let DialEnd::Refused(error) = self.dial(token).await {
+            tracing::warn!(
+                %error,
+                "the freshly registered node's token was also refused; giving up rather than \
+                 recovering again"
+            );
             self.bus.publish(CoreEvent::Disconnected {
                 reason: format!(
                     "{error}, even after registering a new node with Attacca; giving up rather \
@@ -90,6 +108,7 @@ impl Connector {
 
         let bus = self.bus.clone();
         let node_name = name.clone();
+        let ever_connected = self.ever_connected.clone();
         let node = match Node::builder()
             .name(name.as_str())
             .kind(NodeKind::Desktop)
@@ -100,7 +119,12 @@ impl Connector {
             .on_connect(move |conn| {
                 let bus = bus.clone();
                 let node_name = node_name.clone();
+                let ever_connected = ever_connected.clone();
                 async move {
+                    // Set before publishing: `report_setup_failure`, called from a concurrent
+                    // recovery attempt, must never read a stale `false` and send a person who is
+                    // already looking at a working connection to the onboarding screen.
+                    ever_connected.store(true, Ordering::Relaxed);
                     bus.publish(CoreEvent::Connected {
                         node_id: conn.info().node_id.clone(),
                         node_name,
@@ -184,19 +208,25 @@ impl Connector {
     /// (`RegisterError::Revoked`) does this fall back to a full enrolment, at which point
     /// `credential()` is what puts the onboarding screen up.
     ///
-    /// Called at most once per `run()`; see the comment at its one call site for why.
+    /// Called at most once per `run()`; see the comment at its one call site for why. Every
+    /// failure here goes through `report_setup_failure` rather than publishing `SetupFailed`
+    /// directly — this runs just as readily after a connection was already live (a redial
+    /// permanently refused) as before one ever came up, and only the latter is what the
+    /// onboarding screen is honest about.
     async fn recover_from_dead_token(&self, error: &zyris::ConnectError) -> Option<zyris::NodeToken> {
         tracing::warn!(%error, "the stored node token was refused; discarding it and recovering");
 
         if let Err(error) = self.identity.forget_node_token() {
-            self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+            tracing::warn!(%error, "could not discard the dead node token; recovery cannot proceed");
+            self.report_setup_failure(error.to_string());
             return None;
         }
 
         let credential = match self.identity.load() {
             Ok(stored) => stored.credential,
             Err(error) => {
-                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                tracing::warn!(%error, "could not read stored identity while recovering from a dead node token");
+                self.report_setup_failure(error.to_string());
                 return None;
             }
         };
@@ -216,7 +246,12 @@ impl Connector {
                 // enrolment below rather than reporting this as the final answer.
                 Err(RegisterError::Revoked) => {}
                 Err(error) => {
-                    self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                    tracing::warn!(
+                        %error,
+                        "recovering with the existing account credential failed; not falling \
+                         back to enrolment for this"
+                    );
+                    self.report_setup_failure(error.to_string());
                     return None;
                 }
             }
@@ -227,12 +262,30 @@ impl Connector {
         // gone, so a failed enrolment here leaves nothing stale behind to retry against next
         // launch.
         if let Err(error) = self.identity.forget() {
-            self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+            tracing::warn!(
+                %error,
+                "could not discard the dead account credential while falling back to enrolment"
+            );
+            self.report_setup_failure(error.to_string());
             return None;
         }
 
         let credential = self.credential().await?;
         self.mint_node_token(&self.account(credential)).await
+    }
+
+    /// Publishes the right event for a failure on the way to a working token: `SetupFailed` when
+    /// no connection has come up yet during this `run()` — the onboarding screen is honest there
+    /// — or `Disconnected { retrying: false }` once one has, since a connection having been live
+    /// means the person may already be on the status screen, and sending them to onboarding
+    /// would wrongly say their account needs reauthorizing when the real problem was, say, a
+    /// network hiccup during recovery.
+    fn report_setup_failure(&self, reason: String) {
+        if self.ever_connected.load(Ordering::Relaxed) {
+            self.bus.publish(CoreEvent::Disconnected { reason, retrying: false });
+        } else {
+            self.bus.publish(CoreEvent::SetupFailed { reason });
+        }
     }
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
@@ -320,11 +373,11 @@ impl Connector {
             }
             Err(error) => {
                 // No link exists yet — this is the secret store itself refusing to answer, which
-                // has nothing to do with a connection going up or down. Publishing this as
-                // `Disconnected` would send the window to a "not connected" status screen for a
-                // failure that happened before a dial was ever attempted; `SetupFailed` is the
-                // channel the UI can tell apart from an ordinary connection problem.
-                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                // has nothing to do with a connection going up or down. `report_setup_failure`
+                // publishes `SetupFailed` here, since nothing has connected yet in this `run()`
+                // — see its doc comment for the case where the same failure means something
+                // else.
+                self.report_setup_failure(error.to_string());
                 return None;
             }
         }
@@ -363,7 +416,7 @@ impl Connector {
         match self.register(account).await {
             Ok(token) => token,
             Err(error) => {
-                self.bus.publish(CoreEvent::SetupFailed { reason: error.to_string() });
+                self.report_setup_failure(error.to_string());
                 None
             }
         }
@@ -403,13 +456,11 @@ impl Connector {
                      the next launch will register a duplicate node for this machine. Remove \
                      the orphaned node from this account in Attacca, then restart Zyris."
                 );
-                self.bus.publish(CoreEvent::SetupFailed {
-                    reason: format!(
-                        "a node was registered but its token could not be saved ({error}); \
-                         restarting will register a duplicate. Remove the orphaned node in \
-                         Attacca first."
-                    ),
-                });
+                self.report_setup_failure(format!(
+                    "a node was registered but its token could not be saved ({error}); \
+                     restarting will register a duplicate. Remove the orphaned node in \
+                     Attacca first."
+                ));
                 Ok(None)
             }
         }
@@ -536,6 +587,49 @@ mod tests {
         assert!(
             !is_permanent_refusal(&zyris::ConnectError::NoTlsProvider),
             "a missing TLS provider is a build problem, not a token problem"
+        );
+    }
+
+    #[test]
+    fn a_setup_style_failure_is_setup_failed_before_any_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+        let connector = Connector::new(identity, bus);
+
+        connector.report_setup_failure("disk went away".to_string());
+
+        assert_eq!(
+            events.try_recv().unwrap(),
+            CoreEvent::SetupFailed { reason: "disk went away".to_string() },
+            "nothing has connected yet, so onboarding is the honest screen"
+        );
+    }
+
+    /// The finding this covers: recovery from a dead node token can run after a connection has
+    /// already been live (a redial that gets permanently refused), and a `SetupFailed` there
+    /// would wrongly send someone who is already connected — or was a moment ago — to the
+    /// onboarding screen, telling them their account needs reauthorizing when it does not.
+    #[test]
+    fn the_same_failure_is_disconnected_once_a_connection_has_been_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+        let connector = Connector::new(identity, bus);
+        connector.ever_connected.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        connector.report_setup_failure("disk went away".to_string());
+
+        assert_eq!(
+            events.try_recv().unwrap(),
+            CoreEvent::Disconnected { reason: "disk went away".to_string(), retrying: false },
+            "the status screen the person may already be on is where this belongs, not onboarding"
         );
     }
 
