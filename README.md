@@ -30,6 +30,10 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 read off a screenshot goes straight into `move_to`. Neither is announced when there is no display
 server to reach, because a tool that is always going to fail is worse than a tool that is absent.
 
+The first time it runs, the window shows a short code and a link. Open the link, approve the code
+in your browser, and Zyris connects this machine to your account. From then on it reconnects on
+its own every time it starts, with no window required.
+
 ## Voice
 
 Speech runs on this machine. Whisper transcribes, Supertonic speaks, and the models are fetched
@@ -99,7 +103,7 @@ Early. The design is settled and the code is being written — see the roadmap b
 lands in what order. Nothing here is ready to install yet.
 
 1. Skeleton — workspace, tray, headless mode
-2. Connection — enrollment, credential storage, reconnect
+2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, input and capture, pause switch, audit log
 4. Autostart — Windows Task Scheduler, systemd user units, installers
 5. File transfer — peer endpoint, fingerprint confirmation, inbox

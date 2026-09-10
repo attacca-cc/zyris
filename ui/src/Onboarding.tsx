@@ -1,0 +1,93 @@
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import type { State } from "./state";
+
+export function Onboarding({ state }: { state: State }) {
+  const code = state.code;
+
+  // Local, UI-only feedback for a failed "open the browser" click — the core has no notion of
+  // this, so it does not belong in `state`. Rendered in the same spot as `state.problem`, but
+  // never at the same time as it and without the "restart needed" note: a core problem here
+  // means the connector has already stopped, but a failed browser-open is just that, and
+  // clicking again is a fine way to retry it.
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  // Guards a rejection that arrives after what it was answering is no longer current.
+  // `generation` is bumped whenever the reducer hands down a new `state` object — which is
+  // every real transition (the reducer only ever returns the *same* reference for events
+  // this screen doesn't care about) — not only when `code` itself changes. An in-flight open
+  // attempt captures the generation it started with and, when it settles, reports its
+  // outcome only if nothing has moved on since; otherwise it stays quiet rather than
+  // flashing an answer to a question nobody is asking any more. `mounted` guards the same
+  // way against the screen having unmounted entirely (e.g. the core reached "connected").
+  const guard = useRef({ generation: 0, mounted: true });
+
+  useEffect(() => {
+    guard.current.generation += 1;
+    setOpenError(null);
+  }, [state]);
+
+  useEffect(() => {
+    // StrictMode replays this effect as setup -> cleanup -> setup in development; the second
+    // setup has to restore `mounted`, or it latches false for the component's whole life.
+    guard.current.mounted = true;
+    return () => {
+      guard.current.mounted = false;
+    };
+  }, []);
+
+  function openVerificationUrl(url: string) {
+    setOpenError(null);
+    // A fresh click also supersedes whatever attempt came before it, same as a core
+    // transition does — the person asking again is a new question, not a continuation.
+    guard.current.generation += 1;
+    const attempt = guard.current.generation;
+    invoke("open_verification_url", { url }).catch((error) => {
+      if (!guard.current.mounted || guard.current.generation !== attempt) return;
+      setOpenError(typeof error === "string" ? error : "Could not open the browser.");
+    });
+  }
+
+  return (
+    <main className="screen">
+      <h1>Authorize this computer</h1>
+      <p className="lead">
+        Zyris hands this machine to your Attacca agents. Approve it once and it reconnects on its
+        own from then on.
+      </p>
+
+      {code ? (
+        <>
+          <ol className="steps">
+            <li>
+              Open{" "}
+              <button className="link" onClick={() => openVerificationUrl(code.verificationUri)}>
+                {code.verificationUri}
+              </button>
+            </li>
+            <li>
+              Enter this code: <code className="code">{code.userCode}</code>
+            </li>
+          </ol>
+          <p className="muted">Waiting for approval.</p>
+        </>
+      ) : (
+        // Do not say "asking" and "failed" at once: once a problem is known, this placeholder
+        // steps aside and lets the problem message below speak for the screen.
+        !state.problem && <p className="muted">Asking Attacca for a code.</p>
+      )}
+
+      {state.problem ? (
+        // A core-originated problem here (EnrolmentFailed or SetupFailed) means the connector
+        // has already stopped — unlike `openError` below, clicking again will not help.
+        <p className="problem">
+          {state.problem}
+          <br />
+          <span className="muted">Restart Zyris to try again.</span>
+        </p>
+      ) : (
+        openError && <p className="problem">{openError}</p>
+      )}
+    </main>
+  );
+}
