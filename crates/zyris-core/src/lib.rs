@@ -3,6 +3,7 @@
 pub mod event;
 pub mod identity;
 pub mod lifecycle;
+pub mod lock;
 pub mod secret;
 
 pub use event::{CoreEvent, EventBus};

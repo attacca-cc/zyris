@@ -26,6 +26,23 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Before anything else does work: a second instance must not mint a second node token.
+    // The GUI's single-instance plugin only covers window-to-window; this covers every mode.
+    // Held for the rest of `main` — its drop, at process exit, is what releases the lock.
+    let _instance = match zyris_core::lock::InstanceLock::acquire("zyris") {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            tracing::info!("another Zyris is already running on this machine; exiting");
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not take the instance lock; continuing anyway");
+            // A machine where the lock file cannot be created is a machine where refusing to
+            // start would be worse than the risk the lock guards against.
+            None
+        }
+    };
+
     let bus = EventBus::new(EVENT_CAPACITY);
     // Not `#[tokio::main]`: the GUI runtime has to own the main thread synchronously, so the
     // runtime is built by hand and only driven with `block_on` on the branch that needs that.
