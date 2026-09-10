@@ -1,5 +1,6 @@
 //! The Zyris runtime core. It runs whether or not anything is displaying it.
 
+pub mod connection;
 pub mod event;
 pub mod identity;
 pub mod lifecycle;
