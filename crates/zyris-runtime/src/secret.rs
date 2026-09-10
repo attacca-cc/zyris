@@ -18,6 +18,15 @@ pub enum Backend {
     File,
 }
 
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Keychain => write!(f, "the OS keychain"),
+            Backend::File => write!(f, "a local file"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum SecretError {
     /// The backing store refused. Carries the backend's own words rather than flattening them.
@@ -84,6 +93,16 @@ impl SecretStore {
 
     pub fn backend(&self) -> Backend {
         if self.file_dir.is_some() { Backend::File } else { Backend::Keychain }
+    }
+
+    /// Where the file backend keeps its secrets — resolved the same way whether or not this
+    /// store is currently *on* that backend. A non-secret marker (see `identity.rs`) has to live
+    /// somewhere that does not move depending on which backend a given launch happens to probe
+    /// its way onto, and this directory — pinned by `with_file_dir` in tests, computed by
+    /// `default_file_dir` otherwise — is the one stable answer: it is where the file backend
+    /// would land regardless of whether the keychain is what actually answered this time.
+    pub fn file_dir(&self) -> PathBuf {
+        self.file_dir.clone().unwrap_or_else(|| default_file_dir(&self.service))
     }
 
     pub fn get(&self, name: &str) -> Result<Option<String>, SecretError> {
@@ -245,6 +264,13 @@ mod tests {
 
         assert_eq!(store.get("account").unwrap(), Some("a".to_string()));
         assert_eq!(store.get("node").unwrap(), Some("b".to_string()));
+    }
+
+    #[test]
+    fn file_dir_reports_the_pinned_test_directory_rather_than_the_real_default() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(store(dir.path()).file_dir(), dir.path());
     }
 
     #[cfg(unix)]

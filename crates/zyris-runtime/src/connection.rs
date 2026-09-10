@@ -260,6 +260,28 @@ impl Connector {
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
     async fn credential(&self) -> Option<AccountCredential> {
+        // Checked before anything else: if the identity actually lives in a backend this launch
+        // cannot reach, `self.identity.load()` below will honestly report nothing stored — and
+        // the rest of this method would honestly, wrongly, start a fresh enrolment over it,
+        // minting a second node while the first one's identity sits untouched in the backend
+        // this launch cannot see. See `Identity::stranded_in`.
+        if let Some(backend) = self.identity.stranded_in() {
+            let reason = match backend {
+                crate::secret::Backend::Keychain => "the keychain holding this node's identity \
+                    is not reachable right now; not starting a fresh enrolment, since that would \
+                    register a second node for this machine. Restart once the keychain is \
+                    available again."
+                    .to_string(),
+                crate::secret::Backend::File => "this node's identity is stored in a local file \
+                    this launch cannot see; not starting a fresh enrolment, since that would \
+                    register a second node for this machine. Restart in the same environment \
+                    this node was set up in."
+                    .to_string(),
+            };
+            self.report_setup_failure(reason);
+            return None;
+        }
+
         let stored = match self.identity.load() {
             Ok(stored) => stored,
             Err(error) => {
@@ -740,5 +762,39 @@ mod tests {
             CoreEvent::NeedsEnrolment,
             "recovery with nothing to fall back on must ask a person, not just give up"
         );
+    }
+
+    /// The finding this covers: a credential already living in the keychain must not be
+    /// declared missing just because this particular launch's `SecretStore` resolved to the file
+    /// backend instead — that would mint a second node while the first identity sits untouched
+    /// in the keychain. A marker naming a backend this launch did not resolve to must stop
+    /// `credential()` before it ever gets the chance to say `NeedsEnrolment`.
+    #[tokio::test]
+    async fn a_stranded_identity_reports_setup_failed_instead_of_asking_to_enrol_again() {
+        let dir = tempfile::tempdir().unwrap();
+        // `with_file_dir` always resolves to `File`, so a marker naming `Keychain` can never
+        // agree with what this store resolves to — exactly the mismatch a real machine would
+        // see when the keychain that used to answer stops being reachable.
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(dir.path().join("backend"), "keychain").unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+
+        let connector = Connector::new(identity, bus).with_server("wss://127.0.0.1:1/ws".into());
+        tokio::spawn(connector.run());
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("the connector published nothing within 5s")
+            .unwrap();
+        match first {
+            CoreEvent::SetupFailed { reason } => {
+                assert!(reason.contains("keychain"), "the reason should name the stranded backend: {reason}");
+            }
+            other => panic!("expected SetupFailed, not a fresh enrolment prompt; got {other:?}"),
+        }
     }
 }
