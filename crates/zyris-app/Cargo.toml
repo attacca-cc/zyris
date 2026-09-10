@@ -15,6 +15,7 @@ zyris-core = { path = "../zyris-core" }
 zyris = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
+open = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }

@@ -7,6 +7,7 @@
 //! owns — a websocket, reconnect, token refresh — is async, and in GUI mode it needs somewhere
 //! to run since Tauri owns the main thread synchronously.
 
+mod bridge;
 mod cli;
 mod gui;
 mod headless;

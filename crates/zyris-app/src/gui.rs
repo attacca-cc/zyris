@@ -12,7 +12,7 @@ use tauri::{RunEvent, WindowEvent};
 use zyris_core::connection::Connector;
 use zyris_core::{lifecycle, EventBus};
 
-use crate::tray;
+use crate::{bridge, tray};
 
 pub fn run(
     bus: EventBus,
@@ -32,6 +32,7 @@ pub fn run(
         }))
         .manage(bus.clone())
         .manage(runtime)
+        .invoke_handler(tauri::generate_handler![bridge::open_verification_url])
         .setup(move |app| {
             tray::build(app.handle())?;
             // Published here, after the tray (and anything else `setup` does) is built, rather
@@ -43,6 +44,7 @@ pub fn run(
             // The GUI has no async context of its own; this is what the shared runtime handle
             // from step 1 exists for.
             setup_runtime.spawn(connector.run());
+            bridge::forward(app.handle().clone(), setup_bus.clone(), &setup_runtime);
             Ok(())
         })
         .on_window_event(|window, event| {
