@@ -34,21 +34,37 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // Before anything else does work: a second instance must not mint a second node token.
-    // The GUI's single-instance plugin only covers window-to-window; this covers every mode.
-    // Held for the rest of `main` — its drop, at process exit, is what releases the lock.
-    let _instance = match zyris_runtime::lock::InstanceLock::acquire("zyris") {
-        Ok(Some(lock)) => Some(lock),
-        Ok(None) => {
-            tracing::info!("another Zyris is already running on this machine; exiting");
-            return Ok(());
+    // A second instance must not mint a second node token — but the two modes take the
+    // instance lock in different places, because they need different things from a refusal.
+    //
+    // Headless takes it right here, before anything else does work (in particular, before
+    // `SecretStore::new` below gets anywhere near the keychain, which can raise an unlock
+    // dialog on some platforms): there is no plugin to reach and nothing to focus, so a second
+    // headless launch should simply be refused as early as possible.
+    //
+    // The GUI takes the very same lock, by the same name, from inside `gui::run`'s own
+    // `setup()` instead — after `tauri_plugin_single_instance` has had first refusal. Taking it
+    // here would refuse a second GUI launch before it ever reached that plugin, which is what
+    // is supposed to focus the already-running window; see `gui.rs`.
+    //
+    // Either way, whichever process actually acquires it holds the guard for the rest of its
+    // run — its drop is what releases the lock.
+    let _instance = if mode == cli::Mode::Headless {
+        match zyris_runtime::lock::InstanceLock::acquire("zyris") {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => {
+                tracing::info!("another Zyris is already running on this machine; exiting");
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not take the instance lock; continuing anyway");
+                // A machine where the lock file cannot be created is a machine where refusing
+                // to start would be worse than the risk the lock guards against.
+                None
+            }
         }
-        Err(error) => {
-            tracing::warn!(%error, "could not take the instance lock; continuing anyway");
-            // A machine where the lock file cannot be created is a machine where refusing to
-            // start would be worse than the risk the lock guards against.
-            None
-        }
+    } else {
+        None
     };
 
     let bus = EventBus::new(EVENT_CAPACITY);

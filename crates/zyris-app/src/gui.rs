@@ -8,7 +8,7 @@
 //! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
 //! Tauri delivers right before the process goes away.
 
-use tauri::{RunEvent, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, EventBus};
 
@@ -37,20 +37,41 @@ pub fn run(
             bridge::latest_event,
         ])
         .setup(move |app| {
+            // Taken here, after the single-instance plugin above has already had first refusal:
+            // a second GUI launch has to reach that plugin — which focuses the running window
+            // and lets this process exit — rather than being turned away before Tauri even
+            // starts. `main.rs` takes the very same lock, by the same name, for the headless
+            // branch, where there is no plugin to reach first; see its comment.
+            //
+            // `manage`d rather than kept as a local: a local here would drop, and release the
+            // lock, the moment this closure returns — the guard has to live for the app's whole
+            // run, not just its setup.
+            match zyris_runtime::lock::InstanceLock::acquire("zyris") {
+                Ok(Some(lock)) => {
+                    app.manage(lock);
+                }
+                Ok(None) => {
+                    tracing::info!("another Zyris is already running on this machine; exiting");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not take the instance lock; continuing anyway");
+                }
+            }
+
             tray::build(app.handle())?;
-            // Published here, after the tray (and anything else `setup` does) is built, rather
-            // than before the builder: `broadcast` never replays a send, so a subscriber wired
-            // up during setup — the Status tab, from step 2 on — has to already exist when this
-            // fires. Publishing earlier would return 0 and nobody would ever learn the core
-            // started. Do not move this back above `setup`.
-            lifecycle::start(&setup_bus);
-            // The bridge must be subscribed before the connector can publish anything, for the
-            // same reason `headless.rs` subscribes before it spawns the connector: the connector
-            // publishes `NeedsEnrolment` (or dials straight away) within microseconds of being
-            // spawned, and a subscription wired up after that has already missed it on the
-            // broadcast channel — `latest_event` covers the window's own late `listen()`, but
-            // only if the bridge itself was already forwarding by the time these events fired.
+            // The bridge must be subscribed before the connector can publish anything, and
+            // before `lifecycle::start` below — for the same reason `headless.rs` subscribes
+            // before either fires: the connector publishes `NeedsEnrolment` (or dials straight
+            // away) within microseconds of being spawned, and `broadcast` never replays a send
+            // to a subscriber that shows up late. `latest_event` covers the window's own late
+            // `listen()`, but only if the bridge itself was already forwarding by the time these
+            // events fired.
             bridge::forward(app.handle().clone(), setup_bus.clone(), &setup_runtime);
+            // Published only now that the bridge above is already subscribed — publishing
+            // earlier is a silent no-op, since `broadcast` never replays a send to a later
+            // subscriber. Do not move this back above the bridge.
+            lifecycle::start(&setup_bus);
             // The GUI has no async context of its own; this is what the shared runtime handle
             // from step 1 exists for.
             setup_runtime.spawn(connector.run());
