@@ -6,6 +6,7 @@
 mod cli;
 mod gui;
 mod headless;
+mod tray;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
