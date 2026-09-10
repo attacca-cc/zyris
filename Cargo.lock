@@ -6161,6 +6161,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "directories",
  "open",
  "tauri",
  "tauri-build",
@@ -6169,6 +6170,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zyris-runtime",
+ "zyris-tools",
 ]
 
 [[package]]

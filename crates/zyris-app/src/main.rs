@@ -76,10 +76,47 @@ fn main() -> anyhow::Result<()> {
     // `gui.rs` and `headless.rs` from each inventing their own.
     let identity =
         zyris_runtime::identity::Identity::new(zyris_runtime::secret::SecretStore::new("zyris"));
-    let connector = zyris_runtime::connection::Connector::new(identity, bus.clone());
+
+    // Built here, once, for the same reason the connector is: the switch has to stop tools with
+    // the window closed exactly as it does with it open, and a `Tools` per runtime would be two
+    // switches and two logs that disagree.
+    let tools = zyris_tools::Tools::new(
+        zyris_tools::Gate::running(),
+        zyris_tools::AuditLog::new(audit_path()),
+        zyris_tools::default_root(),
+    );
+    // Both paths, once, at startup. The root matters as much as the log's own path: an entry
+    // records the caller's path string rather than the resolved one, so a line reading
+    // `path=notes/x.txt` cannot be read without knowing what it resolved against.
+    tracing::info!(
+        audit_log = %tools.log().path().display(),
+        capability_root = %tools.root().display(),
+        "tools are announced: what ran is written here, and a relative path starts at the root"
+    );
+
+    let connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
+        .with_capabilities(tools.clone().into_capabilities());
 
     match mode {
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
         cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector),
     }
+}
+
+/// Where the record of what ran lives: beside the other per-user state, never beside the binary.
+///
+/// The fallbacks mirror `SecretStore`'s, and for the same reason — the current directory is `/`
+/// under a systemd unit and whatever a shortcut set for a desktop launch, so a log written there
+/// lands somewhere different every launch.
+fn audit_path() -> std::path::PathBuf {
+    if let Some(dirs) = directories::ProjectDirs::from("cc", "attacca", "zyris") {
+        return dirs.data_dir().join("audit.jsonl");
+    }
+    if let Some(dirs) = directories::BaseDirs::new() {
+        return dirs.home_dir().join(".zyris").join("audit.jsonl");
+    }
+    // No directory the platform can name. `AuditLog` survives a path it cannot write — it says
+    // so in the process log and never fails a tool call — so an absolute, OS-chosen path is a
+    // better last resort than refusing to start.
+    std::env::temp_dir().join("zyris-audit.jsonl")
 }

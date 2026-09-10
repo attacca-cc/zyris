@@ -42,6 +42,18 @@ pub struct Connector {
     /// whether a failure belongs on the onboarding screen (nothing has connected yet) or the
     /// status screen the person may already be looking at (something did, before this happened).
     ever_connected: Arc<AtomicBool>,
+    /// What this node announces.
+    ///
+    /// Deliberately the built capability values rather than the type that owns them: taking a
+    /// `zyris_tools::Tools` here would make this crate depend on `zyris-tools`, and
+    /// `zyris-tools` has to stay free to depend on this one so a guarded call can publish on the
+    /// [`EventBus`]. Both directions at once is a cycle cargo refuses. `main` owns the `Tools`
+    /// and hands over what it built.
+    ///
+    /// `Arc`s because `dial` takes `&self` and `run` calls it up to twice — once with the stored
+    /// token, once more after recovering from a dead one — so the same capabilities have to be
+    /// available to a second node without the first having consumed them.
+    capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
 }
 
 impl Connector {
@@ -51,11 +63,22 @@ impl Connector {
             bus,
             server: zyris::DEFAULT_SERVER_URL.to_string(),
             ever_connected: Arc::new(AtomicBool::new(false)),
+            capabilities: Vec::new(),
         }
     }
 
     pub fn with_server(mut self, url: String) -> Connector {
         self.server = url;
+        self
+    }
+
+    /// What this node offers an agent on the other end. A connector with none is a legitimate
+    /// node: it connects, and announces nothing.
+    pub fn with_capabilities(
+        mut self,
+        capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
+    ) -> Connector {
+        self.capabilities = capabilities;
         self
     }
 
@@ -109,7 +132,7 @@ impl Connector {
         let bus = self.bus.clone();
         let node_name = name.clone();
         let ever_connected = self.ever_connected.clone();
-        let node = match Node::builder()
+        let mut builder = Node::builder()
             .name(name.as_str())
             .kind(NodeKind::Desktop)
             // `Ok(link)` below only means the link is running, not that a connection is up —
@@ -144,9 +167,16 @@ impl Connector {
                     });
                     bus.publish(CoreEvent::Connecting);
                 }
-            })
-            .build()
-        {
+            });
+
+        // Cloned rather than moved: `run` dials a second time after recovering from a dead
+        // token, and that node has to announce the same capabilities. The `Arc`s are what make
+        // that free, and what keeps both nodes' `Guarded`s sharing one gate and one log.
+        for capability in &self.capabilities {
+            builder = builder.capability_arc(capability.clone());
+        }
+
+        let node = match builder.build() {
             Ok(node) => node,
             Err(error) => {
                 self.bus.publish(CoreEvent::Disconnected {

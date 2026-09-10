@@ -12,8 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 zyris-runtime = { path = "../zyris-runtime" }
+zyris-tools = { path = "../zyris-tools" }
 anyhow = { workspace = true }
 clap = { workspace = true }
+directories = { workspace = true }
 open = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
