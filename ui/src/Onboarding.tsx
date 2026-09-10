@@ -26,6 +26,9 @@ export function Onboarding({ state }: { state: State }) {
   }, [state]);
 
   useEffect(() => {
+    // StrictMode replays this effect as setup -> cleanup -> setup in development; the second
+    // setup has to restore `mounted`, or it latches false for the component's whole life.
+    guard.current.mounted = true;
     return () => {
       guard.current.mounted = false;
     };
