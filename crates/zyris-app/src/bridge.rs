@@ -2,10 +2,19 @@
 //!
 //! Everything the window knows arrives through this channel. Keeping it to one event name means
 //! the UI has a single subscription and a single switch, and it keeps core state out of Tauri
-//! commands — the window asks for nothing, it is told.
+//! commands — the window asks for nothing but what it missed, and it asks for that exactly once,
+//! right after it starts listening.
+//!
+//! `app.emit` only reaches JS listeners already registered by the time it is called, and
+//! `EventBus`'s broadcast channel never replays a send to a subscriber that shows up late. The
+//! frontend's `listen()` call has to round-trip over IPC before it counts as registered, so
+//! anything published in that gap — which in practice is everything, since the connector starts
+//! publishing within microseconds of setup — would otherwise be lost for good. `latest_event`
+//! is the way back: the window calls it once its listener is confirmed live, and folds whatever
+//! it gets through the same reducer as a normal event.
 
-use tauri::{AppHandle, Emitter};
-use zyris_core::EventBus;
+use tauri::{AppHandle, Emitter, State};
+use zyris_core::{CoreEvent, EventBus};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
@@ -30,6 +39,13 @@ pub fn forward(app: AppHandle, bus: EventBus, runtime: &tokio::runtime::Handle) 
             }
         }
     });
+}
+
+/// What the core last published, for a window whose listener came up too late to see it live.
+/// Meant to be called exactly once, right after `listen()` resolves — see the module doc comment.
+#[tauri::command]
+pub fn latest_event(bus: State<EventBus>) -> Option<CoreEvent> {
+    bus.latest()
 }
 
 /// Opens the enrolment URL in the person's own browser. A command rather than a link because the

@@ -4,7 +4,7 @@
 //! normal state — a headless run has no subscribers at all — so publishing to nobody is not an
 //! error, it just returns 0.
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// Something the core did. One variant per thing a watcher can act on, never one per log line.
 ///
@@ -45,6 +45,13 @@ pub enum CoreEvent {
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<CoreEvent>,
+    /// The most recently published event, kept beside the broadcast channel rather than only on
+    /// it. `broadcast::Receiver::subscribe` only sees sends that happen after it is created, so a
+    /// subscriber that starts listening late — the window, whose JS `listen()` call has to
+    /// round-trip over IPC before it is registered — has otherwise already missed everything.
+    /// `watch` keeps just the newest value, which is exactly what a latecomer needs to catch up:
+    /// see `EventBus::latest`.
+    latest: watch::Sender<Option<CoreEvent>>,
 }
 
 impl EventBus {
@@ -53,17 +60,31 @@ impl EventBus {
     /// must not be able to stall the core.
     pub fn new(capacity: usize) -> EventBus {
         let (tx, _rx) = broadcast::channel(capacity);
-        EventBus { tx }
+        let (latest, _rx) = watch::channel(None);
+        EventBus { tx, latest }
     }
 
     /// Returns how many subscribers received it. **Zero is a normal answer** — a headless run
     /// has nobody watching — so this deliberately does not return a `Result`.
     pub fn publish(&self, event: CoreEvent) -> usize {
+        // Recorded before the broadcast send so `latest()` never answers with something older
+        // than what a concurrent `subscribe()` might already be about to receive.
+        // `send_replace`, not `send`: `watch::Sender::send` silently no-ops when there are zero
+        // receivers, and this channel is never subscribed to — only `borrow`ed through
+        // `latest()` — so it would always have zero. `send_replace` updates the stored value
+        // unconditionally, which is the one thing this channel exists for.
+        self.latest.send_replace(Some(event.clone()));
         self.tx.send(event).unwrap_or(0)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<CoreEvent> {
         self.tx.subscribe()
+    }
+
+    /// The last event published, or `None` if nothing has been published yet. What a subscriber
+    /// that started listening late asks for once, to catch up on whatever it missed.
+    pub fn latest(&self) -> Option<CoreEvent> {
+        self.latest.borrow().clone()
     }
 }
 
@@ -98,6 +119,40 @@ mod tests {
         let bus = EventBus::new(8);
 
         assert_eq!(bus.publish(CoreEvent::Started), 0);
+    }
+
+    #[test]
+    fn latest_is_none_before_anything_is_published() {
+        let bus = EventBus::new(8);
+
+        assert_eq!(bus.latest(), None);
+    }
+
+    #[test]
+    fn latest_holds_the_most_recent_event_even_with_no_subscribers() {
+        let bus = EventBus::new(8);
+
+        bus.publish(CoreEvent::Started);
+        assert_eq!(bus.latest(), Some(CoreEvent::Started));
+
+        bus.publish(CoreEvent::NeedsEnrolment);
+        assert_eq!(
+            bus.latest(),
+            Some(CoreEvent::NeedsEnrolment),
+            "latest must track the newest publish, not just the first"
+        );
+    }
+
+    #[test]
+    fn a_late_subscriber_can_still_read_latest() {
+        // The whole point: a subscriber created after the publish still sees what it missed,
+        // which `subscribe()` alone cannot give it — `broadcast` never replays a send.
+        let bus = EventBus::new(8);
+        bus.publish(CoreEvent::Connecting);
+
+        let _late = bus.subscribe();
+
+        assert_eq!(bus.latest(), Some(CoreEvent::Connecting));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useEffect, useReducer } from "react";
 import { Onboarding } from "./Onboarding";
 import { Status } from "./Status";
-import { initialState, reduce, subscribe } from "./state";
+import { fetchLatestEvent, initialState, reduce, subscribe } from "./state";
 
 export function App() {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -12,8 +12,19 @@ export function App() {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
     void subscribe(dispatch).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+      // The listener is now registered, but everything the core published before this instant
+      // is already gone — `emit` only reaches listeners that exist, and nothing here replays a
+      // send. Ask once for whatever the core last published and fold it in through the same
+      // reducer; anything also delivered live through `subscribe` arrives twice, which `reduce`
+      // is written to tolerate (see its comment in state.ts).
+      void fetchLatestEvent().then((event) => {
+        if (!cancelled && event) dispatch(event);
+      });
     });
     return () => {
       cancelled = true;

@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 // Mirrors CoreEvent in crates/zyris-core/src/event.rs. Serialized there as a tagged union with
@@ -30,6 +31,11 @@ export const initialState: State = {
   problem: null,
 };
 
+// Applying the same event twice in a row must leave state exactly as applying it once did — the
+// catch-up call in App.tsx can hand the reducer an event already delivered live, and there is no
+// way to tell in advance whether it will. Every arm below either fully determines the next state
+// from the event alone (so a repeat is a no-op) or falls through untouched (`default`), which is
+// what makes that safe.
 export function reduce(state: State, event: CoreEvent): State {
   switch (event.kind) {
     case "needsEnrolment":
@@ -66,6 +72,18 @@ export function reduce(state: State, event: CoreEvent): State {
   }
 }
 
+// "core-event" here has to match EVENT_NAME in crates/zyris-app/src/bridge.rs exactly; nothing
+// checks that at build time, so a rename on either side breaks this silently. The Rust side pins
+// its half with a test — see bridge.rs and event.rs — this comment is this side's.
+const EVENT_NAME = "core-event";
+
 export function subscribe(onEvent: (event: CoreEvent) => void): Promise<() => void> {
-  return listen<CoreEvent>("core-event", (message) => onEvent(message.payload));
+  return listen<CoreEvent>(EVENT_NAME, (message) => onEvent(message.payload));
+}
+
+// What the core published before this window's listener was registered — see the module comment
+// on crates/zyris-app/src/bridge.rs for why that gap exists and is otherwise unrecoverable.
+// Meant to be called exactly once, right after `subscribe`'s promise resolves.
+export function fetchLatestEvent(): Promise<CoreEvent | null> {
+  return invoke<CoreEvent | null>("latest_event");
 }

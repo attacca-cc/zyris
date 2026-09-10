@@ -32,7 +32,10 @@ pub fn run(
         }))
         .manage(bus.clone())
         .manage(runtime)
-        .invoke_handler(tauri::generate_handler![bridge::open_verification_url])
+        .invoke_handler(tauri::generate_handler![
+            bridge::open_verification_url,
+            bridge::latest_event,
+        ])
         .setup(move |app| {
             tray::build(app.handle())?;
             // Published here, after the tray (and anything else `setup` does) is built, rather
@@ -41,10 +44,16 @@ pub fn run(
             // fires. Publishing earlier would return 0 and nobody would ever learn the core
             // started. Do not move this back above `setup`.
             lifecycle::start(&setup_bus);
+            // The bridge must be subscribed before the connector can publish anything, for the
+            // same reason `headless.rs` subscribes before it spawns the connector: the connector
+            // publishes `NeedsEnrolment` (or dials straight away) within microseconds of being
+            // spawned, and a subscription wired up after that has already missed it on the
+            // broadcast channel — `latest_event` covers the window's own late `listen()`, but
+            // only if the bridge itself was already forwarding by the time these events fired.
+            bridge::forward(app.handle().clone(), setup_bus.clone(), &setup_runtime);
             // The GUI has no async context of its own; this is what the shared runtime handle
             // from step 1 exists for.
             setup_runtime.spawn(connector.run());
-            bridge::forward(app.handle().clone(), setup_bus.clone(), &setup_runtime);
             Ok(())
         })
         .on_window_event(|window, event| {
