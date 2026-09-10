@@ -8,13 +8,14 @@ use zyris_runtime::{lifecycle, CoreEvent, EventBus};
 
 /// Runs until interrupted. Ctrl-C is this program's decision, not the core's.
 pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
-    // No subscriber wiring happens before this in headless mode, so there is no "after setup"
-    // to wait for — this stays the earliest point, symmetric with the GUI runtime publishing
-    // as soon as its own setup is done.
+    // Subscribed before `lifecycle::start` publishes `Started` — `broadcast` never replays a
+    // send to a subscriber that shows up late, so the logging loop below has to already exist
+    // when that fires. Symmetric with the GUI runtime subscribing its bridge before its own
+    // `lifecycle::start`; do not move this back below it.
+    let mut events = bus.subscribe();
     lifecycle::start(&bus);
     tracing::info!("running headless");
 
-    let mut events = bus.subscribe();
     tokio::spawn(async move {
         while let Ok(event) = events.recv().await {
             match event {
