@@ -33,7 +33,8 @@ export const initialState: State = {
 export function reduce(state: State, event: CoreEvent): State {
   switch (event.kind) {
     case "needsEnrolment":
-      return { ...state, screen: "onboarding", problem: null };
+      // A fresh enrolment attempt must not carry a code from a previous one.
+      return { ...state, screen: "onboarding", code: null, problem: null };
     case "enrolmentCode":
       return {
         ...state,
@@ -42,7 +43,9 @@ export function reduce(state: State, event: CoreEvent): State {
         problem: null,
       };
     case "enrolmentFailed":
-      return { ...state, screen: "onboarding", problem: event.reason };
+      // Clear the code: a failure means it is no longer live, and the screen must not show a
+      // dead code as though it were still waiting for approval.
+      return { ...state, screen: "onboarding", code: null, problem: event.reason };
     case "connecting":
       // Leaving the node in place: during a reconnect it is still the same node, and blanking
       // the name would make the screen flicker between identities.

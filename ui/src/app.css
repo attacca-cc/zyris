@@ -39,7 +39,7 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 .lead { color: var(--muted); margin: 0 0 2rem; }
 .muted { color: var(--muted); }
 .problem { color: var(--problem); }
-.mono { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
+.mono { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; overflow-wrap: anywhere; }
 
 .steps { padding-left: 1.2rem; margin: 0 0 1.5rem; }
 .steps li { margin-bottom: 0.75rem; }
@@ -62,6 +62,7 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
+  overflow-wrap: anywhere;
 }
 
 .status-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.5rem; }
@@ -72,4 +73,4 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1.2rem; margin: 0; }
 .facts dt { color: var(--muted); }
-.facts dd { margin: 0; }
+.facts dd { margin: 0; min-width: 0; }
