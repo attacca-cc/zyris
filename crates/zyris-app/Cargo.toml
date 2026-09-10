@@ -1,0 +1,31 @@
+[package]
+name = "zyris-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zyris"
+path = "src/main.rs"
+
+[dependencies]
+zyris-core = { path = "../zyris-core" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[features]
+# Tauri decides dev-vs-production from this feature alone, not from the cargo profile:
+# `tauri::is_dev()` is `!cfg!(feature = "custom-protocol")`. Without it, even a release build
+# loads the frontend from `devUrl` and shows a connection error when no dev server is running.
+# `tauri build` enables it for you; a plain `cargo build --release` does not.
+custom-protocol = ["tauri/custom-protocol"]

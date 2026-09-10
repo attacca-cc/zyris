@@ -46,6 +46,53 @@ one. Code blocks are read as "code" and parenthetical asides are skipped, becaus
 aloud is not the same text as an answer on screen. Start talking and it stops to listen; what it
 had not yet said does not go into the transcript.
 
+## Building
+
+You need a Rust toolchain, [Node](https://nodejs.org) and [pnpm](https://pnpm.io), and the
+system libraries Tauri builds against — `pkg-config` looks for `webkit2gtk-4.1`,
+`javascriptcoregtk-4.1`, `libsoup-3.0`, `gtk+-3.0`, `glib-2.0`, `gdk-pixbuf-2.0`, `cairo`,
+`pango`, `harfbuzz`, `atk`, `librsvg-2.0`, `zlib` and `openssl`. The Linux tray additionally
+needs `libayatana-appindicator` at runtime. On Debian/Ubuntu:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
+    libgtk-3-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libcairo2-dev libpango1.0-dev \
+    libharfbuzz-dev libatk1.0-dev librsvg2-dev zlib1g-dev libssl-dev \
+    libayatana-appindicator3-1
+```
+
+Other distributions name these packages differently.
+
+The frontend has to be built before the Rust crate: `tauri.conf.json` points `frontendDist` at
+`ui/dist`, which is not committed.
+
+```bash
+pnpm install
+pnpm --filter zyris-ui build
+```
+
+Then, from the workspace root:
+
+```bash
+pnpm tauri dev                        # the window, with the dev server and hot reload
+cargo run -p zyris-app -- --headless  # no window, no tray
+cargo test                            # the frontend has to be built first, same as above
+```
+
+**`cargo run` on its own never shows the interface.** Tauri decides between the dev server and
+the embedded assets from one cargo feature, not from the profile — `tauri::is_dev()` is
+`!cfg!(feature = "custom-protocol")`. Without that feature the app loads the frontend from
+`devUrl` (Vite on `localhost:5173`) and shows a connection error when nothing is serving there,
+in release builds just as much as in debug ones.
+
+So the window comes up through the Tauri CLI, or through cargo with the feature named:
+
+```bash
+pnpm tauri dev                                        # starts Vite first, then the app
+pnpm tauri build                                      # a .deb or .exe, assets embedded
+cargo run --release --features custom-protocol -p zyris-app   # the same, without the bundler
+```
+
 ## Status
 
 Early. The design is settled and the code is being written — see the roadmap below for what

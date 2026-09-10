@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zyris",
+  "version": "0.1.0",
+  "identifier": "cc.attacca.zyris",
+  "build": {
+    "frontendDist": "../../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm --filter zyris-ui dev",
+    "beforeBuildCommand": "pnpm --filter zyris-ui build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Zyris",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 640,
+        "minHeight": 480,
+        "resizable": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "nsis"],
+    "icon": [
+      "icons/icon.png",
+      "icons/128x128@2x.png",
+      "icons/128x128.png",
+      "icons/64x64.png",
+      "icons/32x32.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
