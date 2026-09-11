@@ -29,6 +29,7 @@ pub fn run(
 
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
+    let setup_gate = tools.gate().clone();
     let app = tauri::Builder::default()
         // Must be registered first: a second launch has to reach the running instance before
         // anything else in this process starts.
@@ -95,7 +96,12 @@ pub fn run(
             // to a subscriber that shows up late. `latest_event` covers the window's own late
             // `listen()`, but only if the bridge itself was already forwarding by the time these
             // events fired.
-            bridge::forward(app.handle().clone(), setup_bus.clone(), &setup_runtime);
+            bridge::forward(
+                app.handle().clone(),
+                setup_bus.clone(),
+                setup_gate.clone(),
+                &setup_runtime,
+            );
             // Published only now that the bridge above is already subscribed — publishing
             // earlier is a silent no-op, since `broadcast` never replays a send to a later
             // subscriber. Do not move this back above the bridge.

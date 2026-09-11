@@ -48,6 +48,7 @@ pub fn build(app: &AppHandle, runtime: &tokio::runtime::Handle) -> tauri::Result
     // the menu; it dispatches the change to the main thread on its own, which is why this may run
     // on a tokio worker.
     let label = pause.clone();
+    let resync = app.state::<Gate>().inner().clone();
     let mut events = app.state::<EventBus>().subscribe();
     runtime.spawn(async move {
         loop {
@@ -58,11 +59,18 @@ pub fn build(app: &AppHandle, runtime: &tokio::runtime::Handle) -> tauri::Result
                     }
                 }
                 Ok(_) => {}
-                // Tool calls can outrun a subscriber, and the bus drops the oldest when they do.
-                // Missing them costs this loop nothing — it only reads `Paused` — but ending the
-                // loop would leave the tray stuck on a stale label for the rest of the run.
+                // Tool calls can outrun a subscriber, and the bus drops the oldest when they
+                // do — a contiguous range of *everything* in the ring, `Paused` included. The
+                // label is written in exactly two places and never polled, so a dropped switch
+                // would leave it stale for the rest of the run; and since the click handler
+                // toggles against the gate, an item still reading "Pause" on a paused machine
+                // would resume it. With the window closed this is the only surface, so re-read
+                // the gate rather than trusting the stream.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                    tracing::debug!(missed, "the tray fell behind on core events");
+                    tracing::warn!(missed, "the tray fell behind; resyncing the label from the gate");
+                    if let Err(error) = label.set_text(pause_label(resync.is_paused())) {
+                        tracing::warn!(%error, "could not resync the tray's pause item");
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

@@ -42,6 +42,7 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
   const [announcement, setAnnouncement] = useState<Announcement | null>(null);
   const [announcementProblem, setAnnouncementProblem] = useState<string | null>(null);
   const [stored, setStored] = useState<ToolCallRow[]>([]);
+  const [callsProblem, setCallsProblem] = useState<string | null>(null);
   const [switchProblem, setSwitchProblem] = useState<string | null>(null);
 
   // The newest call this window had already seen when the stored tail was asked for. Everything
@@ -76,14 +77,20 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
 
     void invoke<ToolCallRow[]>("recent_tool_calls", { limit: MAX_TOOL_CALLS })
       .then((rows) => {
-        if (!cancelled) setStored(rows);
-      })
-      .catch(() => {
         if (cancelled) return;
-        // With no stored tail there is no boundary to draw, so show every live call rather than
-        // hiding the ones this window saw before the screen was opened.
+        // An empty answer beside a non-empty live list means the file did not get calls this
+        // window did — an unwritable log, which `AuditLog::record` swallows so that a failing
+        // log can never fail a tool call. There is no tail to cut against, so show every live
+        // row rather than hiding the ones this window saw before the screen was opened.
+        if (rows.length === 0) boundary.current = null;
+        setStored(rows);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        // With no stored tail there is no boundary to draw, so show every live call.
         boundary.current = null;
         setStored([]);
+        setCallsProblem(asMessage(error, "Could not read what ran on this computer."));
       });
 
     // Where the switch is. The `paused` event is the usual way this arrives, but the core's
@@ -185,9 +192,15 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
 
       <section>
         <h2>What ran</h2>
-        {rows.length === 0 ? (
+        {callsProblem ? (
+          // Never the "nothing yet" line on a failed read: that is a confident false negative
+          // about the one record of what touched this machine. The live rows above are still
+          // shown — they are what this window heard directly.
+          <p className="problem">{callsProblem}</p>
+        ) : null}
+        {rows.length === 0 && !callsProblem ? (
           <p className="muted">No agent has run anything on this computer yet.</p>
-        ) : (
+        ) : rows.length === 0 ? null : (
           <>
             <ol className="calls">
               {rows.map((row, index) => (

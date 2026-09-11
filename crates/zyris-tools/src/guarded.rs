@@ -242,7 +242,7 @@ mod tests {
             .await;
 
         assert!(out.is_ok());
-        let recent = log.recent(1);
+        let recent = log.recent(1).unwrap();
         assert_eq!(recent[0].capability, "file_io");
         assert_eq!(recent[0].tool, "stat");
         assert_eq!(recent[0].outcome, crate::Outcome::Allowed);
@@ -264,7 +264,7 @@ mod tests {
             dir.path().join("gone.txt").exists(),
             "and must not have done the thing"
         );
-        assert_eq!(log.recent(1)[0].outcome, crate::Outcome::Refused);
+        assert_eq!(log.recent(1).unwrap()[0].outcome, crate::Outcome::Refused);
     }
 
     #[tokio::test]
@@ -278,7 +278,7 @@ mod tests {
             .await;
 
         assert!(out.is_err());
-        assert_eq!(log.recent(1)[0].outcome, crate::Outcome::Failed);
+        assert_eq!(log.recent(1).unwrap()[0].outcome, crate::Outcome::Failed);
     }
 
     #[tokio::test]
@@ -292,7 +292,7 @@ mod tests {
             .await;
 
         assert!(
-            log.recent(1)[0].detail.contains("hello.txt"),
+            log.recent(1).unwrap()[0].detail.contains("hello.txt"),
             "a log that does not say which file was touched answers nothing"
         );
     }
@@ -321,7 +321,7 @@ mod tests {
         assert!(tree.is_ok(), "the tree delete has to have run, or this test proves nothing");
         assert!(empty.is_ok(), "and so does the ordinary one");
         // Newest first, so the plain remove is [0] and the recursive one is [1].
-        let recorded = log.recent(2);
+        let recorded = log.recent(2).unwrap();
         assert_ne!(
             recorded[1].detail, recorded[0].detail,
             "a tree delete and an empty-directory delete wrote the same line: {}",
@@ -353,7 +353,7 @@ mod tests {
             ))
             .await;
 
-        let entry = &log.recent(1)[0];
+        let entry = &log.recent(1).unwrap()[0];
         assert_eq!(
             entry.outcome,
             crate::Outcome::Allowed,
@@ -392,7 +392,7 @@ mod tests {
             ))
             .await;
 
-        let entry = &log.recent(1)[0];
+        let entry = &log.recent(1).unwrap()[0];
         assert_eq!(
             entry.outcome,
             crate::Outcome::Allowed,

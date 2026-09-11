@@ -98,16 +98,34 @@ impl AuditLog {
         writeln!(file, "{line}")
     }
 
-    /// The newest entries first. A line that will not parse is skipped rather than allowed to
-    /// hide every line after it — a truncated write must not cost the whole history.
-    pub fn recent(&self, limit: usize) -> Vec<Entry> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else { return Vec::new() };
-        text.lines()
+    /// The newest entries first.
+    ///
+    /// **`Err` is not an empty log.** A file that cannot be read — its permissions changed, a
+    /// directory sits where it should be, the disk answered with an error — is a history nobody
+    /// can see, and a reader handed `Vec::new()` for it would tell a person that nothing has ever
+    /// run on their machine. That is the one wrong answer this function can give, so the error is
+    /// handed back instead of swallowed. `NotFound` is the exception and really is `Ok(vec![])`:
+    /// a log that was never written is genuinely empty.
+    ///
+    /// The file is read as bytes and decoded lossily rather than through `read_to_string`, which
+    /// validates UTF-8 across the whole file: one bad byte from a half-written append would
+    /// otherwise cost the entire history rather than the single line it landed in.
+    ///
+    /// A line that will not parse is skipped rather than allowed to hide every line after it —
+    /// a truncated write must not cost the whole history.
+    pub fn recent(&self, limit: usize) -> std::io::Result<Vec<Entry>> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        Ok(String::from_utf8_lossy(&bytes)
+            .lines()
             .rev()
             .take(SCAN_LIMIT)
             .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
             .take(limit)
-            .collect()
+            .collect())
     }
 }
 
@@ -139,7 +157,7 @@ mod tests {
 
         log.record(entry("exec", Outcome::Allowed));
 
-        let recent = log.recent(10);
+        let recent = log.recent(10).unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].tool, "exec");
     }
@@ -151,7 +169,7 @@ mod tests {
         log.record(entry("open", Outcome::Allowed));
         log.record(entry("exec", Outcome::Allowed));
 
-        let recent = log.recent(10);
+        let recent = log.recent(10).unwrap();
 
         assert_eq!(recent[0].tool, "exec", "the last thing that ran is the thing a person is looking for");
     }
@@ -164,7 +182,7 @@ mod tests {
             log.record(entry("exec", Outcome::Allowed));
         }
 
-        assert_eq!(log.recent(2).len(), 2);
+        assert_eq!(log.recent(2).unwrap().len(), 2);
     }
 
     #[test]
@@ -176,7 +194,7 @@ mod tests {
 
         log.record(entry("exec", Outcome::Refused));
 
-        assert_eq!(log.recent(1)[0].outcome, Outcome::Refused);
+        assert_eq!(log.recent(1).unwrap()[0].outcome, Outcome::Refused);
     }
 
     #[test]
@@ -187,7 +205,7 @@ mod tests {
 
         let reopened = AuditLog::new(path);
 
-        assert_eq!(reopened.recent(10).len(), 1);
+        assert_eq!(reopened.recent(10).unwrap().len(), 1);
     }
 
     #[test]
@@ -198,7 +216,53 @@ mod tests {
 
         log.record(entry("exec", Outcome::Allowed));
 
-        assert!(log.recent(10).is_empty());
+        assert!(log.recent(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_is_an_error_rather_than_an_empty_history() {
+        // The one answer this must never give. A caller handed `Ok(vec![])` for a log it could
+        // not open would tell a person that nothing has ever run on their machine, which is a
+        // confident false negative about the record of what touched it. A directory standing
+        // where the file should be is the cheapest way to make a read fail that is not
+        // `NotFound`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        std::fs::create_dir(&path).unwrap();
+
+        let read = AuditLog::new(path).recent(10);
+
+        assert!(read.is_err(), "an unreadable log came back as an empty one");
+    }
+
+    #[test]
+    fn a_log_that_was_never_written_is_genuinely_empty() {
+        // The exception, and the reason this is not simply "any failure is an error": a machine
+        // where no agent has run anything yet has no file, and that is not a fault to report.
+        let dir = tempfile::tempdir().unwrap();
+
+        let read = AuditLog::new(dir.path().join("never-written.jsonl")).recent(10);
+
+        assert_eq!(read.unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn one_bad_byte_costs_one_line_rather_than_the_whole_history() {
+        // A half-written append under a full disk can cut a non-ASCII `detail` mid-codepoint.
+        // Validating UTF-8 across the whole file would turn that into a permanently unreadable
+        // history, which is the opposite of what this log is for.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let good = serde_json::to_string(&entry("exec", Outcome::Allowed)).unwrap();
+        let mut bytes = b"{\"at\":\"x\",\xff\xfe garbage\n".to_vec();
+        bytes.extend_from_slice(good.as_bytes());
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+
+        let recent = AuditLog::new(path).recent(10).unwrap();
+
+        assert_eq!(recent.len(), 1, "the good line was lost with the bad one");
+        assert_eq!(recent[0].tool, "exec");
     }
 
     #[test]
@@ -213,7 +277,7 @@ mod tests {
         )
         .unwrap();
 
-        let recent = AuditLog::new(path).recent(10);
+        let recent = AuditLog::new(path).recent(10).unwrap();
 
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].tool, "open");
