@@ -209,14 +209,27 @@ mod tests {
     }
 
     #[test]
-    fn an_unwritable_path_does_not_panic() {
+    fn a_write_that_cannot_land_does_not_panic() {
         // The log must never be the reason a tool call fails. A machine that cannot write it
         // should still work, loudly in its own logs and quietly to the caller.
-        let log = AuditLog::new(std::path::PathBuf::from("/proc/nonexistent/audit.jsonl"));
+        //
+        // A file standing where the parent directory should be is what makes the write fail,
+        // and it is the one way to arrange that which holds on every platform. An earlier
+        // version of this test used `/proc/nonexistent/`, which Windows reads as `C:\proc\\
+        // nonexistent\` and cheerfully creates — so the write succeeded, the failure under test
+        // never happened, and the test both passed for the wrong reason on Linux and failed on
+        // Windows.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        let path = blocker.join("audit.jsonl");
+        let log = AuditLog::new(path.clone());
 
+        // Returning at all is the assertion: a panic here fails the test, and `record` has no
+        // error to hand back by design.
         log.record(entry("exec", Outcome::Allowed));
 
-        assert!(log.recent(10).unwrap().is_empty());
+        assert!(!path.exists(), "the entry landed somewhere it could not");
     }
 
     #[test]
