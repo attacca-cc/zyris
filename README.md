@@ -20,7 +20,7 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 | Capability | What an agent can do |
 |---|---|
 | `terminal` | Open a PTY, run commands, read output or the rendered screen |
-| `file_io` | Stat, list, read, write and edit files |
+| `file_io` | Stat, list, read, write, edit, delete files and make directories |
 | `input` | Type text, press chords, move the pointer, click, scroll |
 | `screen_capture` | List displays and take screenshots — the coordinate space `input` works in |
 | `file_transfer` | Send a file to another of your machines, peer to peer |
@@ -29,6 +29,14 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 `input` and `screen_capture` share one coordinate space and are announced together: a position
 read off a screenshot goes straight into `move_to`. Neither is announced when there is no display
 server to reach, because a tool that is always going to fail is worse than a tool that is absent.
+
+**Today `terminal` and `file_io` are live; the rest are still being written.** Between them that
+is sixteen tools, and a capability is all or nothing — announcing `file_io` announces `remove`,
+and announcing `terminal` announces `exec` with whatever command an agent chooses. A path an
+agent sends without a leading slash starts in your home directory. That is where relative paths
+start rather than a fence around them: an absolute path goes where it says, and a command can
+work anywhere you can. What bounds this is the pause switch, the audit log, and what Attacca
+lets an agent call in the first place.
 
 The first time it runs, the window shows a short code and a link. Open the link, approve the code
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
@@ -104,7 +112,7 @@ lands in what order. Nothing here is ready to install yet.
 
 1. Skeleton — workspace, tray, headless mode
 2. Connection — enrollment, credential storage, reconnect (done)
-3. Tools — terminal, files, input and capture, pause switch, audit log
+3. Tools — terminal, files, pause switch, audit log (done); input and screen capture still to come
 4. Autostart — Windows Task Scheduler, systemd user units, installers
 5. File transfer — peer endpoint, fingerprint confirmation, inbox
 6. MCP — local servers promoted to capabilities
@@ -116,8 +124,11 @@ lands in what order. Nothing here is ready to install yet.
 This app hands a remote agent a shell, your files, and your keyboard. Two things stay on this
 side of the connection regardless of what the server says:
 
-- **A pause switch** in the tray. While it is on, every tool call is refused.
-- **An audit log** of what ran, readable in the window and on disk.
+- **A pause switch**, in the tray and on the Tools tab. While it is on, no new tool call is
+  accepted, and the agent is told the machine is paused rather than that its tool broke. It
+  stops new calls only: a command already running and a stream already open finish.
+- **An audit log** of what ran — every call, allowed or refused, with what it was asked to touch
+  but never what it read or wrote. On disk as one JSON line each, and as a tail on the Tools tab.
 
 File transfers from a machine you have not seen before are refused until you compare the
 fingerprint yourself. With no window to ask in, the answer is no.

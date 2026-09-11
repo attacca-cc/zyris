@@ -1,0 +1,22 @@
+[package]
+name = "zyris-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+directories = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tracing = { workspace = true }
+zyris = { workspace = true }
+zyris-fs = { workspace = true }
+zyris-runtime = { path = "../zyris-runtime" }
+zyris-terminal = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

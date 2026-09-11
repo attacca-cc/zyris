@@ -23,10 +23,13 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-build = "2.6.3"
 tauri-plugin-single-instance = "2.4.4"
 tempfile = "3.24.0"
+time = { version = "0.3.44", features = ["formatting"] }
 tokio = "1.53.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-zyris = { version = "0.2.0", default-features = false, features = ["client", "hostname", "enroll"] }
+zyris = { version = "0.2.0", default-features = false, features = ["caps", "client", "hostname", "enroll"] }
+zyris-fs = "0.2.0"
+zyris-terminal = "0.2.0"
 
 # Full debug info is what makes the link stage expensive on a 3.6 GB machine.
 # `line-tables-only` keeps file and line in every backtrace frame and drops the rest.
