@@ -20,6 +20,10 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     connector: Connector,
     tools: Tools,
+    // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
+    // audit log are named by. Passed in rather than recomputed, because the lock taken below has
+    // to name the same instance those two do.
+    instance: String,
 ) -> anyhow::Result<()> {
     tracing::info!("running with a window");
 
@@ -61,10 +65,13 @@ pub fn run(
             // starts. `main.rs` takes the very same lock, by the same name, for the headless
             // branch, where there is no plugin to reach first; see its comment.
             //
+            // The name is the instance's rather than the product's, so a `--server` window can
+            // run beside a production one instead of being refused by its lock.
+            //
             // `manage`d rather than kept as a local: a local here would drop, and release the
             // lock, the moment this closure returns — the guard has to live for the app's whole
             // run, not just its setup.
-            match zyris_runtime::lock::InstanceLock::acquire("zyris") {
+            match zyris_runtime::lock::InstanceLock::acquire(&instance) {
                 Ok(Some(lock)) => {
                     app.manage(lock);
                 }
