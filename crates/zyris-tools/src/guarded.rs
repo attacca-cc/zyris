@@ -120,11 +120,22 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// and `terminal.exec`'s `stdin` and `env`. A denylist grows a hole every time the protocol adds
 /// a field. If a future capability needs something named here, add it here on purpose.
 ///
+/// `recursive` and `overwrite` are here because they are the difference between two calls the
+/// log would otherwise spell identically, and the destructive one is the one that gets lost:
+/// `file_io.remove` takes `recursive: Option<bool>` and `zyris-fs` branches on it into
+/// `remove_dir_all` rather than `remove_dir`, so without it a line reading `path=/home/me/work`
+/// is the same whether a tree went or an empty directory did. `file_io.write`'s `overwrite: bool`
+/// is the same question about a file that already existed. Neither weakens the reasoning above:
+/// both are bare booleans off the parameter list and neither can carry a payload.
+///
 /// These are the wire names: the capability macro derives the request struct straight from the
 /// trait's parameter list with no `rename_all`, so they stay snake_case. `exec` carries its
 /// command line in `command` **or** `argv`, never both, and `pty` identifies the target of every
 /// `read`/`screen`/`write`/`resize`/`close`.
-const LOGGED_FIELDS: &[&str] = &["path", "command", "argv", "cwd", "shell", "pty"];
+///
+/// The array's order is the line's order, so `path=` stays first.
+const LOGGED_FIELDS: &[&str] =
+    &["path", "command", "argv", "cwd", "shell", "pty", "recursive", "overwrite"];
 
 /// How much of one value is worth keeping. One enormous argument must not make the log
 /// unreadable, and the log is a summary rather than a transcript.
@@ -287,6 +298,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recursive_remove_does_not_read_back_as_an_ordinary_one() {
+        // The most destructive call this machine announces was the one the log could not
+        // describe: `remove` branches on `recursive` into `remove_dir_all`, so a deleted tree and
+        // a deleted empty directory wrote byte-identical lines.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("tree")).unwrap();
+        std::fs::write(dir.path().join("tree").join("leaf.txt"), "hi").unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        let (_gate, log, cap) = guarded(dir.path());
+
+        let tree = cap
+            .dispatch(call(
+                "remove",
+                serde_json::json!({ "path": "tree", "recursive": true }),
+            ))
+            .await;
+        let empty = cap
+            .dispatch(call("remove", serde_json::json!({ "path": "empty" })))
+            .await;
+
+        assert!(tree.is_ok(), "the tree delete has to have run, or this test proves nothing");
+        assert!(empty.is_ok(), "and so does the ordinary one");
+        // Newest first, so the plain remove is [0] and the recursive one is [1].
+        let recorded = log.recent(2);
+        assert_ne!(
+            recorded[1].detail, recorded[0].detail,
+            "a tree delete and an empty-directory delete wrote the same line: {}",
+            recorded[0].detail
+        );
+        assert!(
+            recorded[1].detail.contains("recursive=true"),
+            "the line does not say a tree went: {}",
+            recorded[1].detail
+        );
+        assert_eq!(recorded[0].detail, "path=empty");
+    }
+
+    #[tokio::test]
     async fn the_detail_never_carries_the_payload() {
         // write's params hold the file's contents. Those are exactly what must not be logged:
         // a log nobody dares hand over is not a log.
@@ -311,6 +360,11 @@ mod tests {
             "the write has to have actually run, or this test proves nothing"
         );
         assert!(entry.detail.contains("secrets.txt"));
+        assert!(
+            entry.detail.contains("overwrite=true"),
+            "whether a file that already existed was replaced is part of what was asked for: {}",
+            entry.detail
+        );
         assert!(
             !entry.detail.contains("hunter2"),
             "the contents leaked into the audit log: {}",
