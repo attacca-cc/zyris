@@ -95,8 +95,7 @@ impl Backend for SystemdUser {
         // **No `systemctl --user start` here, deliberately.** Whoever is turning this on is
         // running Zyris already — that is where the switch is — and a second `--minimized`
         // launch reaches `tauri_plugin_single_instance`, which focuses the first window and
-        // exits 0. With `Restart=always` above, an exit is a thing to undo: systemd would start
-        // it again thirty seconds later, and again, for as long as the first copy lives. So the
+        // exits 0 — and `Restart=on-failure` above leaves that alone, so nothing loops. The
         // unit is installed and left alone, and it runs at the next sign-in. `caveats` says so
         // rather than leaving a switch reading "on" over a unit that is not up.
         //
@@ -253,7 +252,7 @@ enum Liveness {
 /// **A unit that is looping answers neither, and that is measured, not assumed.** Started,
 /// failed 203/EXEC, waiting out `RestartSec`: systemd calls that `ActiveState=activating`,
 /// `SubState=auto-restart`, and both `is-active` and `is-failed` print `activating` and exit
-/// non-zero for it (systemd 260). `Restart=always` with `RestartSec=30` means the unit never
+/// non-zero for it (systemd 260). `Restart=on-failure` with `RestartSec=30` means the unit never
 /// reaches the start limit and so never latches into `failed`, which is what the ordinary
 /// desktop case needs — so this is the state a rotted `ExecStart` actually sits in, not
 /// [`Liveness::Failed`]. It lands in [`Liveness::Idle`], and [`NOT_RUNNING`] is written to be
@@ -302,10 +301,17 @@ fn exits_zero(args: &[&str]) -> bool {
 ///
 /// **What that costs, and why it is the cheaper side.** On a login with no display at all — an
 /// SSH session on a machine with lingering on, say — `default.target` is reached, this unit
-/// starts, Tauri fails to open a display, and `Restart=always` tries again every thirty seconds
-/// for as long as that session lasts. The retry is also what makes the ordinary case work: on a
-/// desktop login the unit can be started before the compositor is up, and this is what carries
-/// it over until it is.
+/// starts, Tauri fails to open a display, and `Restart=on-failure` tries again every thirty
+/// seconds for as long as that session lasts. The retry is also what makes the ordinary case
+/// work: on a desktop login the unit can be started before the compositor is up, and this is
+/// what carries it over until it is.
+///
+/// **`on-failure` rather than `always`, and the difference is the tray's Quit item.** That item
+/// is `app.exit(0)`; under `always` systemd would put Zyris back thirty seconds later, every
+/// time, and a person would have no way to stop it short of turning this switch off. A failure
+/// to reach a display is a non-zero exit and is still retried, so nothing above is lost — and
+/// the second `--minimized` launch that `enable` describes, which exits 0 through the
+/// single-instance plugin, stops being a restart loop too.
 ///
 /// `StartLimitBurst` and `StartLimitIntervalSec` are deliberately left at their defaults, which
 /// on this machine are 5 starts in 10 seconds (`DefaultStartLimitBurst=5`,
@@ -326,7 +332,7 @@ fn render_unit(exe: &Path) -> String {
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} --minimized\n\
-         Restart=always\n\
+         Restart=on-failure\n\
          RestartSec=30\n\
          \n\
          [Install]\n\
@@ -459,8 +465,18 @@ mod tests {
         // A node that redials a network service 100ms after boot is a node that fails to dial.
         let unit = render_unit(Path::new("/usr/bin/zyris"));
 
-        assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=30"));
+    }
+
+    #[test]
+    fn quitting_from_the_tray_is_not_something_to_undo() {
+        // `Restart=always` would make Quit useless: the tray's item is `app.exit(0)`, and
+        // systemd would put Zyris back thirty seconds later, every time, with no way for a
+        // person to stop it short of turning the whole switch off.
+        let unit = render_unit(Path::new("/usr/bin/zyris"));
+
+        assert!(!unit.contains("Restart=always"), "a clean quit must stay quit");
     }
 
     #[test]
