@@ -61,7 +61,11 @@ pub fn run(
         // machine on every call, so there is no state for the two runtimes to share. Headless
         // has no switch to move, and the CLI flags build their own — before the instance lock,
         // where this process does not exist yet.
-        .manage(zyris_autostart::Autostart::for_this_machine())
+        //
+        // In an `Arc` because the two commands that read it are `async` and hand the work to
+        // `spawn_blocking`, which needs something that outlives the borrow Tauri's state gives
+        // out for one call. See `bridge::off_the_ui_thread`.
+        .manage(std::sync::Arc::new(zyris_autostart::Autostart::for_this_machine()))
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,

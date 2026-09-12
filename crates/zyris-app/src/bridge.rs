@@ -14,6 +14,7 @@
 //! it gets through the same reducer as a normal event.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
@@ -220,21 +221,55 @@ fn installed_executable() -> anyhow::Result<PathBuf> {
     std::env::current_exe().context("could not work out where this program is on disk")
 }
 
+/// Run a blocking autostart call somewhere other than the thread the window is drawn on.
+///
+/// **Both commands below are `async fn` for this and nothing else.** Tauri defaults a command to
+/// `ExecutionContext::Blocking` and runs it inline on the IPC handler — the GTK main loop on
+/// Linux, the WebView2 UI thread on Windows. Everything underneath here is `systemctl` or
+/// `schtasks`: process spawns and waits, measured at 400–450 ms for one press of the switch, and
+/// for that half-second the window neither repaints nor answers the mouse.
+///
+/// `spawn_blocking` rather than the one-word `#[tauri::command(async)]`, which would route this
+/// through `async_runtime::spawn` and park one of a handful of tokio workers on a subprocess for
+/// the whole round trip. Waiting on a child process is what the blocking pool is for.
+async fn off_the_ui_thread<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(answer) => answer.map_err(|error| error.to_string()),
+        // The blocking task panicked or was cancelled. Nothing the window can act on, but it is
+        // still an answer: a switch that never gets one stays disabled with its spinner on.
+        Err(error) => Err(format!("could not ask this machine about autostart: {error}")),
+    }
+}
+
 /// Where autostart stands, for a Settings screen that has just opened.
+///
+/// `Arc` rather than the bare `Autostart` in Tauri's state, because the work has to outlive the
+/// borrow: `State<'_, T>` hands out a reference tied to the command call, and `spawn_blocking`
+/// takes a `'static` closure. See [`off_the_ui_thread`].
 #[tauri::command]
-pub fn autostart_state(autostart: State<Autostart>) -> Result<AutostartView, String> {
-    look(&autostart).map_err(|error| error.to_string())
+pub async fn autostart_state(
+    autostart: State<'_, Arc<Autostart>>,
+) -> Result<AutostartView, String> {
+    let autostart = Arc::clone(&autostart);
+
+    off_the_ui_thread(move || look(&autostart)).await
 }
 
 /// Start Zyris with this computer, or stop doing that.
 ///
 /// Answers with the state the machine ended in, which is what the window renders.
 #[tauri::command]
-pub fn set_autostart(
+pub async fn set_autostart(
     enabled: bool,
-    autostart: State<Autostart>,
+    autostart: State<'_, Arc<Autostart>>,
 ) -> Result<AutostartView, String> {
-    apply_autostart(&autostart, enabled).map_err(|error| error.to_string())
+    let autostart = Arc::clone(&autostart);
+
+    off_the_ui_thread(move || apply_autostart(&autostart, enabled)).await
 }
 
 #[cfg(test)]
