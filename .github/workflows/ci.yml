@@ -48,7 +48,8 @@ jobs:
             librsvg2-dev \
             zlib1g-dev \
             libssl-dev \
-            libayatana-appindicator3-1
+            libayatana-appindicator3-1 \
+            libpipewire-0.3-dev
 
       - uses: pnpm/action-setup@v4
 
@@ -63,6 +64,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}
+          # The discovery loop for the Linux system libraries is a sequence of failed builds;
+          # without this each one starts from nothing.
+          cache-on-failure: true
 
       - run: pnpm install --frozen-lockfile
 
