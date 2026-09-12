@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use zyris::ServeCapability;
-use zyris::caps::{FileIoServer, TerminalServer};
+use zyris::caps::{FileIoServer, InputServer, ScreenCaptureServer, TerminalServer};
 use zyris_runtime::EventBus;
 
 use crate::guarded::Guarded;
@@ -118,15 +118,63 @@ impl Tools {
         }
     }
 
-    /// Both capabilities are rooted explicitly. `PtyTerminal::default()` roots itself at
+    /// The first two are rooted explicitly. `PtyTerminal::default()` roots itself at
     /// `std::env::current_dir()` — `/` under a systemd unit and whatever a desktop launcher
     /// happened to set otherwise — and `LocalFileIo` has no default at all, so a relative path
     /// an agent sends would resolve somewhere different every launch.
+    ///
+    /// The other two need a display server, and they arrive together or not at all — see
+    /// [`Self::screen_pair`]. That is why this returns a list built up rather than a literal: on
+    /// a headless host it is two capabilities long, and that is a correct answer, not a failure.
     fn capabilities(&self) -> Vec<Arc<dyn ServeCapability>> {
-        vec![
+        let mut capabilities = vec![
             self.guard(FileIoServer(zyris_fs::LocalFileIo::rooted(self.root.clone()))),
             self.guard(TerminalServer(zyris_terminal::PtyTerminal::rooted(self.root.clone()))),
-        ]
+        ];
+        capabilities.extend(self.screen_pair());
+        capabilities
+    }
+
+    /// The screen and the pointer, or neither of them.
+    ///
+    /// `screen_capture` enumerates the displays and `input` drives a pointer across them, in the
+    /// same captured-pixel space: a point read off a screenshot is what `move_to` takes. An agent
+    /// that can see the screen but not act on it is half useful, and one that can act but not see
+    /// is guessing coordinates. So this is one decision, made once, and it is
+    /// `EnigoInput::new` — it connects to the display server and fails when there is none. No
+    /// separate probe: a second way of asking produces a second answer.
+    ///
+    /// The backend handed to [`zyris_screen::HostDisplays`] is the capture's own, not
+    /// `HostDisplays::default()`. That default runs `ScreenBackend::detect()` a second time — a
+    /// second decision where there should be one, and one that diverges the moment the capture's
+    /// backend is overridden. The two must enumerate monitors through the same API or `move_to`
+    /// aims at a layout the screenshot was not taken in.
+    ///
+    /// Called once per [`Self::capabilities`], which is once per `into_capabilities()` and once
+    /// per [`Self::announcement`] — so the window's Tools screen reconnects to the display server
+    /// on every ask. That is a few milliseconds on a machine that has one, and the honest answer
+    /// on a machine whose display arrived or left since startup. If it ever becomes a cost, this
+    /// is the line to revisit.
+    fn screen_pair(&self) -> Vec<Arc<dyn ServeCapability>> {
+        let capture = zyris_screen::HostScreenCapture::default();
+        let backend = capture.backend();
+        match zyris_input::EnigoInput::new(zyris_screen::HostDisplays(backend)) {
+            Ok(input) => vec![
+                self.guard(ScreenCaptureServer(capture)),
+                self.guard(InputServer(input)),
+            ],
+            // `info!`, not `warn!`. A machine with no display server is an ordinary headless
+            // server, not a fault, and a warning on every launch of a machine that will never
+            // have a screen teaches people to ignore warnings. The error is named so a machine
+            // that *should* have a display can say why it did not get one.
+            Err(error) => {
+                tracing::info!(
+                    %error,
+                    "no display server, so neither screen_capture nor input is announced; an agent on this node cannot see or touch a screen"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// The one place a capability is put behind the switch and the log, so a capability added
@@ -169,13 +217,16 @@ mod tests {
     }
 
     #[test]
-    fn both_capabilities_are_announced_with_their_tools() {
+    fn the_two_that_need_no_display_are_announced_with_their_tools() {
         let dir = tempfile::tempdir().unwrap();
 
         let announced = tools(dir.path()).announced();
 
         let names: Vec<&str> = announced.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["file_io", "terminal"]);
+        // Not an equality any more: `screen_capture` and `input` follow these two on a host with
+        // a display server and are absent on one without, which is the next test's subject. These
+        // two depend on nothing outside the process, so they are always here and always first.
+        assert!(names.starts_with(&["file_io", "terminal"]), "{names:?}");
         for capability in &announced {
             assert!(
                 !capability.tools.is_empty(),
@@ -199,5 +250,24 @@ mod tests {
         assert!(json["capabilities"][0]["tools"].is_array());
         assert_eq!(json["root"], dir.path().display().to_string());
         assert!(json["auditLog"].as_str().unwrap().ends_with("audit.jsonl"));
+    }
+
+    #[test]
+    fn the_screen_and_the_pointer_are_announced_together_or_not_at_all() {
+        // Not a display test: it asserts the shape of the answer on whatever host runs it.
+        // An agent that can see the screen but not act on it is half useful, and one that can
+        // act but not see is guessing coordinates.
+        let dir = tempfile::tempdir().unwrap();
+
+        let names: Vec<String> =
+            tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
+
+        assert!(names.contains(&"terminal".to_string()));
+        assert!(names.contains(&"file_io".to_string()));
+        assert_eq!(
+            names.contains(&"input".to_string()),
+            names.contains(&"screen_capture".to_string()),
+            "one of the pair was announced without the other: {names:?}"
+        );
     }
 }
