@@ -78,6 +78,24 @@ one. Code blocks are read as "code" and parenthetical asides are skipped, becaus
 aloud is not the same text as an answer on screen. Start talking and it stops to listen; what it
 had not yet said does not go into the transcript.
 
+## Install
+
+Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the
+downloads are on the [releases page](https://github.com/attacca-cc/zyris/releases): a
+`Zyris_<version>_amd64.deb` for Debian and Ubuntu, a `Zyris_<version>_x64-setup.exe` for
+Windows. **Nothing is tagged yet** — see Status below for what is still being written.
+
+```bash
+sudo apt install ./Zyris_0.1.0_amd64.deb
+```
+
+**The Windows installer is not signed, and Windows will say so.** SmartScreen shows "Windows
+protected your PC" and puts the install button behind **More info → Run anyway**; Defender
+SmartScreen in Edge will offer to discard the download for the same reason. That is about the
+absent certificate rather than about the installer. Signing needs a certificate nobody on this
+project has, and a build everyone can produce beats a signing step that fails for everyone who
+forks the repository.
+
 ## Building
 
 You need a Rust toolchain, [Node](https://nodejs.org) and [pnpm](https://pnpm.io), and the
@@ -147,7 +165,7 @@ lands in what order. Nothing here is ready to install yet.
 1. Skeleton — workspace, tray, headless mode
 2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
-4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers
+4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
 5. File transfer — peer endpoint, fingerprint confirmation, inbox
 6. MCP — local servers promoted to capabilities
 7. Voice in — audio, echo cancellation, wake word, transcription
