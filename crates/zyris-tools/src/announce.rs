@@ -5,7 +5,7 @@
 //! something a capability has to remember to ask for.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use zyris::ServeCapability;
 use zyris::caps::{FileIoServer, InputServer, ScreenCaptureServer, TerminalServer};
@@ -54,11 +54,17 @@ pub struct Tools {
     /// same reason it is optional there: the audit file is the record, and a `Tools` with no bus
     /// is a complete one.
     bus: Option<EventBus>,
+    /// What `into_capabilities` handed the node, recorded as it happened.
+    ///
+    /// Shared across clones so the window and the connector agree, and written once: a node
+    /// rebuilt on a later dial announces the same list, and if it somehow could not, the first
+    /// answer is still the one the user was told.
+    announced: Arc<OnceLock<Vec<Announced>>>,
 }
 
 impl Tools {
     pub fn new(gate: Gate, log: AuditLog, root: PathBuf) -> Tools {
-        Tools { gate, log, root, bus: None }
+        Tools { gate, log, root, bus: None, announced: Arc::new(OnceLock::new()) }
     }
 
     /// Also publish every call, so the window and the tray see what is happening rather than
@@ -87,29 +93,31 @@ impl Tools {
     /// `Arc<dyn ServeCapability>` does not itself implement `ServeCapability`, so these do not go
     /// through `NodeBuilder::capability`.
     pub fn into_capabilities(self) -> Vec<Arc<dyn ServeCapability>> {
-        self.capabilities()
+        let capabilities = self.capabilities();
+        // Remember what went out, so the window reports the node's answer rather than its own.
+        // `OnceLock` rather than a plain field because `Tools` is `Clone` and this has to be the
+        // same record in every clone; a second call leaves the first record standing, which is
+        // what a node rebuilt on a later dial should see.
+        let _ = self.announced.set(describe(&capabilities));
+        capabilities
     }
 
-    /// The announced capabilities, for the window.
+    /// What was announced, for the window.
+    ///
+    /// **The snapshot taken when the capabilities were handed to the node, not a fresh look.**
+    /// Two capabilities depend on a display server, and asking again can answer differently from
+    /// what the node is actually serving: a display that went away mid-session would have the
+    /// window report no `input` while every agent on the connection can still drive the pointer.
+    /// A screen that states something false about what this machine is handing out is worse than
+    /// a stale one, and rebuilding also reconnects to the display server on every ask.
+    ///
+    /// Empty before [`Self::into_capabilities`] has run, which is honest: nothing is announced
+    /// until the node has them.
     pub fn announced(&self) -> Vec<Announced> {
-        self.capabilities()
-            .iter()
-            .map(|capability| {
-                let descriptor = capability.descriptor();
-                Announced {
-                    name: descriptor.name,
-                    version: descriptor.version,
-                    tools: descriptor.tools.into_iter().map(|tool| tool.name).collect(),
-                }
-            })
-            .collect()
+        self.announced.get().cloned().unwrap_or_default()
     }
 
     /// [`Self::announced`] and the two paths that make it readable, for the window.
-    ///
-    /// Answered on every ask rather than snapshotted at startup: rebuilding the descriptors costs
-    /// about a millisecond, and a snapshot is a list that can quietly disagree with what is
-    /// actually announced.
     pub fn announcement(&self) -> Announcement {
         Announcement {
             capabilities: self.announced(),
@@ -150,11 +158,9 @@ impl Tools {
     /// backend is overridden. The two must enumerate monitors through the same API or `move_to`
     /// aims at a layout the screenshot was not taken in.
     ///
-    /// Called once per [`Self::capabilities`], which is once per `into_capabilities()` and once
-    /// per [`Self::announcement`] — so the window's Tools screen reconnects to the display server
-    /// on every ask. That is a few milliseconds on a machine that has one, and the honest answer
-    /// on a machine whose display arrived or left since startup. If it ever becomes a cost, this
-    /// is the line to revisit.
+    /// Called once per [`Self::capabilities`], which is once per `into_capabilities()` — so this
+    /// connects to the display server when the node is built and not again. The window reads the
+    /// snapshot [`Self::into_capabilities`] left rather than asking here a second time.
     fn screen_pair(&self) -> Vec<Arc<dyn ServeCapability>> {
         let capture = zyris_screen::HostScreenCapture::default();
         let backend = capture.backend();
@@ -208,6 +214,21 @@ pub fn default_root() -> PathBuf {
     fallback
 }
 
+/// A capability list as the window reads it.
+fn describe(capabilities: &[Arc<dyn ServeCapability>]) -> Vec<Announced> {
+    capabilities
+        .iter()
+        .map(|capability| {
+            let descriptor = capability.descriptor();
+            Announced {
+                name: descriptor.name,
+                version: descriptor.version,
+                tools: descriptor.tools.into_iter().map(|tool| tool.name).collect(),
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,11 +237,21 @@ mod tests {
         Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
     }
 
+    /// A `Tools` that has handed its capabilities to a node, which is the only state in which
+    /// anything has been announced. `main` does this once at startup, before a window exists; a
+    /// test asking `announced()` without it is asking what was announced before anything was,
+    /// and the honest answer to that is nothing.
+    fn announced_tools(dir: &Path) -> Tools {
+        let tools = tools(dir);
+        let _ = tools.clone().into_capabilities();
+        tools
+    }
+
     #[test]
     fn the_two_that_need_no_display_are_announced_with_their_tools() {
         let dir = tempfile::tempdir().unwrap();
 
-        let announced = tools(dir.path()).announced();
+        let announced = announced_tools(dir.path()).announced();
 
         let names: Vec<&str> = announced.iter().map(|c| c.name.as_str()).collect();
         // Not an equality any more: `screen_capture` and `input` follow these two on a host with
@@ -241,7 +272,7 @@ mod tests {
         // `ui/src/Tools.tsx` transcribes this rather than parsing it, so the field names are the
         // contract. Nothing else catches a rename on either side.
         let dir = tempfile::tempdir().unwrap();
-        let announcement = tools(dir.path()).announcement();
+        let announcement = announced_tools(dir.path()).announcement();
 
         let json = serde_json::to_value(&announcement).unwrap();
 
@@ -260,7 +291,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let names: Vec<String> =
-            tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
+            announced_tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
 
         assert!(names.contains(&"terminal".to_string()));
         assert!(names.contains(&"file_io".to_string()));
@@ -268,6 +299,34 @@ mod tests {
             names.contains(&"input".to_string()),
             names.contains(&"screen_capture".to_string()),
             "one of the pair was announced without the other: {names:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_announced_until_the_node_has_the_capabilities() {
+        // The window asks this, and before the node was built the true answer is an empty list.
+        // It matters that this is not "go and look": two of the four need a display server, so a
+        // fresh look can answer differently from what the node is actually serving, and a screen
+        // reporting no pointer while every agent on the connection can still drive one states
+        // something false about what this machine is handing out.
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(tools(dir.path()).announced().is_empty());
+    }
+
+    #[test]
+    fn the_record_is_shared_with_every_clone() {
+        // The connector is handed a clone and the window reads another. If the record were not
+        // shared, the window would report nothing for the whole run.
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools(dir.path());
+        let connector_copy = tools.clone();
+
+        let _ = connector_copy.into_capabilities();
+
+        assert!(
+            !tools.announced().is_empty(),
+            "the window's handle did not see what the connector's handle announced"
         );
     }
 }
