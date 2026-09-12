@@ -169,9 +169,17 @@ fn main() -> anyhow::Result<()> {
         // whether to put the window on the screen. The instance name goes with it too: the GUI
         // takes its lock inside `setup`, and it has to be the same name this function derived
         // for the keychain and the log.
-        mode @ (cli::Mode::Window | cli::Mode::WindowHidden) => {
-            gui::run(bus, runtime.handle().clone(), connector, tools, instance, mode)
-        }
+        mode @ (cli::Mode::Window | cli::Mode::WindowHidden) => gui::run(
+            bus,
+            runtime.handle().clone(),
+            connector,
+            tools,
+            instance,
+            mode,
+            // Not the URL, only whether there was one: the window needs this to decide whether
+            // to register the single-instance plugin, and nothing else about the server.
+            cli.server().is_some(),
+        ),
     }
 }
 
@@ -232,6 +240,10 @@ fn run_autostart(request: cli::AutostartRequest, server: Option<&str>) -> anyhow
 /// credentials belong to that server, its calls are not this machine's real history, and it has
 /// to be able to run *beside* a production instance rather than be turned away by its lock —
 /// which is the point of the flag.
+///
+/// Naming the lock is only half of that. The other half is in `gui.rs`: `tauri-plugin-single-
+/// instance` keys on the bundle identifier rather than on this name, so a windowed `--server`
+/// run skips registering it. Both halves are needed, and neither works alone.
 ///
 /// Every character that is not `[0-9A-Za-z]` is replaced, so the result is usable as a directory
 /// name, a file name and a keychain service on every platform. Two servers that differ only in

@@ -28,19 +28,46 @@ pub fn run(
     // Whether this window goes on the screen. Autostart installs `--minimized`, which builds
     // everything and shows nothing but the tray icon.
     mode: Mode,
+    // Whether `--server` pointed this run at a development server, which is the one case two
+    // Zyris windows are wanted on one machine at once. See the plugin registration below.
+    dev_server: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
 
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
     let setup_gate = tools.gate().clone();
-    let app = tauri::Builder::default()
-        // Must be registered first: a second launch has to reach the running instance before
-        // anything else in this process starts.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+
+    let mut builder = tauri::Builder::default();
+
+    // **Skipped for a `--server` run, and that is what makes the flag work.** The plugin keys
+    // on `app.config().identifier` and nothing else — one constant for every build of Zyris, on
+    // both platforms, with no per-instance knob in 2.4.4. So a development window launched
+    // beside a production one was caught by production's copy of the plugin, brought *its*
+    // window forward, and exited without ever appearing. The instance lock taken in `setup`
+    // below is already named per instance and has always let the two coexist; this was the one
+    // thing still refusing them.
+    //
+    // What it costs: two `--server` windows are no longer refused by the plugin. They are still
+    // refused by the lock when both point at the same server, which is the case that would mint
+    // two nodes; two runs pointed at *different* servers are two different instances and being
+    // able to have both is the point.
+    //
+    // Registered first when it is registered at all: a second launch has to reach the running
+    // instance before anything else in this process starts.
+    if dev_server {
+        tracing::info!(
+            "not registering the single-instance plugin: it keys on the bundle identifier, so a \
+             --server window would be swallowed by a production one",
+        );
+    } else {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             tracing::info!("a second instance was launched; focusing this one");
             tray::show_main_window(app);
-        }))
+        }));
+    }
+
+    let app = builder
         .manage(bus.clone())
         .manage(runtime)
         // Clones, not the `Tools` itself: both are handles on the state `main` built, so the
@@ -84,7 +111,9 @@ pub fn run(
             // branch, where there is no plugin to reach first; see its comment.
             //
             // The name is the instance's rather than the product's, so a `--server` window can
-            // run beside a production one instead of being refused by its lock.
+            // run beside a production one instead of being refused by its lock. That is half
+            // of what side-by-side needs; the other half is the single-instance plugin above,
+            // which keys on the bundle identifier and so is skipped for such a run.
             //
             // `manage`d rather than kept as a local: a local here would drop, and release the
             // lock, the moment this closure returns — the guard has to live for the app's whole
