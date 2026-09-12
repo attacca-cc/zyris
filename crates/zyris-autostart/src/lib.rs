@@ -9,6 +9,8 @@ use std::path::Path;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod windows;
 
 /// Where autostart stands on this machine.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -33,18 +35,15 @@ pub struct Autostart {
 impl Autostart {
     /// Pick the backend this machine can actually drive.
     ///
-    /// One arm per platform. Task 2 puts the systemd user unit behind the Linux arm and Task 3
-    /// the Task Scheduler entry behind the Windows arm; the last arm keeps [`Unavailable`] for
-    /// good, because an operating system Zyris cannot start itself on is a state to report, not
-    /// a fault to raise.
+    /// One arm per platform: a systemd user unit on Linux, a Task Scheduler entry on Windows.
+    /// The last arm keeps [`Unavailable`] for good, because an operating system Zyris cannot
+    /// start itself on is a state to report, not a fault to raise.
     pub fn for_this_machine() -> Self {
         #[cfg(target_os = "linux")]
         let inner: Box<dyn Backend> = Box::new(linux::SystemdUser);
 
         #[cfg(windows)]
-        let inner: Box<dyn Backend> = Box::new(Unavailable::new(
-            "starting Zyris from a Task Scheduler entry is not wired up in this build",
-        ));
+        let inner: Box<dyn Backend> = Box::new(windows::TaskScheduler);
 
         #[cfg(not(any(target_os = "linux", windows)))]
         let inner: Box<dyn Backend> = Box::new(Unavailable::new(

@@ -12,6 +12,12 @@ directories = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 
+# `schtasks /create` reads the task document from a path, so the Windows backend has to put one
+# on disk. A temporary directory is what keeps a `zyris-task.xml` from outliving the call in
+# somebody's home folder.
+[target.'cfg(windows)'.dependencies]
+tempfile = { workspace = true }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
