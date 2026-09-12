@@ -7,6 +7,9 @@
 
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// Where autostart stands on this machine.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,9 +39,7 @@ impl Autostart {
     /// a fault to raise.
     pub fn for_this_machine() -> Self {
         #[cfg(target_os = "linux")]
-        let inner: Box<dyn Backend> = Box::new(Unavailable::new(
-            "starting Zyris from a systemd user unit is not wired up in this build",
-        ));
+        let inner: Box<dyn Backend> = Box::new(linux::SystemdUser);
 
         #[cfg(windows)]
         let inner: Box<dyn Backend> = Box::new(Unavailable::new(
@@ -71,6 +72,20 @@ impl Autostart {
     pub fn disable(&self) -> anyhow::Result<()> {
         self.inner.disable()
     }
+
+    /// Everything true of this machine that leaves the switch weaker than "on" suggests.
+    ///
+    /// Empty on a machine where turning autostart on is the whole story, which is most of them.
+    /// On Linux a unit whose user does not linger is the case this exists for: systemd stops it
+    /// when the person logs out, so Zyris starts and then goes away, and nothing about
+    /// [`State::Enabled`] hints at that.
+    ///
+    /// Read back from the machine like [`Autostart::state`], not remembered from the call that
+    /// turned it on — lingering can be switched off by someone else the day after, and the
+    /// sentence has to still be true then.
+    pub fn caveats(&self) -> Vec<String> {
+        self.inner.caveats()
+    }
 }
 
 /// One platform's way of doing the same three things.
@@ -81,6 +96,16 @@ trait Backend: Send + Sync {
     fn state(&self) -> anyhow::Result<State>;
     fn enable(&self, exe: &Path) -> anyhow::Result<()>;
     fn disable(&self) -> anyhow::Result<()>;
+
+    /// See [`Autostart::caveats`].
+    ///
+    /// The default is none, which is the honest answer for a mechanism that either works or
+    /// fails. It exists because `enable` cannot say this: it half succeeded, so an `Err` would
+    /// undo nothing and report the wrong thing, and an `Ok` on its own throws the sentence
+    /// away.
+    fn caveats(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The backend for a machine whose autostart mechanism Zyris cannot drive.
@@ -88,10 +113,16 @@ trait Backend: Send + Sync {
 /// It carries the reason and hands out the same one every way it is asked: `state` reports it,
 /// and both `enable` and `disable` fail with it. A generic "not supported" would throw away the
 /// half a person can act on.
+///
+/// `allow(dead_code)` because it is the arm for a platform that is neither Linux nor Windows,
+/// and a build is always on one platform: on the two Zyris ships for, nothing constructs this
+/// and the compiler is right that nothing does. Its tests are what keep it honest.
+#[allow(dead_code)]
 struct Unavailable {
     reason: String,
 }
 
+#[allow(dead_code)] // See the note on the struct.
 impl Unavailable {
     fn new(reason: impl Into<String>) -> Self {
         Self { reason: reason.into() }
