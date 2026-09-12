@@ -213,7 +213,7 @@ fn render_task(exe: &Path) -> String {
   <Actions Context="Author">
     <Exec>
       <Command>{command}</Command>
-      <Arguments>--headless</Arguments>
+      <Arguments>--minimized</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -350,11 +350,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_task_runs_the_headless_binary() {
+    fn the_task_starts_a_zyris_somebody_can_still_open() {
+        // `--minimized`, never `--headless`. A headless process takes the instance lock and
+        // has no tray and no single-instance plugin, so on a machine with autostart on there
+        // would be no window, no tray icon, and no way to get either: launching Zyris would
+        // find the lock held and exit without a word. `--minimized` is a full GUI that happens
+        // not to be on the screen, and a second launch reaches it.
         let xml = render_task(Path::new(r"C:\Program Files\Zyris\zyris.exe"));
 
         assert!(xml.contains(r"<Command>C:\Program Files\Zyris\zyris.exe</Command>"));
-        assert!(xml.contains("<Arguments>--headless</Arguments>"));
+        assert!(xml.contains("<Arguments>--minimized</Arguments>"));
     }
 
     #[test]

@@ -165,9 +165,13 @@ fn main() -> anyhow::Result<()> {
         // window gets one so the tray and the Tools tab can reach the same gate and the same
         // log — the same ones, not copies, because `Tools` holds handles on shared state.
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
-        // The instance name goes with it: the GUI takes its lock inside `setup`, and it has to
-        // be the same name this function derived for the keychain and the log.
-        cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector, tools, instance),
+        // Both windowed modes are the same runtime; the mode goes along so `setup` knows
+        // whether to put the window on the screen. The instance name goes with it too: the GUI
+        // takes its lock inside `setup`, and it has to be the same name this function derived
+        // for the keychain and the log.
+        mode @ (cli::Mode::Window | cli::Mode::WindowHidden) => {
+            gui::run(bus, runtime.handle().clone(), connector, tools, instance, mode)
+        }
     }
 }
 
@@ -180,13 +184,13 @@ fn main() -> anyhow::Result<()> {
 /// this program: a person running this on a server is reading the same stream either way, and
 /// `RUST_LOG` is what turns the detail up.
 fn run_autostart(request: cli::AutostartRequest, server: Option<&str>) -> anyhow::Result<()> {
-    // Both mechanisms start `<this executable> --headless` and nothing else, so autostart
+    // Both mechanisms start `<this executable> --minimized` and nothing else, so autostart
     // installed from a `--server` run starts the *production* instance at the next logon — a
     // different node, with different credentials, from the one this process would have been.
     // Said rather than refused: the person may well want exactly that.
     if server.is_some() {
         tracing::warn!(
-            "--server is not carried into autostart: what starts at logon is this executable with --headless, which is the default instance"
+            "--server is not carried into autostart: what starts at logon is this executable with --minimized, which is the default instance"
         );
     }
 
@@ -211,8 +215,8 @@ fn run_autostart(request: cli::AutostartRequest, server: Option<&str>) -> anyhow
     }
 
     // At `warn`, because every one of these is a way the switch is weaker than "on" sounds.
-    // On Linux with lingering off this line is the difference between a machine that stays
-    // connected and one that stops the moment its owner logs out.
+    // On Linux this line is the difference between a machine that is connected whenever it is
+    // switched on and one that is connected only while somebody is logged in to a desktop.
     for caveat in &view.caveats {
         tracing::warn!("{caveat}");
     }

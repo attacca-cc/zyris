@@ -55,6 +55,13 @@ The first time it runs, the window shows a short code and a link. Open the link,
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
 its own every time it starts, with no window required.
 
+It can start itself, too — a Task Scheduler entry on Windows, a systemd user unit on Linux,
+turned on from the Settings screen or with `zyris --install-autostart`. Started that way it puts
+no window on the screen: click the tray icon to get one, or just launch Zyris again. **On Linux
+that means when you log in to a desktop, not when the computer boots.** The window and the tray
+icon need a graphical session to start into, so a Linux machine that is switched on with nobody
+logged in is not connected.
+
 ## Voice
 
 Speech runs on this machine. Whisper transcribes, Supertonic speaks, and the models are fetched
@@ -114,6 +121,7 @@ Then, from the workspace root:
 ```bash
 pnpm tauri dev                        # the window, with the dev server and hot reload
 cargo run -p zyris-app -- --headless  # no window, no tray
+cargo run -p zyris-app -- --minimized # the tray only; what autostart installs
 cargo test                            # the frontend has to be built first, same as above
 ```
 
@@ -139,7 +147,7 @@ lands in what order. Nothing here is ready to install yet.
 1. Skeleton — workspace, tray, headless mode
 2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
-4. Autostart — Windows Task Scheduler, systemd user units, installers
+4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers
 5. File transfer — peer endpoint, fingerprint confirmation, inbox
 6. MCP — local servers promoted to capabilities
 7. Voice in — audio, echo cancellation, wake word, transcription

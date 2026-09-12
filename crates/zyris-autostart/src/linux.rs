@@ -1,9 +1,18 @@
 //! Autostart on Linux: a systemd user unit.
 //!
-//! A unit file at `~/.config/systemd/user/zyris.service`, enabled into `default.target.wants`,
-//! with lingering turned on so it outlives the login session. A `.desktop` file under
-//! `~/.config/autostart` — what `tauri-plugin-autostart` writes — would have been a quarter of
-//! this code, and it has no delayed start, no retry, and no life after logout.
+//! A unit file at `~/.config/systemd/user/zyris.service`, enabled into
+//! `graphical-session.target.wants`. A `.desktop` file under `~/.config/autostart` — what
+//! `tauri-plugin-autostart` writes — would have been a quarter of this code, and it has no
+//! delayed start and no retry.
+//!
+//! **This starts a desktop session program, not a daemon, and that is a deliberate trade.** The
+//! unit runs `zyris --minimized`: a full GUI with a tray icon, whose window simply is not on the
+//! screen. It has to be, because the alternative does not work — `--headless` takes the instance
+//! lock and runs neither a tray nor the single-instance plugin, so a machine with autostart on
+//! had no window, no tray icon, and no way to get either. What it costs is the thing lingering
+//! used to buy: a machine switched on with nobody logged in is not connected, because there is
+//! no display server for a GUI to start into. [`SystemdUser::caveats`] says so on the Settings
+//! screen rather than leaving it to be discovered.
 //!
 //! Nothing here remembers anything. Every question is answered by asking systemd again, because
 //! a person can turn this off with `systemctl --user disable` without telling Zyris.
@@ -79,20 +88,19 @@ impl Backend for SystemdUser {
         systemctl(&["--user", "daemon-reload"])?;
         systemctl(&["--user", "enable", UNIT])?;
 
-        // Lingering is what makes this a daemon rather than a login program: without it systemd
-        // stops the unit when the person logs out, and the machine they left switched on stops
-        // answering. It needs no root where polkit allows it, and polkit policy varies by
-        // distribution — so a failure here is **reported, never swallowed**, and it does not
-        // undo the unit. Autostart really is on; it just will not outlive the session, which is
-        // a smaller thing than "enabling autostart failed" and a different thing to say.
-        // [`Backend::caveats`] repeats it every time the state is read, for the window; this
-        // line is how a `--headless` run hears about it.
-        if let Err(error) = enable_linger() {
-            tracing::warn!(
-                %error,
-                "Zyris will start when you sign in, but it will stop when you log out",
-            );
-        }
+        // **No `loginctl enable-linger` here, deliberately.** Lingering exists so a user's
+        // units can run with no session of their own, and this unit cannot: it starts a GUI,
+        // which needs the `DISPLAY` or `WAYLAND_DISPLAY` only a graphical session has. Turning
+        // lingering on would change a user-wide setting — one that keeps every other unit they
+        // own running after logout too — and buy this one nothing. An earlier version of this
+        // file did it, back when the unit started `--headless`.
+        //
+        // What that costs is said out loud rather than left to be discovered, both here and on
+        // the Settings screen through [`SystemdUser::caveats`].
+        tracing::info!(
+            "Zyris will start when you log in to a desktop; a machine switched on with nobody \
+             logged in is not connected",
+        );
 
         Ok(())
     }
@@ -105,7 +113,7 @@ impl Backend for SystemdUser {
         let path = unit_path()?;
         let installed = path.exists();
 
-        // `systemctl --user disable` is what removes the symlink under `default.target.wants`,
+        // `systemctl --user disable` is what removes the symlink under the wants directory,
         // and it is also what clears a dangling one left behind by a unit file somebody deleted
         // by hand — so it runs either way. With no unit file it exits 1, measured, and that is
         // not a failure when the job was to make sure there is nothing there.
@@ -124,10 +132,12 @@ impl Backend for SystemdUser {
 
         systemctl(&["--user", "daemon-reload"])?;
 
-        // Lingering is deliberately left on. It is a property of the user rather than of Zyris
-        // — another of their services may be relying on it — and nothing here can tell whether
-        // this switch is what turned it on, because `loginctl` does not say who asked. Turning
-        // off something we cannot prove we caused is the worse mistake of the two.
+        // **Lingering is deliberately left exactly as it is, including on a machine where an
+        // older Zyris turned it on.** This version never enables it, so `disable` cannot even
+        // claim to be undoing its own work — and `loginctl` does not record who asked, so
+        // nothing here can tell a linger that Zyris caused from one the person set for their
+        // own services. Turning off a user-wide setting we cannot prove we caused is the worse
+        // mistake of the two. Somebody who wants it off types `loginctl disable-linger`.
         Ok(())
     }
 
@@ -138,26 +148,34 @@ impl Backend for SystemdUser {
     }
 
     fn caveats(&self) -> Vec<String> {
-        // Only worth saying while the switch is on. What lingering costs a machine that does
-        // not start Zyris at all is nothing.
-        if !matches!(self.state(), Ok(State::Enabled)) {
-            return Vec::new();
-        }
-
-        match linger_enabled() {
-            Ok(true) => Vec::new(),
-            Ok(false) => vec![
-                "Zyris will start when you sign in, but it will stop when you log out: this \
-                 user does not linger. `loginctl enable-linger` turns that on."
-                    .to_owned(),
-            ],
-            Err(error) => {
-                tracing::debug!(%error, "could not read whether this user lingers");
-                Vec::new()
-            }
-        }
+        caveats_for(&self.state())
     }
 }
+
+/// What is true of an enabled unit that "on" does not say by itself.
+///
+/// Split out from [`SystemdUser::caveats`] so the sentence can be checked without a systemd to
+/// ask; the method is only the part that has to go and look.
+fn caveats_for(state: &anyhow::Result<State>) -> Vec<String> {
+    // Only worth saying while the switch is on. What a login-time unit costs a machine that
+    // does not start Zyris at all is nothing.
+    if !matches!(state, Ok(State::Enabled)) {
+        return Vec::new();
+    }
+
+    vec![NOT_AT_BOOT.to_owned()]
+}
+
+/// The one thing a Linux user gives up by turning this on, in the words the Settings screen
+/// and `--install-autostart` both print.
+///
+/// This used to be about lingering, which was the opposite trade: a headless unit that ran with
+/// no session at all. The unit starts a GUI now, so it needs a session, and a session is
+/// something only a logged-in person has.
+const NOT_AT_BOOT: &str = "Zyris starts when you log in to a desktop, not when this computer \
+                           boots: the window and the tray icon need a graphical session to \
+                           start into. A machine that is switched on with nobody logged in is \
+                           not connected.";
 
 /// The unit file, as a string.
 ///
@@ -166,17 +184,18 @@ fn render_unit(exe: &Path) -> String {
     format!(
         "[Unit]\n\
          Description=Zyris — keeps this computer connected to Attacca\n\
-         After=network-online.target\n\
+         After=graphical-session.target network-online.target\n\
          Wants=network-online.target\n\
+         PartOf=graphical-session.target\n\
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={exe} --headless\n\
+         ExecStart={exe} --minimized\n\
          Restart=always\n\
          RestartSec=30\n\
          \n\
          [Install]\n\
-         WantedBy=default.target\n",
+         WantedBy=graphical-session.target\n",
         exe = exec_start_word(exe),
     )
 }
@@ -238,67 +257,6 @@ fn systemctl(args: &[&str]) -> anyhow::Result<()> {
     anyhow::bail!("`systemctl {}` failed: {}", args.join(" "), complaint(&output));
 }
 
-/// Turn lingering on for this user, unless it already is.
-///
-/// Asking first keeps a machine that would put up a polkit prompt from putting one up for
-/// nothing.
-fn enable_linger() -> anyhow::Result<()> {
-    if linger_enabled()? {
-        return Ok(());
-    }
-
-    let user = this_user()?;
-    let output = run("loginctl", &["enable-linger", &user])
-        .context("could not run `loginctl enable-linger`")?;
-
-    if !output.status.success() {
-        anyhow::bail!("could not enable lingering for {user}: {}", complaint(&output));
-    }
-
-    tracing::info!(%user, "enabled lingering so Zyris survives logout");
-    Ok(())
-}
-
-/// Whether this user's services survive them logging out.
-fn linger_enabled() -> anyhow::Result<bool> {
-    let user = this_user()?;
-    let output = run("loginctl", &["show-user", &user, "--value", "--property=Linger"])
-        .context("could not run `loginctl show-user`")?;
-
-    if !output.status.success() {
-        anyhow::bail!("could not read whether {user} lingers: {}", complaint(&output));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "yes")
-}
-
-/// Who to name to `loginctl`.
-///
-/// It has to be named. `loginctl show-user` with no user shows the *login manager's* properties
-/// rather than this user's, and since the manager has no `Linger` property it answers with an
-/// empty string and exit 0 — which reads exactly like "does not linger". Measured on systemd
-/// 260.
-fn this_user() -> anyhow::Result<String> {
-    match std::env::var("USER") {
-        Ok(user) if !user.is_empty() => return Ok(user),
-        _ => {}
-    }
-
-    // `$USER` is not set in every context a desktop application is launched from. `loginctl`
-    // takes a numeric uid in place of a name, and `id -u` prints one and nothing else.
-    let output = run("id", &["-u"]).context("could not run `id -u` to find out who this is")?;
-    if !output.status.success() {
-        anyhow::bail!("could not find out who this is: {}", complaint(&output));
-    }
-
-    let uid = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if uid.is_empty() {
-        anyhow::bail!("could not find out who this is: `id -u` said nothing");
-    }
-
-    Ok(uid)
-}
-
 /// Capture a command's output rather than letting it onto the terminal.
 ///
 /// `Command::output` also gives the child no stdin, which is what keeps a polkit agent from
@@ -330,10 +288,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_unit_starts_the_headless_binary_by_absolute_path() {
+    fn the_unit_starts_a_zyris_somebody_can_still_open() {
+        // `--minimized`, never `--headless`. A headless process takes the instance lock and
+        // has no tray and no single-instance plugin, so on a machine with autostart on there
+        // would be no window, no tray icon, and no way to get either: launching Zyris would
+        // find the lock held and exit without a word. `--minimized` is a full GUI that happens
+        // not to be on the screen, and a second launch reaches it.
         let unit = render_unit(Path::new("/usr/bin/zyris"));
 
-        assert!(unit.contains("ExecStart=/usr/bin/zyris --headless"));
+        assert!(unit.contains("ExecStart=/usr/bin/zyris --minimized"));
+        assert!(!unit.contains("--headless"), "{unit}");
     }
 
     #[test]
@@ -349,13 +313,35 @@ mod tests {
     fn the_unit_waits_for_the_network() {
         let unit = render_unit(Path::new("/usr/bin/zyris"));
 
-        assert!(unit.contains("After=network-online.target"));
+        // One `After=` names both targets — systemd takes a space-separated list there, and two
+        // lines would read as the second replacing the first even though it does not.
+        assert!(
+            unit.contains("After=graphical-session.target network-online.target"),
+            "{unit}"
+        );
         assert!(unit.contains("Wants=network-online.target"));
     }
 
     #[test]
-    fn the_unit_installs_where_a_user_session_will_find_it() {
-        assert!(render_unit(Path::new("/usr/bin/zyris")).contains("WantedBy=default.target"));
+    fn the_unit_hangs_off_the_graphical_session() {
+        // The unit starts a GUI, so it needs a session with a `DISPLAY` or a `WAYLAND_DISPLAY`
+        // to start into, and `graphical-session.target` is the documented place to hang one.
+        // `default.target` — where this used to go — is reached before any of that exists.
+        let unit = render_unit(Path::new("/usr/bin/zyris"));
+
+        assert!(unit.contains("WantedBy=graphical-session.target"), "{unit}");
+        assert!(!unit.contains("WantedBy=default.target"), "{unit}");
+        assert!(unit.contains("After=graphical-session.target"), "{unit}");
+        // Stopped with the session rather than left behind by it: a GUI process outliving the
+        // display server it was started into is a process with nothing to draw on.
+        assert!(unit.contains("PartOf=graphical-session.target"), "{unit}");
+    }
+
+    #[test]
+    fn the_unit_does_not_ask_for_lingering() {
+        // Lingering exists to run a unit with no session. This one needs a session, so turning
+        // it on would change a user-wide setting for no benefit at all.
+        assert!(!render_unit(Path::new("/usr/bin/zyris")).contains("linger"));
     }
 
     #[test]
@@ -366,7 +352,7 @@ mod tests {
         let unit = render_unit(Path::new("/home/r/My Apps/zyris"));
 
         assert!(
-            unit.contains(r#"ExecStart="/home/r/My Apps/zyris" --headless"#),
+            unit.contains(r#"ExecStart="/home/r/My Apps/zyris" --minimized"#),
             "the path was not quoted: {unit}"
         );
     }
@@ -378,6 +364,28 @@ mod tests {
         let mechanism = SystemdUser.mechanism().unwrap();
 
         assert!(mechanism.contains(UNIT), "{mechanism}");
+    }
+
+    #[test]
+    fn an_enabled_unit_says_what_it_does_not_cover() {
+        // A person who turned this on to keep a machine connected while they are away has to
+        // learn here that it does not, rather than from its absence.
+        let caveats = caveats_for(&Ok(State::Enabled));
+
+        assert_eq!(caveats.len(), 1, "{caveats:?}");
+        assert!(caveats[0].contains("log in"), "{}", caveats[0]);
+        assert!(
+            !caveats[0].contains("linger"),
+            "dead copy: nothing enables lingering any more: {}",
+            caveats[0],
+        );
+    }
+
+    #[test]
+    fn a_switch_that_is_off_has_nothing_to_qualify() {
+        assert!(caveats_for(&Ok(State::Disabled)).is_empty());
+        assert!(caveats_for(&Ok(State::Unsupported("no systemd".into()))).is_empty());
+        assert!(caveats_for(&Err(anyhow::anyhow!("could not ask"))).is_empty());
     }
 
     #[test]
@@ -393,16 +401,15 @@ mod tests {
 
     /// The whole round trip against this machine's real systemd.
     ///
-    /// Ignored because it writes into the person's own `~/.config/systemd/user` and turns
-    /// lingering on for their account. Run it deliberately, and know that it leaves lingering
-    /// on — [`SystemdUser::disable`] does not turn that off, and neither does this:
+    /// Ignored because it writes into the person's own `~/.config/systemd/user` and enables a
+    /// unit there. It puts both back. Nothing here touches lingering any more — neither
+    /// [`SystemdUser::enable`] nor this test — so the machine is left exactly as it was found:
     ///
     /// ```text
     /// cargo test -p zyris-autostart -- --ignored --exact linux::tests::the_round_trip
-    /// loginctl disable-linger "$USER"     # if it was off before, put it back
     /// ```
     #[test]
-    #[ignore = "writes a unit into this user's real systemd and turns lingering on"]
+    #[ignore = "writes a unit into this user's real systemd and enables it"]
     fn the_round_trip() {
         let backend = SystemdUser;
         let path = unit_path().unwrap();
@@ -418,9 +425,14 @@ mod tests {
 
         assert!(path.exists(), "{} was not written", path.display());
         assert_eq!(backend.state().unwrap(), State::Enabled);
+        let installed = std::fs::read_to_string(&path).unwrap();
         assert!(
-            std::fs::read_to_string(&path).unwrap().contains("--headless"),
-            "the installed unit does not start the headless binary",
+            installed.contains("--minimized"),
+            "the installed unit does not start a Zyris anybody can open: {installed}",
+        );
+        assert!(
+            installed.contains("WantedBy=graphical-session.target"),
+            "the installed unit would be started before there is a display server: {installed}",
         );
 
         backend.disable().unwrap();

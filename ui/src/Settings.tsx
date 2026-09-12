@@ -131,8 +131,11 @@ export function Settings() {
             )}
 
             {/* Everything true of this machine that leaves the switch weaker than "on" sounds.
-                On Linux with lingering off, this sentence is the difference between a computer
-                that stays connected and one that stops the moment its owner logs out. */}
+                On Linux this is where a person learns that the unit needs a graphical session,
+                so a computer switched on with nobody logged in is not connected. Which
+                sentences these are is the backend's to say — this screen cannot tell what
+                platform it is on, and guessing from the mechanism string would be a second
+                place for the answer to live. */}
             {autostart.caveats.map((caveat) => (
               <p className="warn note" key={caveat}>
                 {caveat}
@@ -145,10 +148,15 @@ export function Settings() {
 
         {autostart !== null && reason === null && (
           // Two things a person would otherwise find out by being surprised: started this way
-          // Zyris is invisible, and this switch is not the one that stops agents.
+          // there is no window on the screen, and this switch is not the one that stops agents.
+          //
+          // "Where did it go" is the question this answers, and it is the whole reason Zyris
+          // starts itself with a hidden window rather than headless: a headless Zyris has no
+          // tray icon, and launching it again reaches a process with nothing listening.
           <p className="muted note">
-            Started this way Zyris has no window and no tray icon. It does not change what
-            agents can reach on this computer — that is the switch on the Tools screen.
+            Started this way Zyris opens no window. Its tray icon brings one up, and so does
+            starting Zyris again. It does not change what agents can reach on this computer —
+            that is the switch on the Tools screen.
           </p>
         )}
       </section>

@@ -85,14 +85,15 @@ impl Autostart {
 
     /// Everything true of this machine that leaves the switch weaker than "on" suggests.
     ///
-    /// Empty on a machine where turning autostart on is the whole story, which is most of them.
-    /// On Linux a unit whose user does not linger is the case this exists for: systemd stops it
-    /// when the person logs out, so Zyris starts and then goes away, and nothing about
-    /// [`State::Enabled`] hints at that.
+    /// Empty on Windows, where a logon trigger is the whole story. Linux is the case this
+    /// exists for: the unit starts a GUI, which needs a graphical session, so Zyris starts when
+    /// somebody logs in to a desktop and not when the computer boots — and nothing about
+    /// [`State::Enabled`] hints that a machine switched on with nobody logged in is offline.
     ///
     /// Read back from the machine like [`Autostart::state`], not remembered from the call that
-    /// turned it on — lingering can be switched off by someone else the day after, and the
-    /// sentence has to still be true then.
+    /// turned it on: somebody can disable the unit or the task from outside Zyris, and a
+    /// sentence qualifying a switch that is no longer on is a sentence that has stopped being
+    /// true.
     pub fn caveats(&self) -> Vec<String> {
         self.inner.caveats()
     }

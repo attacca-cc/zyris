@@ -8,11 +8,12 @@
 //! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
 //! Tauri delivers right before the process goes away.
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
-use zyris_runtime::{lifecycle, EventBus};
+use zyris_runtime::{lifecycle, CoreEvent, EventBus};
 use zyris_tools::Tools;
 
+use crate::cli::Mode;
 use crate::{bridge, tray};
 
 pub fn run(
@@ -24,8 +25,11 @@ pub fn run(
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
     instance: String,
+    // Whether this window goes on the screen. Autostart installs `--minimized`, which builds
+    // everything and shows nothing but the tray icon.
+    mode: Mode,
 ) -> anyhow::Result<()> {
-    tracing::info!("running with a window");
+    tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
 
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
@@ -97,7 +101,40 @@ pub fn run(
             // After the `manage` calls above, which is what lets the tray reach the gate and the
             // bus: `tray::build` reads both out of Tauri's state to label its pause item and to
             // keep that label following the switch.
+            //
+            // Built in both modes, and that is the point of `--minimized`: a process started by
+            // autostart with no tray is a process nobody can open Zyris on.
             tray::build(app.handle(), &setup_runtime)?;
+
+            // `tauri.conf.json` declares this window `"visible": false`, so this call is what
+            // puts it on the screen. It has to be this way round: Tauri builds a
+            // config-declared window *before* this closure runs, so a visible window hidden
+            // here would appear and then vanish at every sign-in.
+            //
+            // Below the lock check on purpose. A second launch exits from that arm having shown
+            // nothing, and the first process's `tauri_plugin_single_instance` callback is what
+            // brings the running window forward.
+            if mode.shows_a_window() {
+                tray::show_main_window(app.handle());
+            } else {
+                // Onboarding is the one case a hidden window cannot be left hidden through: the
+                // enrolment code is the single screen a person *must* see, and a tray icon that
+                // has never been mentioned is not a way of telling them it is there.
+                //
+                // Driven off the event rather than off a second look at the keychain, so it
+                // says what the core actually decided instead of guessing at it — and so the
+                // keychain is read once, by the one thing that owns it.
+                //
+                // `NeedsEnrolment` is published once, before the first dial, and every other
+                // step of onboarding follows it, `EnrolmentFailed` included. So this covers the
+                // whole path without ever raising a window over somebody's work mid-session.
+                show_when_enrolment_needs_a_person(
+                    app.handle().clone(),
+                    setup_bus.clone(),
+                    &setup_runtime,
+                );
+            }
+
             // The bridge must be subscribed before the connector can publish anything, and
             // before `lifecycle::start` below — for the same reason `headless.rs` subscribes
             // before either fires: the connector publishes `NeedsEnrolment` (or dials straight
@@ -150,4 +187,54 @@ pub fn run(
     });
 
     Ok(())
+}
+
+/// Put the window on the screen the moment the core says this machine is not enrolled yet.
+///
+/// Only registered for a run that started hidden. A first run under `--minimized` would
+/// otherwise keep the one screen a person has no way around — a short code and a link, which
+/// expire — behind a tray icon nobody told them about. Every later run has a credential, says
+/// nothing here, and stays hidden exactly as it was asked to.
+///
+/// One shot: the task ends as soon as it has shown the window, so nothing here can raise a
+/// window twice or fight with somebody who closed it.
+fn show_when_enrolment_needs_a_person(
+    app: AppHandle,
+    bus: EventBus,
+    runtime: &tokio::runtime::Handle,
+) {
+    // Subscribed here, synchronously, rather than inside the task: the connector publishes
+    // `NeedsEnrolment` within microseconds of being spawned and `broadcast` never replays a
+    // send to a subscriber that arrived after it. The caller runs this before
+    // `lifecycle::start` and before the connector is spawned, for that reason.
+    let mut events = bus.subscribe();
+
+    runtime.spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(CoreEvent::NeedsEnrolment) => {
+                    tracing::info!(
+                        "this computer is not enrolled yet, so the window opens even though \
+                         this run was asked to start hidden",
+                    );
+                    tray::show_main_window(&app);
+                    return;
+                }
+                Ok(_) => {}
+                // Nothing can outrun this subscriber before enrolment — the only events before
+                // a connection are the handful onboarding publishes, and tool calls cannot
+                // happen until there is a link. Handled anyway, off the catch-up slot, because
+                // the cost of being wrong is a person staring at a machine that will never
+                // connect and never says why.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "fell behind while watching for enrolment");
+                    if matches!(bus.latest(), Some(CoreEvent::NeedsEnrolment)) {
+                        tray::show_main_window(&app);
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
 }

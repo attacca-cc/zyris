@@ -157,8 +157,8 @@ pub struct AutostartView {
     /// the task by hand while this window is open.
     pub state: AutostartState,
     /// Everything true of this machine that leaves the switch weaker than "on" suggests. The
-    /// window renders all of them; on Linux with lingering off, that sentence is the difference
-    /// between "connected always" and "connected until you log out".
+    /// window renders all of them; on Linux that sentence is the difference between "connected
+    /// whenever this computer is on" and "connected whenever somebody is logged in".
     pub caveats: Vec<String>,
     /// What is, or would be, installed — named so a person can find it without Zyris.
     pub mechanism: Option<String>,
@@ -178,8 +178,8 @@ pub fn look(autostart: &Autostart) -> anyhow::Result<AutostartView> {
 /// It returns the state it *ended in* rather than `()`, for the same reason [`apply_paused`]
 /// makes the window read the gate: a screen that renders its own request is a screen that can
 /// be wrong. Turning autostart on is the case that proves it — on Linux the unit is enabled and
-/// lingering can still fail, which is [`AutostartView::caveats`], and nothing about the request
-/// would have said so.
+/// still only starts Zyris at a desktop login, which is [`AutostartView::caveats`], and nothing
+/// about the request would have said so.
 ///
 /// The one path the CLI flags and the window both take, so `--install-autostart` and the switch
 /// cannot install different things.
@@ -283,13 +283,13 @@ mod tests {
         // states are bare strings and the third is an object, and the screen switches on that.
         let view = AutostartView {
             state: AutostartState::Unsupported("no systemd".into()),
-            caveats: vec!["this user does not linger".into()],
+            caveats: vec!["it starts at a desktop login".into()],
             mechanism: Some("a systemd user unit named zyris.service".into()),
         };
 
         assert_eq!(
             serde_json::to_string(&view).unwrap(),
-            r#"{"state":{"unsupported":"no systemd"},"caveats":["this user does not linger"],"mechanism":"a systemd user unit named zyris.service"}"#
+            r#"{"state":{"unsupported":"no systemd"},"caveats":["it starts at a desktop login"],"mechanism":"a systemd user unit named zyris.service"}"#
         );
         assert_eq!(
             serde_json::to_string(&AutostartView {

@@ -10,6 +10,14 @@ pub struct Cli {
     #[arg(long)]
     pub headless: bool,
 
+    /// Start with the window hidden, leaving the tray icon as the way in. This is what
+    /// autostart installs: a window that opened by itself at every sign-in is a window nobody
+    /// asked for, and a process with no tray at all is one nobody can reach.
+    ///
+    /// Refused beside `--headless`, which has no window to hide.
+    #[arg(long, conflicts_with = "headless")]
+    pub minimized: bool,
+
     /// Dial somewhere other than Attacca. For a local server during development; leave it unset
     /// and the node uses the address the protocol crate ships.
     #[arg(long, value_name = "URL")]
@@ -27,11 +35,33 @@ pub struct Cli {
     pub uninstall_autostart: bool,
 }
 
-/// Which of the two runtimes this process is.
+/// What this process is, said once so nothing downstream has to work it out again.
+///
+/// Three states rather than two booleans standing beside each other. `--headless --minimized`
+/// is a pair with no meaning, and a pair that can be nonsense is a pair somebody resolves at
+/// runtime — in two places, differently. Clap refuses that combination at parse time, and what
+/// reaches the rest of the program is one of these three and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    Gui,
+    /// A window, on the screen, now.
+    Window,
+    /// The same window, built but not shown. The tray icon is the only thing on the screen
+    /// until somebody asks for more.
+    WindowHidden,
+    /// No window and no tray at all.
     Headless,
+}
+
+impl Mode {
+    /// Whether the window should be on the screen as soon as it exists.
+    ///
+    /// `tauri.conf.json` declares the main window `"visible": false`, and `gui.rs` shows it from
+    /// `setup` when this says so. The other way round — declaring it visible and hiding it in
+    /// `setup` — cannot work: Tauri builds a config-declared window *before* the setup closure
+    /// runs, so the window would appear and then vanish at every sign-in.
+    pub fn shows_a_window(self) -> bool {
+        matches!(self, Mode::Window)
+    }
 }
 
 /// What the autostart flags asked for, when one of them was given.
@@ -45,7 +75,13 @@ pub enum AutostartRequest {
 
 impl Cli {
     pub fn mode(&self) -> Mode {
-        if self.headless { Mode::Headless } else { Mode::Gui }
+        if self.headless {
+            Mode::Headless
+        } else if self.minimized {
+            Mode::WindowHidden
+        } else {
+            Mode::Window
+        }
     }
 
     pub fn server(&self) -> Option<&str> {
@@ -76,7 +112,8 @@ mod tests {
     fn no_arguments_means_the_window() {
         let cli = Cli::parse_from(["zyris"]);
 
-        assert_eq!(cli.mode(), Mode::Gui);
+        assert_eq!(cli.mode(), Mode::Window);
+        assert!(cli.mode().shows_a_window());
     }
 
     #[test]
@@ -84,6 +121,45 @@ mod tests {
         let cli = Cli::parse_from(["zyris", "--headless"]);
 
         assert_eq!(cli.mode(), Mode::Headless);
+    }
+
+    #[test]
+    fn the_minimized_flag_builds_the_window_without_showing_it() {
+        // What autostart installs. The process is a full GUI — it has a tray, and it runs the
+        // single-instance plugin, so launching Zyris again reaches it and gets a window. That
+        // is the whole difference from `--headless`, which a second launch cannot reach.
+        let cli = Cli::parse_from(["zyris", "--minimized"]);
+
+        assert_eq!(cli.mode(), Mode::WindowHidden);
+        assert!(!cli.mode().shows_a_window());
+    }
+
+    #[test]
+    fn a_hidden_window_is_still_not_headless() {
+        // The distinction the bug turned on: `--headless` has no tray and nothing listening,
+        // so a machine that starts one is a machine nobody can open Zyris on.
+        assert_ne!(
+            Cli::parse_from(["zyris", "--minimized"]).mode(),
+            Cli::parse_from(["zyris", "--headless"]).mode(),
+        );
+    }
+
+    #[test]
+    fn asking_for_no_window_and_a_hidden_one_at_once_is_refused() {
+        // There is no window to hide in a headless run. Refused by clap, which names both
+        // flags, rather than resolved here — two booleans that can both be true is a state
+        // somebody has to invent an answer for, and two callers invent two answers.
+        let refused = Cli::try_parse_from(["zyris", "--headless", "--minimized"]);
+
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn the_server_flag_and_a_hidden_window_compose() {
+        let cli = Cli::parse_from(["zyris", "--minimized", "--server", "ws://localhost:1/ws"]);
+
+        assert_eq!(cli.mode(), Mode::WindowHidden);
+        assert_eq!(cli.server(), Some("ws://localhost:1/ws"));
     }
 
     #[test]
