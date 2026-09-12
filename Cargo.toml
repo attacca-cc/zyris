@@ -27,19 +27,25 @@ time = { version = "0.3.44", features = ["formatting"] }
 tokio = "1.53.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-# `=0.2.0`, not `^0.2.0`, for the four that come from the registry. Each of them depends on
+# `=0.2.0`, not `^0.2.0`, for the five that come from the registry. Each of them depends on
 # `zyris-caps` with a plain caret, and `[patch.crates-io]` below pins `zyris-caps` to a git rev
 # whose version is 0.2.0. The day upstream publishes 0.2.1, a bare `cargo update` moves these
-# four to it, their `^0.2.1` requirement stops being satisfied by the pinned 0.2.0, and they fall
+# five to it, their `^0.2.1` requirement stops being satisfied by the pinned 0.2.0, and they fall
 # back to a registry `zyris-caps` — while `zyris-input` keeps reaching the git one by path, since
 # a path dependency inside a git checkout can never be patched away. Two copies again, and the
 # error lands on the one line that hands a registry-sourced value to a git-sourced constructor.
-# Upgrading is a five-place edit: these four and the three patch entries, all together.
-zyris = { version = "=0.2.0", default-features = false, features = ["caps", "client", "hostname", "enroll"] }
+# Upgrading is an eight-place edit: these five and the three patch entries, all together.
+zyris = { version = "=0.2.0", default-features = false, features = ["caps", "client", "hostname", "enroll", "p2p"] }
 zyris-fs = "=0.2.0"
 zyris-input = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "274e9af154071e878ea2cf30f7f90420b80ce742" }
 zyris-screen = "=0.2.0"
 zyris-terminal = "=0.2.0"
+# `send` is `file_transfer.send_to` — the rendezvous client and the iroh dial. `listen` is the
+# accept loop. Both, because this machine does both directions: upstream keeps them apart so a
+# node can carry only the one it needs, and a desktop needs both. Together they reach `zyris-p2p`
+# and through it iroh, which is the same copy `zyris`'s `p2p` feature above resolves — one
+# registry `zyris-p2p`, so `IrohPeerLink::new` and `Peering`'s endpoint are the same `Endpoint`.
+zyris-transfer = { version = "=0.2.0", features = ["send", "listen"] }
 
 # Full debug info is what makes the link stage expensive on a 3.6 GB machine.
 # `line-tables-only` keeps file and line in every backtrace frame and drops the rest.
