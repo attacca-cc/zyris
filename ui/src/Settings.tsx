@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // What the `autostart_state` and `set_autostart` commands answer with: `AutostartView` in
 // crates/zyris-app/src/bridge.rs, serialized camelCase, with `zyris_autostart::State` inside
@@ -32,27 +34,56 @@ export function Settings() {
   // be pressed again while the first press is still installing.
   const [busy, setBusy] = useState(false);
 
-  // Read on every visit to this screen rather than once for the life of the window: somebody
-  // can delete the task or the unit by hand between two visits, and the switch has to follow
-  // the machine rather than the last thing Zyris did.
+  // Read on every visit to this screen *and* every time the window comes back to the front.
+  // Somebody can delete the unit or the task by hand, and the switch has to follow the machine
+  // rather than the last thing Zyris did.
+  //
+  // Two triggers because neither covers the other. Mounting covers navigation: `App.tsx`
+  // renders this screen conditionally, so leaving Settings unmounts it and coming back runs
+  // this effect again. Focus covers what that misses — closing the window only hides it, so
+  // somebody whose last screen was this one reopens it days later on the same stale answer,
+  // and autostart is exactly what makes those days long. The read is one `spawn_blocking`
+  // round trip that never touches the UI thread, so doing it again is close to free.
   useEffect(() => {
-    // The same guard the other screens use — StrictMode runs this effect twice.
+    // The same guard the other screens use — StrictMode runs this effect twice, and both the
+    // read and the subscription can land after the cleanup.
     let cancelled = false;
 
-    void invoke<Autostart>("autostart_state")
-      .then((answer) => {
-        if (!cancelled) setAutostart(answer);
+    function read() {
+      void invoke<Autostart>("autostart_state")
+        .then((answer) => {
+          if (cancelled) return;
+          setAutostart(answer);
+          // An answer is an answer: a message from a read that failed earlier has stopped
+          // being true, and leaving it under a working switch reads as a broken one.
+          setProblem(null);
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setProblem(
+              asMessage(error, "Could not read whether Zyris starts with this computer."),
+            );
+          }
+        });
+    }
+
+    read();
+
+    let unlisten: UnlistenFn | undefined;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        // Only on the way in. This fires on blur too, and reading as somebody clicks away
+        // would spend a `systemctl` round trip on every alt-tab for an answer nobody sees.
+        if (focused) read();
       })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setProblem(
-            asMessage(error, "Could not read whether Zyris starts with this computer."),
-          );
-        }
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
       });
 
     return () => {
       cancelled = true;
+      unlisten?.();
     };
   }, []);
 
