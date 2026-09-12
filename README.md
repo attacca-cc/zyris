@@ -74,26 +74,32 @@ had not yet said does not go into the transcript.
 ## Building
 
 You need a Rust toolchain, [Node](https://nodejs.org) and [pnpm](https://pnpm.io), and the
-system libraries Tauri builds against — `pkg-config` looks for `webkit2gtk-4.1`,
+system libraries the build links against — `pkg-config` looks for `webkit2gtk-4.1`,
 `javascriptcoregtk-4.1`, `libsoup-3.0`, `gtk+-3.0`, `glib-2.0`, `gdk-pixbuf-2.0`, `cairo`,
-`pango`, `harfbuzz`, `atk`, `librsvg-2.0`, `zlib` and `openssl`. The Linux tray additionally
-needs `libayatana-appindicator` at runtime. On Debian/Ubuntu:
+`pango`, `harfbuzz`, `atk`, `librsvg-2.0`, `zlib`, `openssl` and `libpipewire-0.3`, and the link
+also needs `libgbm`. The Linux tray additionally needs `libayatana-appindicator` at runtime. On
+Debian/Ubuntu:
 
 ```bash
 sudo apt install libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev \
     libgtk-3-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libcairo2-dev libpango1.0-dev \
     libharfbuzz-dev libatk1.0-dev librsvg2-dev zlib1g-dev libssl-dev \
-    libayatana-appindicator3-1
+    libayatana-appindicator3-1 libpipewire-0.3-dev libgbm-dev
 ```
 
 Other distributions name these packages differently.
 
-**That list is not yet enough for a Linux build of this branch.** `screen_capture` reaches the
-screen through `xcap` and `libwayshot`, which additionally want the Wayland, X11, DRM and
-PipeWire development libraries. The exact package names have not been established on a clean
-Debian — guessing at them is what produced three wrong answers already — so they are not listed
-here rather than listed wrongly. Windows needs none of this; a Linux build of the screen and
-input capabilities has not been verified on this branch.
+The last two are for `screen_capture` rather than for Tauri: `xcap` reaches the screen through
+`libwayshot`, which brings PipeWire and GBM with it. Without `libpipewire-0.3-dev` the
+`libspa-sys` build script stops at `Package 'libpipewire-0.3' ... not found`; without
+`libgbm-dev` the whole workspace compiles and then the link of `zyris-tools` fails with
+`unable to find library -lgbm`. The Wayland, X11, DRM and EGL libraries that path also wants
+arrive as dependencies of packages already on that line, so there is nothing further to add.
+
+**That list is the one CI installs, and it was arrived at by building rather than by guessing** —
+three earlier guesses at it were wrong. `.github/workflows/ci.yml` builds and runs
+`cargo test --workspace` on `ubuntu-latest` and `windows-latest` on every push and pull request,
+so the list stays honest: the day it stops being enough, the Ubuntu job goes red.
 
 The frontend has to be built before the Rust crate: `tauri.conf.json` points `frontendDist` at
 `ui/dist`, which is not committed.
