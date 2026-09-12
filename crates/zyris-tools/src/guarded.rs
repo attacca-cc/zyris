@@ -114,11 +114,26 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 
 /// The fields worth writing down. Everything else in a call is either payload or noise.
 ///
-/// Deliberately an allowlist, not a denylist. The secret-bearing arguments of these two
+/// Deliberately an allowlist, not a denylist. The secret-bearing arguments of these four
 /// capabilities are `file_io.write`'s `data`, `file_io.edit`'s `old_string`/`new_string`,
 /// `terminal.write`'s `data`, `terminal.read`/`screen`'s `input` (where a typed password lands),
-/// and `terminal.exec`'s `stdin` and `env`. A denylist grows a hole every time the protocol adds
-/// a field. If a future capability needs something named here, add it here on purpose.
+/// `terminal.exec`'s `stdin` and `env`, and `input.type_text`'s `text` and `input.key`'s `chord`.
+/// A denylist grows a hole every time the protocol adds a field. If a future capability needs
+/// something named here, add it here on purpose.
+///
+/// `input.type_text`'s `text` and `input.key`'s `chord` are deliberately absent and must stay
+/// absent. Typing is how a password reaches an application, and a sequence of single-character
+/// chords reconstructs one a keystroke at a time. Not the values, and not their lengths: this
+/// file is meant to be handable to someone helping you. `screen_capture.screenshot` is the same
+/// problem in a different shape and is already safe for a different reason — the picture is a
+/// return value and this function only ever reads params. Do not "improve" that later.
+///
+/// What is safe and worth having from the other two is which display, where on it, which button
+/// and how far: `display`, `x`, `y` (`input.move_to`), `button` (`input.click`), `dx`, `dy`
+/// (`input.scroll`), and `region`, `format`, `max_width` (`screen_capture.screenshot`). A log
+/// that cannot say where the pointer was driven answers nothing about what happened to the
+/// machine. `screen_capture.list_displays` takes no parameters and so writes an empty detail,
+/// which is the right answer.
 ///
 /// `recursive` and `overwrite` are here because they are the difference between two calls the
 /// log would otherwise spell identically, and the destructive one is the one that gets lost:
@@ -134,8 +149,25 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// `read`/`screen`/`write`/`resize`/`close`.
 ///
 /// The array's order is the line's order, so `path=` stays first.
-const LOGGED_FIELDS: &[&str] =
-    &["path", "command", "argv", "cwd", "shell", "pty", "recursive", "overwrite"];
+const LOGGED_FIELDS: &[&str] = &[
+    "path",
+    "command",
+    "argv",
+    "cwd",
+    "shell",
+    "pty",
+    "recursive",
+    "overwrite",
+    "display",
+    "x",
+    "y",
+    "button",
+    "dx",
+    "dy",
+    "region",
+    "format",
+    "max_width",
+];
 
 /// How much of one value is worth keeping. One enormous argument must not make the log
 /// unreadable, and the log is a summary rather than a transcript.
@@ -188,8 +220,11 @@ fn truncate(text: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zyris::caps::{FileIoServer, file_io_capability};
-    use zyris::{IncomingCall, Payload, Serialization};
+    use zyris::caps::{
+        Display, FileIoServer, ImageFormat, Input, InputServer, MouseButton, Region, ScreenCapture,
+        ScreenCaptureServer, file_io_capability,
+    };
+    use zyris::{Datum, IncomingCall, Payload, Serialization};
 
     fn call(tool: &str, params: serde_json::Value) -> IncomingCall {
         IncomingCall {
@@ -214,6 +249,75 @@ mod tests {
             gate.clone(),
             log.clone(),
         );
+        (gate, log, cap)
+    }
+
+    /// `input` and `screen_capture` behind the decorator, with nothing behind *them*.
+    ///
+    /// The real backends need a display server, and what is under test here is what `summarize`
+    /// writes rather than what the platform does. A fake that always succeeds keeps these tests
+    /// runnable on a headless machine, and it keeps a redaction assertion honest: the call
+    /// reaches the capability, so a detail that does not carry the secret is not merely a call
+    /// that never ran.
+    struct FakeInput;
+
+    #[zyris::async_trait]
+    impl Input for FakeInput {
+        async fn type_text(&self, _text: String) -> zyris::Result<()> {
+            Ok(())
+        }
+
+        async fn key(&self, _chord: String) -> zyris::Result<()> {
+            Ok(())
+        }
+
+        async fn move_to(&self, _display: String, _x: i32, _y: i32) -> zyris::Result<()> {
+            Ok(())
+        }
+
+        async fn click(&self, _button: MouseButton) -> zyris::Result<()> {
+            Ok(())
+        }
+
+        async fn scroll(&self, _dx: i32, _dy: i32) -> zyris::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FakeScreen;
+
+    #[zyris::async_trait]
+    impl ScreenCapture for FakeScreen {
+        async fn list_displays(&self) -> zyris::Result<Vec<Display>> {
+            Ok(Vec::new())
+        }
+
+        async fn screenshot(
+            &self,
+            _display: Option<String>,
+            _region: Option<Region>,
+            _format: Option<ImageFormat>,
+            _max_width: Option<u32>,
+        ) -> zyris::Result<Datum> {
+            Ok(Datum::Text { text: String::new(), format: None })
+        }
+    }
+
+    fn guarded_input(
+        dir: &std::path::Path,
+    ) -> (crate::Gate, crate::AuditLog, Guarded<InputServer<FakeInput>>) {
+        let gate = crate::Gate::running();
+        let log = crate::AuditLog::new(dir.join("audit.jsonl"));
+        let cap = Guarded::new(InputServer(FakeInput), gate.clone(), log.clone());
+        (gate, log, cap)
+    }
+
+    fn guarded_screen(
+        dir: &std::path::Path,
+    ) -> (crate::Gate, crate::AuditLog, Guarded<ScreenCaptureServer<FakeScreen>>) {
+        let gate = crate::Gate::running();
+        let log = crate::AuditLog::new(dir.join("audit.jsonl"));
+        let cap = Guarded::new(ScreenCaptureServer(FakeScreen), gate.clone(), log.clone());
         (gate, log, cap)
     }
 
@@ -458,5 +562,94 @@ mod tests {
             None,
             "a tool call must not become the thing a late window catches up on"
         );
+    }
+
+    #[tokio::test]
+    async fn the_detail_never_carries_typed_text() {
+        // `type_text` is how a password gets typed. Not the text, and not its length either:
+        // this log is meant to be handable to someone helping you.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_input(dir.path());
+
+        let _ = cap
+            .dispatch(call("type_text", serde_json::json!({ "text": "hunter2-do-not-log-me" })))
+            .await;
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the typing has to have actually run, or this test proves nothing"
+        );
+        let detail = &entry.detail;
+        assert!(!detail.contains("hunter2"), "typed text leaked into the audit log: {detail}");
+        assert!(!detail.contains("21"), "the length leaked, which is still a hint: {detail}");
+    }
+
+    #[tokio::test]
+    async fn the_detail_never_carries_a_chord() {
+        // A sequence of single-character chords types a password one keystroke at a time.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_input(dir.path());
+
+        let _ = cap.dispatch(call("key", serde_json::json!({ "chord": "h" }))).await;
+
+        let recorded = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            recorded.outcome,
+            crate::Outcome::Allowed,
+            "the keypress has to have actually run, or this test proves nothing"
+        );
+        assert_eq!(recorded.tool, "key", "the call still has to be recorded");
+        assert!(!recorded.detail.contains("chord"), "the chord leaked: {}", recorded.detail);
+    }
+
+    #[tokio::test]
+    async fn a_pointer_move_records_where_it_went() {
+        // The opposite requirement: a log that cannot say where the pointer was driven answers
+        // nothing about what happened to the machine.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_input(dir.path());
+
+        let _ = cap
+            .dispatch(call(
+                "move_to",
+                serde_json::json!({ "display": "HDMI-1", "x": 640, "y": 480 }),
+            ))
+            .await;
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the move has to have actually run, or this test proves nothing"
+        );
+        let detail = &entry.detail;
+        assert!(detail.contains("HDMI-1"), "which display is missing: {detail}");
+        assert!(
+            detail.contains("640") && detail.contains("480"),
+            "the position is missing: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_screenshot_records_which_display_but_not_the_picture() {
+        // All four of `screenshot`'s parameters are `Option`, so naming one of them is a
+        // complete call. The picture is a return value, and `summarize` only ever reads params —
+        // which is what keeps a picture of the screen out of a file meant to be handable.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_screen(dir.path());
+
+        let _ = cap
+            .dispatch(call("screenshot", serde_json::json!({ "display": "HDMI-1" })))
+            .await;
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the capture has to have actually run, or this test proves nothing"
+        );
+        assert!(entry.detail.contains("HDMI-1"), "which display is missing: {}", entry.detail);
     }
 }

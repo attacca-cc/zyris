@@ -118,17 +118,31 @@ fn main() -> anyhow::Result<()> {
     // Every call is published as well as written down. The bus is the only way the window and
     // the tray hear about a call while it happens; the file is what outlives the process.
     .with_bus(bus.clone());
+    // Built once and named from that same list. `announced()` answers from what this call
+    // records, so it has to run before `gui::run` takes the `Tools` or the window would have
+    // nothing to report.
+    let capabilities = tools.clone().into_capabilities();
+    // Which ones actually made it, said out loud. `input` and `screen_capture` are absent on a
+    // machine with no display server, and this line plus the one `zyris-tools` logs when it is
+    // refused is the whole explanation of why an agent cannot see the screen — which someone
+    // will ask.
+    let announced = capabilities
+        .iter()
+        .map(|capability| capability.descriptor().name)
+        .collect::<Vec<_>>()
+        .join(", ");
     // Both paths, once, at startup. The root matters as much as the log's own path: an entry
     // records the caller's path string rather than the resolved one, so a line reading
     // `path=notes/x.txt` cannot be read without knowing what it resolved against.
     tracing::info!(
+        %announced,
         audit_log = %tools.log().path().display(),
         capability_root = %tools.root().display(),
         "tools are announced: what ran is written here, and a relative path starts at the root"
     );
 
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
-        .with_capabilities(tools.clone().into_capabilities());
+        .with_capabilities(capabilities);
 
     // Announced further up, beside the instance name the same flag changes.
     if let Some(server) = cli.server() {
