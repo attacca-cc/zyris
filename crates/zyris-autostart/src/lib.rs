@@ -72,6 +72,17 @@ impl Autostart {
         self.inner.disable()
     }
 
+    /// What is — or would be — installed, named the way a person would find it by hand.
+    ///
+    /// "a systemd user unit named `zyris.service`"; "a Task Scheduler entry named `Zyris`".
+    /// Somebody who wants to undo this without going through Zyris has to be told where to
+    /// look, and the only honest source for that sentence is the backend that writes the thing.
+    ///
+    /// `None` on a machine whose autostart Zyris cannot drive: there is nothing there to name.
+    pub fn mechanism(&self) -> Option<String> {
+        self.inner.mechanism()
+    }
+
     /// Everything true of this machine that leaves the switch weaker than "on" suggests.
     ///
     /// Empty on a machine where turning autostart on is the whole story, which is most of them.
@@ -95,6 +106,14 @@ trait Backend: Send + Sync {
     fn state(&self) -> anyhow::Result<State>;
     fn enable(&self, exe: &Path) -> anyhow::Result<()>;
     fn disable(&self) -> anyhow::Result<()>;
+
+    /// See [`Autostart::mechanism`].
+    ///
+    /// The default is `None`, which is the right answer for the one backend that installs
+    /// nothing at all.
+    fn mechanism(&self) -> Option<String> {
+        None
+    }
 
     /// See [`Autostart::caveats`].
     ///
@@ -177,6 +196,12 @@ mod tests {
             panic!("wrong variant");
         };
         assert_eq!(reason, "no systemd user session");
+
+        assert_eq!(
+            unavailable.mechanism(),
+            None,
+            "a machine that installs nothing has nothing to name",
+        );
 
         let refused_on = unavailable.enable(Path::new("/usr/bin/zyris")).unwrap_err().to_string();
         let refused_off = unavailable.disable().unwrap_err().to_string();

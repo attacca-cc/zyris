@@ -41,6 +41,10 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 .lead { color: var(--muted); margin: 0 0 2rem; }
 .muted { color: var(--muted); }
 .problem { color: var(--problem); }
+/* A caveat, not a failure: what was asked for happened, and something about this machine
+   still leaves it weaker than it sounds. Reading as an error would overstate it; reading as a
+   note would hide it. */
+.warn { color: var(--warn); }
 .mono { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; overflow-wrap: anywhere; }
 
 .steps { padding-left: 1.2rem; margin: 0 0 1.5rem; }
@@ -77,8 +81,8 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; min-width: 0; }
 
-/* Navigation. Two screens and an equality check; see the comment in App.tsx for why there is
-   no router. */
+/* Navigation. Three screens and an equality check; see the comment in App.tsx for why there
+   is no router. */
 .shell { display: flex; min-height: 100vh; }
 /* `min-width: 0` is what keeps a long path in the log from widening the screen instead of
    wrapping inside it: a flex item's default minimum is its content. */
@@ -149,6 +153,9 @@ section { margin-bottom: 2rem; }
   padding: 0.35rem 1rem;
 }
 .button:hover { opacity: 0.88; }
+/* Registering a scheduled task or enabling a unit is three processes and not instant; the
+   button says so rather than letting a second press arrive mid-install. */
+.button:disabled { cursor: default; opacity: 0.5; }
 
 .caps, .calls { list-style: none; margin: 0; padding: 0; }
 .caps li, .call { border-top: 1px solid var(--line); padding: 0.6rem 0; }

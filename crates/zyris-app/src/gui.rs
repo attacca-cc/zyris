@@ -53,6 +53,11 @@ pub fn run(
         // would say now. Two of the four need a display server, so those are not the same
         // question.
         .manage(tools)
+        // Built here rather than in `main`: it holds nothing, remembers nothing and reads the
+        // machine on every call, so there is no state for the two runtimes to share. Headless
+        // has no switch to move, and the CLI flags build their own — before the instance lock,
+        // where this process does not exist yet.
+        .manage(zyris_autostart::Autostart::for_this_machine())
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -60,6 +65,8 @@ pub fn run(
             bridge::is_paused,
             bridge::recent_tool_calls,
             bridge::announced_tools,
+            bridge::autostart_state,
+            bridge::set_autostart,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:

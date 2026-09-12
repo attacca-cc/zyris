@@ -131,6 +131,12 @@ impl Backend for SystemdUser {
         Ok(())
     }
 
+    fn mechanism(&self) -> Option<String> {
+        // Built from `UNIT` rather than written out, so the sentence a person is told to look
+        // for cannot drift away from the file this actually writes.
+        Some(format!("a systemd user unit named {UNIT}"))
+    }
+
     fn caveats(&self) -> Vec<String> {
         // Only worth saying while the switch is on. What lingering costs a machine that does
         // not start Zyris at all is nothing.
@@ -363,6 +369,15 @@ mod tests {
             unit.contains(r#"ExecStart="/home/r/My Apps/zyris" --headless"#),
             "the path was not quoted: {unit}"
         );
+    }
+
+    #[test]
+    fn the_mechanism_names_the_file_somebody_would_go_looking_for() {
+        // The Settings screen prints this sentence and nothing else about how autostart works.
+        // A person who wants to remove it by hand has to be able to find the thing from it.
+        let mechanism = SystemdUser.mechanism().unwrap();
+
+        assert!(mechanism.contains(UNIT), "{mechanism}");
     }
 
     #[test]

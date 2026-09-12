@@ -158,6 +158,12 @@ impl Backend for TaskScheduler {
         Ok(())
     }
 
+    fn mechanism(&self) -> Option<String> {
+        // Built from `TASK` rather than written out, so the name a person is told to look for
+        // in the Task Scheduler window cannot drift away from the one registered here.
+        Some(format!("a Task Scheduler entry named {TASK}"))
+    }
+
     // `caveats` is deliberately the default. Linux has one because a systemd unit can be enabled
     // while the user does not linger, which leaves autostart on and useless after logout. A
     // registered task has no second switch like that: it either exists and is on — and `state`
@@ -367,6 +373,15 @@ mod tests {
             render_task(Path::new(r"C:\zyris.exe"))
                 .contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
         );
+    }
+
+    #[test]
+    fn the_mechanism_names_the_entry_somebody_would_go_looking_for() {
+        // The Settings screen prints this sentence and nothing else about how autostart works.
+        // A person who wants to remove it by hand has to be able to find the task from it.
+        let mechanism = TaskScheduler.mechanism().unwrap();
+
+        assert!(mechanism.contains(TASK), "{mechanism}");
     }
 
     #[test]
