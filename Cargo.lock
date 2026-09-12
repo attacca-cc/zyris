@@ -7039,6 +7039,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zyris-autostart"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "zyris-caps"
 version = "0.2.0"
 source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
