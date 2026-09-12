@@ -158,9 +158,19 @@ pub fn run(
                 // says what the core actually decided instead of guessing at it — and so the
                 // keychain is read once, by the one thing that owns it.
                 //
-                // `NeedsEnrolment` is published once, before the first dial, and every other
-                // step of onboarding follows it, `EnrolmentFailed` included. So this covers the
-                // whole path without ever raising a window over somebody's work mid-session.
+                // `NeedsEnrolment` comes from `connection.rs`'s `credential()`, which runs
+                // before the first dial — and runs again long after one, through
+                // `recover_from_dead_token` → `mint_node_token` → the arm for a credential
+                // that cannot mint this node. So this watcher can and does raise the window
+                // mid-session, hours into a run that was working.
+                //
+                // **That is the intended behaviour, not an oversight.** Bounding this to the
+                // first dial would leave a short enrolment code — one that expires while
+                // nobody looks at it — behind a tray icon that has never been mentioned, on a
+                // machine that will not reconnect and does not say why. A window somebody has
+                // to dismiss is the cheaper of the two surprises. Every other step of
+                // onboarding follows `NeedsEnrolment`, `EnrolmentFailed` included, so the one
+                // subscription covers the whole path either way.
                 show_when_enrolment_needs_a_person(
                     app.handle().clone(),
                     setup_bus.clone(),
@@ -226,8 +236,10 @@ pub fn run(
 ///
 /// Only registered for a run that started hidden. A first run under `--minimized` would
 /// otherwise keep the one screen a person has no way around — a short code and a link, which
-/// expire — behind a tray icon nobody told them about. Every later run has a credential, says
-/// nothing here, and stays hidden exactly as it was asked to.
+/// expire — behind a tray icon nobody told them about. A later run has a credential and stays
+/// hidden exactly as it was asked to, right up until the day that credential stops working:
+/// re-enrolment publishes the same event mid-session and this raises the window then too, on
+/// purpose. The caller's comment says why.
 ///
 /// One shot: the task ends as soon as it has shown the window, so nothing here can raise a
 /// window twice or fight with somebody who closed it.
