@@ -7,6 +7,10 @@ on:
   push:
     tags:
       - "v*"
+    # TEMPORARY. `workflow_dispatch` only registers from the default branch and this workflow is
+    # not there yet, so a branch push is how the machinery gets proved. Remove before merging.
+    branches:
+      - feat/autostart
   workflow_dispatch:
 
 concurrency:
