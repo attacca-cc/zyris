@@ -148,9 +148,26 @@ impl Tools {
     /// `screen_capture` enumerates the displays and `input` drives a pointer across them, in the
     /// same captured-pixel space: a point read off a screenshot is what `move_to` takes. An agent
     /// that can see the screen but not act on it is half useful, and one that can act but not see
-    /// is guessing coordinates. So this is one decision, made once, and it is
-    /// `EnigoInput::new` — it connects to the display server and fails when there is none. No
-    /// separate probe: a second way of asking produces a second answer.
+    /// is guessing coordinates. So this is one decision, made once, and it is `EnigoInput::new`.
+    /// No separate probe: a second way of asking produces a second answer.
+    ///
+    /// **That probe only detects absence on Linux, and the difference is worth knowing before
+    /// trusting it.** There, `Enigo::new` tries each backend and returns
+    /// `EstablishCon("no successful connection")` when none answers. On Windows the fork's
+    /// `Enigo::new` does no syscall at all — it fills a struct and returns `Ok` — so the `Err`
+    /// arm below is unreachable and both capabilities are announced whatever the session is.
+    /// On a Windows host with no interactive desktop (a service, an SSH logon) `move_to` then
+    /// fails honestly with "no displays are attached", but `click`, `scroll`, `type_text` and
+    /// `key` reach `SendInput`, which returns the event count and so reports success with
+    /// nothing having happened. That is the trap in CLAUDE.md — a tool an agent cannot tell
+    /// apart from a working one — in its worse form, silent success rather than honest failure.
+    ///
+    /// Every mainline Windows path has a desktop (the window itself; the autostart task the spec
+    /// gives a logon trigger), which is why this is recorded rather than fixed here. Closing it
+    /// means a second, platform-specific question — `OpenInputDesktop` or
+    /// `GetProcessWindowStation` — and that does not contradict "no separate probe": that rule
+    /// is about not having two answers to one question, and here the first probe provably has no
+    /// answer to give.
     ///
     /// The backend handed to [`zyris_screen::HostDisplays`] is the capture's own, not
     /// `HostDisplays::default()`. That default runs `ScreenBackend::detect()` a second time — a

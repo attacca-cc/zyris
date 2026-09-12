@@ -48,8 +48,10 @@ pub fn run(
         .manage(tools.log().clone())
         // And the `Tools` itself, for the one command that asks what is announced. Managed last
         // because it moves; it is a handle too, holding that same gate and that same log, and it
-        // reads the capability descriptors on demand rather than from a startup snapshot, so the
-        // Tools screen cannot list something the connector did not actually announce.
+        // carries the snapshot `main` recorded when it handed the capabilities to the node, so
+        // the Tools screen reports what was actually announced rather than what a fresh look
+        // would say now. Two of the four need a display server, so those are not the same
+        // question.
         .manage(tools)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,

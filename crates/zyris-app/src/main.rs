@@ -118,9 +118,9 @@ fn main() -> anyhow::Result<()> {
     // Every call is published as well as written down. The bus is the only way the window and
     // the tray hear about a call while it happens; the file is what outlives the process.
     .with_bus(bus.clone());
-    // Built once and named from that same list, rather than asking `announced()` separately:
-    // building the capabilities connects to the display server, and asking twice would connect
-    // twice and could answer differently the second time.
+    // Built once and named from that same list. `announced()` answers from what this call
+    // records, so it has to run before `gui::run` takes the `Tools` or the window would have
+    // nothing to report.
     let capabilities = tools.clone().into_capabilities();
     // Which ones actually made it, said out loud. `input` and `screen_capture` are absent on a
     // machine with no display server, and this line plus the one `zyris-tools` logs when it is
