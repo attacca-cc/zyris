@@ -44,6 +44,27 @@ jobs:
         with:
           submodules: false
 
+      # A tag names a version and `tauri.conf.json` hard-codes one, and it is the file the
+      # bundler stamps the filenames from — never the tag. Tag `v0.2.0` without editing it and
+      # this workflow cheerfully publishes a release called v0.2.0 whose every asset is
+      # `Zyris_0.1.0_*`, which is not a thing anybody can undo after the fact.
+      #
+      # First step after the checkout, so a mismatch costs a few seconds rather than two full
+      # bundle builds. `sed` rather than `jq` or `node`, so it needs nothing installed and runs
+      # the same on both runners.
+      - name: Check the tag against the version the bundles will carry
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=crates/zyris-app/tauri.conf.json
+          configured=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)
+          if [ "${GITHUB_REF_NAME#v}" != "$configured" ]; then
+            echo "tag ${GITHUB_REF_NAME} would publish assets stamped ${configured:-<nothing>}; edit \"version\" in ${config} or retag" >&2
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches \"version\": \"${configured}\" in ${config}"
+
       # The same list `ci.yml` installs, which was arrived at by building rather than guessing.
       - name: Install system libraries
         if: runner.os == 'Linux'
