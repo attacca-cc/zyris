@@ -30,13 +30,23 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 read off a screenshot goes straight into `move_to`. Neither is announced when there is no display
 server to reach, because a tool that is always going to fail is worse than a tool that is absent.
 
-**Today `terminal` and `file_io` are live; the rest are still being written.** Between them that
-is sixteen tools, and a capability is all or nothing — announcing `file_io` announces `remove`,
-and announcing `terminal` announces `exec` with whatever command an agent chooses. A path an
-agent sends without a leading slash starts in your home directory. That is where relative paths
-start rather than a fence around them: an absolute path goes where it says, and a command can
-work anywhere you can. What bounds this is the pause switch, the audit log, and what Attacca
-lets an agent call in the first place.
+**Today `terminal`, `file_io`, `screen_capture` and `input` are live; file transfer and MCP are
+still being written.** Between them that is twenty-three tools, and a capability is all or
+nothing — announcing `file_io` announces `remove`, and announcing `terminal` announces `exec`
+with whatever command an agent chooses. A path an agent sends without a leading slash starts in
+your home directory. That is where relative paths start rather than a fence around them: an
+absolute path goes where it says, and a command can work anywhere you can. What bounds this is
+the pause switch, the audit log, and what Attacca lets an agent call in the first place.
+
+`input` and `screen_capture` are announced together or not at all, and neither appears on a
+machine with no display server — an agent that can see the screen but not act on it is half
+useful, and one that can act but not see is guessing coordinates. Positions are in the pixels a
+screenshot actually returned, which on a scaled display is not what your settings panel says;
+a coordinate read off a capture goes straight into `move_to` with nothing applied to it.
+
+The audit log records which display and where the pointer went. It does not record what was
+typed: `type_text` is how a password reaches an application, and a run of single-key presses
+reconstructs one just as well, so neither the text nor its length is written down.
 
 The first time it runs, the window shows a short code and a link. Open the link, approve the code
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
@@ -112,7 +122,7 @@ lands in what order. Nothing here is ready to install yet.
 
 1. Skeleton — workspace, tray, headless mode
 2. Connection — enrollment, credential storage, reconnect (done)
-3. Tools — terminal, files, pause switch, audit log (done); input and screen capture still to come
+3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units, installers
 5. File transfer — peer endpoint, fingerprint confirmation, inbox
 6. MCP — local servers promoted to capabilities
