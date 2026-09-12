@@ -90,12 +90,18 @@ impl Autostart {
     /// somebody logs in to a desktop and not when the computer boots — and nothing about
     /// [`State::Enabled`] hints that a machine switched on with nobody logged in is offline.
     ///
-    /// Read back from the machine like [`Autostart::state`], not remembered from the call that
-    /// turned it on: somebody can disable the unit or the task from outside Zyris, and a
-    /// sentence qualifying a switch that is no longer on is a sentence that has stopped being
-    /// true.
-    pub fn caveats(&self) -> Vec<String> {
-        self.inner.caveats()
+    /// **Takes the state it is qualifying rather than going and reading it again.** Every
+    /// caller wants both halves, and a caveat fetched against a second, later read describes a
+    /// machine that may have moved in between — "on, and it is not running" is exactly the pair
+    /// that must not come apart. It also spares Linux a `systemctl` call it used to make twice
+    /// for one screen.
+    ///
+    /// What is *not* in that state — on Linux, whether the enabled unit is actually up — is
+    /// still read off the machine here and never remembered: somebody can disable the unit or
+    /// the task, or stop the process, from outside Zyris, and a sentence qualifying a switch
+    /// that is no longer on is a sentence that has stopped being true.
+    pub fn caveats(&self, state: &State) -> Vec<String> {
+        self.inner.caveats(state)
     }
 }
 
@@ -122,7 +128,10 @@ trait Backend: Send + Sync {
     /// fails. It exists because `enable` cannot say this: it half succeeded, so an `Err` would
     /// undo nothing and report the wrong thing, and an `Ok` on its own throws the sentence
     /// away.
-    fn caveats(&self) -> Vec<String> {
+    ///
+    /// `state` is the answer [`Backend::state`] has just given, handed down rather than asked
+    /// for a second time. See [`Autostart::caveats`].
+    fn caveats(&self, _state: &State) -> Vec<String> {
         Vec::new()
     }
 }

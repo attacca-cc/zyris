@@ -165,11 +165,18 @@ pub struct AutostartView {
 }
 
 /// What the switch reads right now.
+///
+/// **One read of the machine, not two.** `state` is asked once and handed down to `caveats`,
+/// which used to go and ask for it again — on Linux that was a second `systemctl --user
+/// is-enabled` for every look, and two reads are two answers that can disagree. "On, and
+/// nothing is running from it" is exactly the pair that must not come apart.
 pub fn look(autostart: &Autostart) -> anyhow::Result<AutostartView> {
+    let state = autostart.state()?;
+
     Ok(AutostartView {
-        state: autostart.state()?,
-        caveats: autostart.caveats(),
+        caveats: autostart.caveats(&state),
         mechanism: autostart.mechanism(),
+        state,
     })
 }
 
