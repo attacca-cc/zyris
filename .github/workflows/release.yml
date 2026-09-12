@@ -134,6 +134,8 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: bundles/**/*
+          files: |
+            bundles/**/*.deb
+            bundles/**/*.exe
           fail_on_unmatched_files: true
           draft: false
