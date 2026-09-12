@@ -35,6 +35,16 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // **Before the instance lock, and before anything reaches the keychain.** Turning autostart
+    // on while Zyris is already running is an ordinary thing to do — it is what somebody does
+    // the day after they install it — and being refused by your own running copy is not an
+    // answer. These flags do one thing and exit; neither of them starts a node.
+    //
+    // After `tracing` is up, because what they have to say is said through it.
+    if let Some(request) = cli.autostart() {
+        return run_autostart(request, cli.server());
+    }
+
     // Everything that names this instance on this machine — the keychain service, the instance
     // lock, the directory the audit log lands in — comes from this one string, and `--server`
     // changes it. A run pointed at a development server is a different node in every sense that
@@ -155,10 +165,71 @@ fn main() -> anyhow::Result<()> {
         // window gets one so the tray and the Tools tab can reach the same gate and the same
         // log — the same ones, not copies, because `Tools` holds handles on shared state.
         cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
-        // The instance name goes with it: the GUI takes its lock inside `setup`, and it has to
-        // be the same name this function derived for the keychain and the log.
-        cli::Mode::Gui => gui::run(bus, runtime.handle().clone(), connector, tools, instance),
+        // Both windowed modes are the same runtime; the mode goes along so `setup` knows
+        // whether to put the window on the screen. The instance name goes with it too: the GUI
+        // takes its lock inside `setup`, and it has to be the same name this function derived
+        // for the keychain and the log.
+        mode @ (cli::Mode::Window | cli::Mode::WindowHidden) => gui::run(
+            bus,
+            runtime.handle().clone(),
+            connector,
+            tools,
+            instance,
+            mode,
+            // Not the URL, only whether there was one: the window needs this to decide whether
+            // to register the single-instance plugin, and nothing else about the server.
+            cli.server().is_some(),
+        ),
     }
+}
+
+/// Turn autostart on or off from the command line, and say where that left the machine.
+///
+/// The window's switch goes through the same `bridge::apply_autostart`, so a flag and a click
+/// cannot install different things or read the answer differently.
+///
+/// Everything it has to report goes through `tracing` rather than `println!`, like the rest of
+/// this program: a person running this on a server is reading the same stream either way, and
+/// `RUST_LOG` is what turns the detail up.
+fn run_autostart(request: cli::AutostartRequest, server: Option<&str>) -> anyhow::Result<()> {
+    // Both mechanisms start `<this executable> --minimized` and nothing else, so autostart
+    // installed from a `--server` run starts the *production* instance at the next logon — a
+    // different node, with different credentials, from the one this process would have been.
+    // Said rather than refused: the person may well want exactly that.
+    if server.is_some() {
+        tracing::warn!(
+            "--server is not carried into autostart: what starts at logon is this executable with --minimized, which is the default instance"
+        );
+    }
+
+    let autostart = zyris_autostart::Autostart::for_this_machine();
+    let view =
+        bridge::apply_autostart(&autostart, request == cli::AutostartRequest::Install)?;
+
+    // Read back, never assumed — the same rule the window follows.
+    match &view.state {
+        zyris_autostart::State::Enabled => tracing::info!(
+            mechanism = view.mechanism.as_deref().unwrap_or("an unnamed mechanism"),
+            "Zyris will start when you sign in",
+        ),
+        zyris_autostart::State::Disabled => {
+            tracing::info!("Zyris will not start when you sign in");
+        }
+        // Reachable after a successful call only in the strangest circumstances, and the
+        // honest thing to print when it happens.
+        zyris_autostart::State::Unsupported(reason) => {
+            tracing::warn!(%reason, "this machine cannot start Zyris by itself");
+        }
+    }
+
+    // At `warn`, because every one of these is a way the switch is weaker than "on" sounds.
+    // On Linux this line is the difference between a machine that is connected whenever it is
+    // switched on and one that is connected only while somebody is logged in to a desktop.
+    for caveat in &view.caveats {
+        tracing::warn!("{caveat}");
+    }
+
+    Ok(())
 }
 
 /// What this run calls itself on this machine: the keychain service, the instance lock's name,
@@ -169,6 +240,10 @@ fn main() -> anyhow::Result<()> {
 /// credentials belong to that server, its calls are not this machine's real history, and it has
 /// to be able to run *beside* a production instance rather than be turned away by its lock —
 /// which is the point of the flag.
+///
+/// Naming the lock is only half of that. The other half is in `gui.rs`: `tauri-plugin-single-
+/// instance` keys on the bundle identifier rather than on this name, so a windowed `--server`
+/// run skips registering it. Both halves are needed, and neither works alone.
 ///
 /// Every character that is not `[0-9A-Za-z]` is replaced, so the result is usable as a directory
 /// name, a file name and a keychain service on every platform. Two servers that differ only in

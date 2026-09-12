@@ -11,17 +11,23 @@ name = "zyris"
 path = "src/main.rs"
 
 [dependencies]
+zyris-autostart = { path = "../zyris-autostart" }
 zyris-runtime = { path = "../zyris-runtime" }
 zyris-tools = { path = "../zyris-tools" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
 open = { workspace = true }
+serde = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# The wire shape of what the Settings screen reads, pinned by a test in `bridge.rs`.
+serde_json = { workspace = true }
 
 [build-dependencies]
 tauri-build = { workspace = true }

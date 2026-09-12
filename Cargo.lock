@@ -7028,14 +7028,29 @@ dependencies = [
  "clap",
  "directories",
  "open",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zyris-autostart",
  "zyris-runtime",
  "zyris-tools",
+]
+
+[[package]]
+name = "zyris-autostart"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

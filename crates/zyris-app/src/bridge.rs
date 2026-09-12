@@ -13,7 +13,12 @@
 //! is the way back: the window calls it once its listener is confirmed live, and folds whatever
 //! it gets through the same reducer as a normal event.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
+use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
 use zyris_tools::{Announcement, AuditLog, Entry, Gate, Tools};
 
@@ -136,6 +141,137 @@ pub fn recent_tool_calls(limit: usize, log: State<AuditLog>) -> Result<Vec<Entry
     log.recent(limit).map_err(|error| error.to_string())
 }
 
+/// Everything the Settings screen needs to draw the autostart switch, read off the machine in
+/// one go.
+///
+/// One structure rather than three commands, because the three answers have to agree. A caveat
+/// fetched a round trip after the state it qualifies describes a machine that may have moved in
+/// between, and "on, and it will stop when you log out" is exactly the pair that must not come
+/// apart.
+///
+/// The field names and the shape of `state` are what `ui/src/Settings.tsx` transcribes; a test
+/// below pins the JSON, and nothing checks the two halves at build time.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutostartView {
+    /// Read back off the machine every time, never remembered — someone can remove the unit or
+    /// the task by hand while this window is open.
+    pub state: AutostartState,
+    /// Everything true of this machine that leaves the switch weaker than "on" suggests. The
+    /// window renders all of them; on Linux that sentence is the difference between "connected
+    /// whenever this computer is on" and "connected whenever somebody is logged in".
+    pub caveats: Vec<String>,
+    /// What is, or would be, installed — named so a person can find it without Zyris.
+    pub mechanism: Option<String>,
+}
+
+/// What the switch reads right now.
+///
+/// **One read of the machine, not two.** `state` is asked once and handed down to `caveats`,
+/// which used to go and ask for it again — on Linux that was a second `systemctl --user
+/// is-enabled` for every look, and two reads are two answers that can disagree. "On, and
+/// nothing is running from it" is exactly the pair that must not come apart.
+pub fn look(autostart: &Autostart) -> anyhow::Result<AutostartView> {
+    let state = autostart.state()?;
+
+    Ok(AutostartView {
+        caveats: autostart.caveats(&state),
+        mechanism: autostart.mechanism(),
+        state,
+    })
+}
+
+/// Move the switch, then answer with what the machine says afterwards.
+///
+/// It returns the state it *ended in* rather than `()`, for the same reason [`apply_paused`]
+/// makes the window read the gate: a screen that renders its own request is a screen that can
+/// be wrong. Turning autostart on is the case that proves it — on Linux the unit is enabled and
+/// still only starts Zyris at a desktop login, which is [`AutostartView::caveats`], and nothing
+/// about the request would have said so.
+///
+/// The one path the CLI flags and the window both take, so `--install-autostart` and the switch
+/// cannot install different things.
+pub fn apply_autostart(autostart: &Autostart, enabled: bool) -> anyhow::Result<AutostartView> {
+    if enabled {
+        let exe = installed_executable()?;
+        // **Said out loud, at `info`, because this is the one decision here that can rot
+        // silently.** From a checkout this is `target/debug/zyris`, and the day someone runs
+        // `cargo clean` their machine stops starting Zyris with no message anywhere. Zyris does
+        // not detect that and refuse — somebody testing this needs it to work — so the path is
+        // printed instead, and this line is what a person has to go on later.
+        tracing::info!(
+            executable = %exe.display(),
+            "installing autostart for this executable; if that path stops existing, so does this",
+        );
+        autostart.enable(&exe)?;
+    } else {
+        autostart.disable()?;
+    }
+
+    look(autostart)
+}
+
+/// The executable a unit file or a task document should name: this one.
+///
+/// There is no better answer. An installed build's `current_exe()` is where the installer put
+/// it, which is exactly right; a development build's is under `target/`, which is right until
+/// it is deleted. Guessing at an install location Zyris was not started from would install a
+/// path that has never worked, which is worse than one that works today.
+fn installed_executable() -> anyhow::Result<PathBuf> {
+    std::env::current_exe().context("could not work out where this program is on disk")
+}
+
+/// Run a blocking autostart call somewhere other than the thread the window is drawn on.
+///
+/// **Both commands below are `async fn` for this and nothing else.** Tauri defaults a command to
+/// `ExecutionContext::Blocking` and runs it inline on the IPC handler — the GTK main loop on
+/// Linux, the WebView2 UI thread on Windows. Everything underneath here is `systemctl` or
+/// `schtasks`: process spawns and waits, measured at 400–450 ms for one press of the switch, and
+/// for that half-second the window neither repaints nor answers the mouse.
+///
+/// `spawn_blocking` rather than the one-word `#[tauri::command(async)]`, which would route this
+/// through `async_runtime::spawn` and park one of a handful of tokio workers on a subprocess for
+/// the whole round trip. Waiting on a child process is what the blocking pool is for.
+async fn off_the_ui_thread<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(answer) => answer.map_err(|error| error.to_string()),
+        // The blocking task panicked or was cancelled. Nothing the window can act on, but it is
+        // still an answer: a switch that never gets one stays disabled with its spinner on.
+        Err(error) => Err(format!("could not ask this machine about autostart: {error}")),
+    }
+}
+
+/// Where autostart stands, for a Settings screen that has just opened.
+///
+/// `Arc` rather than the bare `Autostart` in Tauri's state, because the work has to outlive the
+/// borrow: `State<'_, T>` hands out a reference tied to the command call, and `spawn_blocking`
+/// takes a `'static` closure. See [`off_the_ui_thread`].
+#[tauri::command]
+pub async fn autostart_state(
+    autostart: State<'_, Arc<Autostart>>,
+) -> Result<AutostartView, String> {
+    let autostart = Arc::clone(&autostart);
+
+    off_the_ui_thread(move || look(&autostart)).await
+}
+
+/// Start Zyris with this computer, or stop doing that.
+///
+/// Answers with the state the machine ended in, which is what the window renders.
+#[tauri::command]
+pub async fn set_autostart(
+    enabled: bool,
+    autostart: State<'_, Arc<Autostart>>,
+) -> Result<AutostartView, String> {
+    let autostart = Arc::clone(&autostart);
+
+    off_the_ui_thread(move || apply_autostart(&autostart, enabled)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +304,43 @@ mod tests {
             bus.latest(),
             Some(connected),
             "the switch took the catch-up slot; a cold window would strand on its starting screen"
+        );
+    }
+
+    #[test]
+    fn the_path_installed_into_the_unit_is_absolute() {
+        // Neither systemd nor Task Scheduler shares a working directory with whoever turned
+        // the switch on, so a relative path there resolves somewhere nobody chose — and it
+        // fails at logon, where there is nobody to read the error.
+        let exe = installed_executable().unwrap();
+
+        assert!(exe.is_absolute(), "{}", exe.display());
+    }
+
+    #[test]
+    fn the_settings_screen_reads_these_field_names() {
+        // `ui/src/Settings.tsx` transcribes this shape rather than importing it — there is no
+        // way to share a type across the IPC boundary — so this is the Rust half of the
+        // agreement. The externally tagged enum is the part worth pinning: two of the three
+        // states are bare strings and the third is an object, and the screen switches on that.
+        let view = AutostartView {
+            state: AutostartState::Unsupported("no systemd".into()),
+            caveats: vec!["it starts at a desktop login".into()],
+            mechanism: Some("a systemd user unit named zyris.service".into()),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&view).unwrap(),
+            r#"{"state":{"unsupported":"no systemd"},"caveats":["it starts at a desktop login"],"mechanism":"a systemd user unit named zyris.service"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&AutostartView {
+                state: AutostartState::Enabled,
+                caveats: Vec::new(),
+                mechanism: None,
+            })
+            .unwrap(),
+            r#"{"state":"enabled","caveats":[],"mechanism":null}"#
         );
     }
 }

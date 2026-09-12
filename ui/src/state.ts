@@ -31,10 +31,10 @@ export type ToolCall = {
 // reducer, which stamps it as it arrives. See the `toolCall` arm for what that time means.
 export type ToolCallRow = ToolCall & { at: string };
 
-// The two screens a person can move between once this machine is enrolled. `starting` and
+// The three screens a person can move between once this machine is enrolled. `starting` and
 // `onboarding` are not among them: they are where the core puts the window, not where anyone
 // chooses to be.
-export type Tab = "status" | "tools";
+export type Tab = "status" | "tools" | "settings";
 
 export type Screen = "starting" | "onboarding" | Tab;
 
@@ -84,6 +84,11 @@ export const initialState: State = {
 // threw someone off the Tools tab mid-read would make that tab unusable. So these events only
 // claim the screens nobody chose. Idempotent, which is what keeps the replay guarantee below
 // true for the arms that use it.
+//
+// Every screen added to `Tab` passes through here untouched by construction, which is the point
+// of naming the two it does claim rather than the ones it does not. Settings is the case that
+// would hurt most: a reconnect landing while somebody is halfway through moving the autostart
+// switch would take the screen out from under them.
 function pastEnrolment(screen: Screen): Screen {
   return screen === "starting" || screen === "onboarding" ? "status" : screen;
 }

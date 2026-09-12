@@ -1,5 +1,6 @@
 import { useEffect, useReducer } from "react";
 import { Onboarding } from "./Onboarding";
+import { Settings } from "./Settings";
 import { Status } from "./Status";
 import { Tools } from "./Tools";
 import {
@@ -11,11 +12,12 @@ import {
   type Tab,
 } from "./state";
 
-// The whole of navigation. Two screens, named once, so the sidebar and the branch below cannot
-// disagree about what exists.
+// The whole of navigation. Three screens, named once, so the sidebar and the branch below
+// cannot disagree about what exists.
 const TABS: { id: Tab; label: string }[] = [
   { id: "status", label: "Status" },
   { id: "tools", label: "Tools" },
+  { id: "settings", label: "Settings" },
 ];
 
 // No router. There are no URLs here — the window is one process with one screen showing — so a
@@ -73,15 +75,15 @@ export function App() {
   // The sidebar appears only once this machine is enrolled: before that there is nothing to
   // navigate to, and offering a choice of screens to someone who has not authorized the computer
   // yet is offering them a way to miss the one thing they have to do.
-  if (state.screen === "status" || state.screen === "tools") {
+  if (state.screen === "status" || state.screen === "tools" || state.screen === "settings") {
     return (
       <div className="shell">
         <Sidebar screen={state.screen} onNavigate={(to) => dispatch({ kind: "navigate", to })} />
-        {state.screen === "status" ? (
-          <Status state={state} />
-        ) : (
-          <Tools state={state} dispatch={dispatch} />
-        )}
+        {state.screen === "status" && <Status state={state} />}
+        {state.screen === "tools" && <Tools state={state} dispatch={dispatch} />}
+        {/* No props: what this screen shows is read off the machine through a command, not
+            folded into core state, because nothing outside it needs the answer. */}
+        {state.screen === "settings" && <Settings />}
       </div>
     );
   }
