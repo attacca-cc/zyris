@@ -138,16 +138,10 @@ fn main() -> anyhow::Result<()> {
         peer_confirmer(mode),
     )) {
         Ok(transfers) => Some(transfers),
-        // `info!`, not `warn!`, and the same reasoning `zyris-tools` gives for a host with no
-        // display server: a machine with no network is an ordinary machine rather than a fault,
-        // and a warning on every launch of one teaches people to ignore warnings. Nothing about
-        // transfer is announced, the other four capabilities are unaffected, and
-        // `Tools::announced()` reports exactly that.
+        // How loudly this is said depends on *why* it failed, which is why it is not one line
+        // here. See `report_no_peer_identity`.
         Err(error) => {
-            tracing::info!(
-                %error,
-                "no peer identity, so file_transfer is not announced; everything else on this machine still works, but it can neither send a file to another of your machines nor receive one"
-            );
+            report_no_peer_identity(&error);
             None
         }
     };
@@ -330,6 +324,49 @@ fn data_dir(instance: &str) -> std::path::PathBuf {
     // so in the process log and never fails a tool call — so an absolute, OS-chosen path is a
     // better last resort than refusing to start.
     std::env::temp_dir().join(instance)
+}
+
+/// Says why this machine has no peer identity, at a level that matches what actually went wrong.
+///
+/// **The whole chain, not just its outermost link.** `zyris-tools` wraps the real reason in a
+/// `with_context`, and `%error` is tracing's non-alternate `Display` sigil — it renders the
+/// context alone, so the field read `could not load this machine's peer key from <path>` and the
+/// words "permission", "644" and "0600" appeared under no `RUST_LOG` at all. `{:#}` renders the
+/// context and its causes on one line, in order.
+///
+/// **And one level is wrong for all of them.** A machine with no network is an ordinary machine,
+/// which is what `info!` was chosen for and is still right about; a private key this computer's
+/// other users can read is not an ordinary machine, and neither is a key file that will not parse.
+///
+/// The second-order harm is why those two are `error!` and why both messages say *not* to delete
+/// the file. An operator who only sees "no peer identity" reaches for `rm iroh-secret.key`, which
+/// works, and makes this a **different peer permanently**: the key is the identity, so every
+/// machine that pinned this one refuses it from then on — and only when it sends, which is a long
+/// way from the thing that was deleted.
+fn report_no_peer_identity(error: &anyhow::Error) {
+    // The reason is a cause rather than the top of the chain, which is exactly why `{:#}` is used
+    // to render it and `downcast_ref` to classify it.
+    match error.downcast_ref::<zyris_tools::KeyError>() {
+        Some(zyris_tools::KeyError::Permissions(mode)) => tracing::error!(
+            error = format!("{error:#}"),
+            mode = format!("{mode:04o}"),
+            "this machine's peer key can be read by someone other than you, so it was not loaded and file_transfer is not announced; narrow the file's permissions to 0600 rather than deleting it — deleting it does stop the message, by making this machine a different peer that every machine which pinned it will refuse"
+        ),
+        Some(zyris_tools::KeyError::Malformed) => tracing::error!(
+            error = format!("{error:#}"),
+            "this machine's peer key file is not a key, so it was not loaded and file_transfer is not announced; restore it from wherever this machine's data directory is backed up — deleting it starts a new identity, and every machine that pinned this one will refuse it from then on, only when it sends"
+        ),
+        // Everything else: a socket that would not bind, a relay URL that is not one, an I/O error
+        // reading the key. `info!`, not `warn!`, for the reason `zyris-tools` gives about a host
+        // with no display server — a machine with no network is an ordinary machine rather than a
+        // fault, and a warning on every launch of one teaches people to ignore warnings. Nothing
+        // about transfer is announced, the other four capabilities are unaffected, and
+        // `Tools::announced()` reports exactly that.
+        _ => tracing::info!(
+            error = format!("{error:#}"),
+            "no peer identity, so file_transfer is not announced; everything else on this machine still works, but it can neither send a file to another of your machines nor receive one"
+        ),
+    }
 }
 
 /// Who answers when this machine is about to **send** a file to a peer it has never pinned.

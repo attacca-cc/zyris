@@ -72,6 +72,15 @@ use zyris_transfer::{
 /// **The sending side only.** See this module's "What gates a transfer, in each direction".
 pub use zyris::p2p::fingerprint::{DenyUnknown, PeerConfirmer};
 
+/// Why loading this machine's key failed, for a caller that has to say something different about
+/// each one.
+///
+/// Re-exported for the same reason [`PeerConfirmer`] is — `main` reports the failure and should
+/// not take a dependency on the protocol stack to do it — and because the three variants are not
+/// one severity. [`Peering::bind`] wraps this in a `with_context`, so a caller reaches it with
+/// `anyhow::Error::downcast_ref`.
+pub use zyris::p2p::key::KeyError;
+
 /// Points this machine at a relay of its own instead of the public ones.
 ///
 /// A relay cannot read a transfer — it carries an encrypted QUIC stream — but it does see which
@@ -252,8 +261,17 @@ impl Transfers {
     /// canonicalizes the source path and refuses anything that lands outside it.
     ///
     /// Fails when the key will not load, the socket will not bind, or [`RELAY_URL_ENV`] is set to
-    /// something that is not a relay URL. That is not a fault of this machine and the caller is
-    /// expected to carry on without transfer; see `Tools::screen_pair` for the same shape.
+    /// something that is not a relay URL. The caller is expected to carry on without transfer —
+    /// see `Tools::screen_pair` for the same shape — but **these are not one kind of failure and
+    /// must not be reported as one.** A machine with no network is an ordinary machine; a key file
+    /// that has drifted looser than `0600`, a key file that will not parse, and a relay URL that
+    /// is not a URL are each a fault on this machine that somebody has to go and fix. `main` tells
+    /// the first two apart by downcasting to [`KeyError`] and says so at a level that matches.
+    ///
+    /// The error carries its reason as a **cause** rather than in its own message: everything here
+    /// wraps the underlying failure in a `with_context`, so a caller that renders it with
+    /// `Display` and no `#` prints the context line and drops the only sentence that says what
+    /// went wrong.
     pub async fn bind(
         dir: &Path,
         root: PathBuf,
@@ -553,6 +571,72 @@ mod tests {
 
         let mode = std::fs::metadata(dir.path().join(KEY_FILE)).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "this machine's private key is readable by someone else");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_file_that_drifted_looser_than_0600_is_refused_and_says_so_in_the_chain() {
+        // Both halves of what `main` needs from this error, because it had neither. The reason a
+        // key was rejected is a *cause* under `with_context`, so a caller that renders it with
+        // plain `Display` — which is what tracing's `%error` sigil does — logs the context line
+        // and drops every word that would tell an operator what to do. And a private key this
+        // computer's other users can read is not the ordinary no-network case the caller's `info!`
+        // was chosen for, so it has to be possible to tell the two apart without matching on
+        // English.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        Peering::bind(dir.path(), Arc::new(DenyUnknown)).await.unwrap();
+        let key = dir.path().join(KEY_FILE);
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // `unwrap_err` would want `Peering: Debug`, which it deliberately is not — it holds a live
+        // endpoint and a private key, and neither belongs in a panic message.
+        let Err(error) = Peering::bind(dir.path(), Arc::new(DenyUnknown)).await else {
+            panic!("a key file readable by everyone on this computer was loaded anyway");
+        };
+
+        assert!(
+            matches!(error.downcast_ref::<KeyError>(), Some(KeyError::Permissions(0o644))),
+            "this cannot be told from a machine with no network: {error:#}"
+        );
+        let plain = format!("{error}");
+        let chain = format!("{error:#}");
+        assert!(
+            !plain.contains("0600"),
+            "`Display` alone now carries the reason, so this test no longer guards anything: {plain}"
+        );
+        assert!(chain.contains("0600"), "the reason is not in the chain either: {chain}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_file_that_is_not_a_key_is_refused_and_is_never_quietly_replaced() {
+        // The other failure `main` has to raise above `info!`, and the reason it must say "do not
+        // delete this": `load_or_create` creates a key only when the file is *absent*, so a launch
+        // that found this and generated a fresh one over it would lose the identity automatically.
+        // It does not, and the assertion on the bytes is what keeps it that way.
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join(KEY_FILE);
+        std::fs::write(&key, b"not thirty-two bytes").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Otherwise the permission check answers first and this tests the previous case.
+            std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let Err(error) = Peering::bind(dir.path(), Arc::new(DenyUnknown)).await else {
+            panic!("a key file that is not a key was loaded as one");
+        };
+
+        assert!(
+            matches!(error.downcast_ref::<KeyError>(), Some(KeyError::Malformed)),
+            "this cannot be told from a machine with no network: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read(&key).unwrap(),
+            b"not thirty-two bytes",
+            "the key file was rewritten, which is this machine becoming a different peer with nobody asked"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
