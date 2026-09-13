@@ -8,10 +8,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use zyris::ServeCapability;
-use zyris::caps::{FileIoServer, InputServer, ScreenCaptureServer, TerminalServer};
+use zyris::caps::{
+    FileIoServer, FileTransferServer, InputServer, ScreenCaptureServer, TerminalServer,
+};
 use zyris_runtime::EventBus;
+use zyris_transfer::LocalFileTransfer;
 
 use crate::guarded::Guarded;
+use crate::transfer::Transfers;
 use crate::{AuditLog, Gate};
 
 /// One announced capability, as the window lists it.
@@ -54,6 +58,19 @@ pub struct Tools {
     /// same reason it is optional there: the audit file is the record, and a `Tools` with no bus
     /// is a complete one.
     bus: Option<EventBus>,
+    /// `file_transfer`, when this machine has a peer identity to serve it with.
+    ///
+    /// Optional because binding an endpoint can fail — no network, a key file that will not load
+    /// — and a machine that cannot move files between its owner's computers is still a complete
+    /// node with four working capabilities. Absent, nothing about transfer is announced at all,
+    /// which is the same answer [`Self::screen_pair`] gives for a host with no display server and
+    /// for the same reason: an agent can tell an absent tool from a broken one, and cannot tell a
+    /// broken one from a working one.
+    ///
+    /// The value rather than the [`Transfers`] that made it, because this is the half that gets
+    /// announced; the other half — the connect hook and the accept loop — belongs to `main`, and
+    /// a `Tools` is not the place to hide a background task.
+    transfer: Option<LocalFileTransfer>,
     /// What `into_capabilities` handed the node, recorded as it happened.
     ///
     /// Shared across clones so the window and the connector agree, and written once: a node
@@ -64,13 +81,31 @@ pub struct Tools {
 
 impl Tools {
     pub fn new(gate: Gate, log: AuditLog, root: PathBuf) -> Tools {
-        Tools { gate, log, root, bus: None, announced: Arc::new(OnceLock::new()) }
+        Tools {
+            gate,
+            log,
+            root,
+            bus: None,
+            transfer: None,
+            announced: Arc::new(OnceLock::new()),
+        }
     }
 
     /// Also publish every call, so the window and the tray see what is happening rather than
     /// having to poll the file.
     pub fn with_bus(mut self, bus: EventBus) -> Tools {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Also announce `file_transfer`, served by this machine's peer identity.
+    ///
+    /// Takes the whole of [`Transfers`] rather than a capability so there is one way to build
+    /// this: the value announced here and the one the connect hook keeps current have to be the
+    /// same wiring, and a caller that could pass a `LocalFileTransfer` of its own could pass one
+    /// nothing ever calls `set_api` on — which refuses every send while looking announced.
+    pub fn with_transfer(mut self, transfers: &Transfers) -> Tools {
+        self.transfer = Some(transfers.capability());
         self
     }
 
@@ -132,14 +167,22 @@ impl Tools {
     /// an agent sends would resolve somewhere different every launch.
     ///
     /// The other two need a display server, and they arrive together or not at all — see
-    /// [`Self::screen_pair`]. That is why this returns a list built up rather than a literal: on
-    /// a headless host it is two capabilities long, and that is a correct answer, not a failure.
+    /// [`Self::screen_pair`]. `file_transfer` needs an endpoint that bound. That is why this
+    /// returns a list built up rather than a literal: on a headless host with no network it is
+    /// two capabilities long, and that is a correct answer, not a failure.
+    ///
+    /// **`peer_transfer` is not here and does not belong here.** It is announced on the peer link
+    /// by `zyris-transfer` itself; see [`crate::transfer`] for why announcing it on the Attacca
+    /// connection would produce a tool that refuses every call.
     fn capabilities(&self) -> Vec<Arc<dyn ServeCapability>> {
         let mut capabilities = vec![
             self.guard(FileIoServer(zyris_fs::LocalFileIo::rooted(self.root.clone()))),
             self.guard(TerminalServer(zyris_terminal::PtyTerminal::rooted(self.root.clone()))),
         ];
         capabilities.extend(self.screen_pair());
+        if let Some(transfer) = self.transfer.clone() {
+            capabilities.push(self.guard(FileTransferServer(transfer)));
+        }
         capabilities
     }
 
@@ -329,6 +372,51 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         assert!(tools(dir.path()).announced().is_empty());
+    }
+
+    #[test]
+    fn a_machine_with_no_peer_identity_announces_no_file_transfer() {
+        // The honest answer when the endpoint would not bind. `send_to` needs somewhere to send
+        // from, and one announced without it would refuse every call — which an agent reads as a
+        // broken machine rather than as a machine that does not do this.
+        let dir = tempfile::tempdir().unwrap();
+
+        let names: Vec<String> =
+            announced_tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
+
+        assert!(!names.contains(&"file_transfer".to_string()), "{names:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_machine_with_one_announces_file_transfer_and_nothing_else_new() {
+        // Two claims in one test because they are one decision. `file_transfer` is the surface an
+        // agent calls and it is announced; `peer_transfer` is the wire between two machines,
+        // `zyris-transfer` announces it on the peer link itself, and one announced *here* would
+        // have no peer to pull bytes from and would refuse every call it received.
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = crate::Transfers::bind(
+            dir.path(),
+            dir.path().join("root"),
+            Arc::new(crate::transfer::DenyUnknown),
+        )
+        .await
+        .unwrap();
+        let tools = tools(dir.path()).with_transfer(&transfers);
+
+        let _ = tools.clone().into_capabilities();
+
+        let announced = tools.announced();
+        let transfer = announced
+            .iter()
+            .find(|capability| capability.name == "file_transfer")
+            .expect("a machine with a peer identity offers to send files");
+        let mut tools_offered = transfer.tools.clone();
+        tools_offered.sort();
+        assert_eq!(tools_offered, ["inbox_list", "send_to"]);
+        assert!(
+            !announced.iter().any(|capability| capability.name == "peer_transfer"),
+            "peer_transfer is announced on the peer link, never on this one: {announced:?}"
+        );
     }
 
     #[test]

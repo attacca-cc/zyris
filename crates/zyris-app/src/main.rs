@@ -20,6 +20,9 @@ use zyris_runtime::EventBus;
 /// How many events a subscriber may fall behind before it loses the oldest.
 const EVENT_CAPACITY: usize = 64;
 
+/// The record of what an agent asked of this machine, inside the instance's data directory.
+const AUDIT_FILE: &str = "audit.jsonl";
+
 fn main() -> anyhow::Result<()> {
     // Parsed before anything else touches the system. `clap` prints help or version text and
     // exits the process by itself on `--help`/`--version`, and that has to work even while
@@ -117,17 +120,52 @@ fn main() -> anyhow::Result<()> {
         zyris_runtime::secret::SecretStore::new(&instance),
     );
 
+    // Everything this run owns on disk lives here: the audit log, this machine's peer key, the
+    // ledger of peers it has pinned, and the inbox. One directory, named by the instance, so a
+    // `--server` run shares none of it with the production node.
+    let data = data_dir(&instance);
+    // Read once and shared: it is where a caller's relative paths start for `file_io` and
+    // `terminal`, and the one directory `file_transfer` will read a file out of.
+    let root = zyris_tools::default_root();
+
+    // **Bound before the `Tools`, because what is announced depends on whether it bound.**
+    // `block_on` rather than an async main: the GUI runtime owns the main thread synchronously,
+    // and the endpoint's background work keeps running on the runtime's worker threads after
+    // this returns.
+    let transfers = match runtime.block_on(zyris_tools::Transfers::bind(
+        &data,
+        root.clone(),
+        peer_confirmer(mode),
+    )) {
+        Ok(transfers) => Some(transfers),
+        // `info!`, not `warn!`, and the same reasoning `zyris-tools` gives for a host with no
+        // display server: a machine with no network is an ordinary machine rather than a fault,
+        // and a warning on every launch of one teaches people to ignore warnings. Nothing about
+        // transfer is announced, the other four capabilities are unaffected, and
+        // `Tools::announced()` reports exactly that.
+        Err(error) => {
+            tracing::info!(
+                %error,
+                "no peer identity, so file_transfer is not announced; everything else on this machine still works, but it can neither send a file to another of your machines nor receive one"
+            );
+            None
+        }
+    };
+
     // Built here, once, for the same reason the connector is: the switch has to stop tools with
     // the window closed exactly as it does with it open, and a `Tools` per runtime would be two
     // switches and two logs that disagree.
-    let tools = zyris_tools::Tools::new(
+    let mut tools = zyris_tools::Tools::new(
         zyris_tools::Gate::running(),
-        zyris_tools::AuditLog::new(audit_path(&instance)),
-        zyris_tools::default_root(),
+        zyris_tools::AuditLog::new(data.join(AUDIT_FILE)),
+        root,
     )
     // Every call is published as well as written down. The bus is the only way the window and
     // the tray hear about a call while it happens; the file is what outlives the process.
     .with_bus(bus.clone());
+    if let Some(transfers) = &transfers {
+        tools = tools.with_transfer(transfers);
+    }
     // Built once and named from that same list. `announced()` answers from what this call
     // records, so it has to run before `gui::run` takes the `Tools` or the window would have
     // nothing to report.
@@ -153,6 +191,17 @@ fn main() -> anyhow::Result<()> {
 
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(capabilities);
+
+    // The other half of file transfer, and the reason `Connector` has a hook at all. There is
+    // room for exactly one, which is why everything per-connection happens inside this one call:
+    // replacing the rendezvous client, republishing where this machine can be reached, and — the
+    // first time only — starting the accept loop.
+    if let Some(transfers) = transfers {
+        connector = connector.with_connect_hook(move |connection| {
+            let transfers = transfers.clone();
+            async move { transfers.on_connect(connection).await }
+        });
+    }
 
     // Announced further up, beside the instance name the same flag changes.
     if let Some(server) = cli.server() {
@@ -258,25 +307,50 @@ fn instance_name(server: Option<&str>) -> String {
     }
 }
 
-/// Where the record of what ran lives: beside the other per-user state, never beside the binary.
+/// Where everything this run owns on disk lives: beside the other per-user state, never beside
+/// the binary. The audit log, this machine's peer key, the ledger of peers it has pinned, the
+/// inbox and the undo stash are all under here.
 ///
 /// Scoped by the instance for the same reason the keychain is — a `--server` run must not append
-/// its calls to the production machine's history, nor read that history back as its own.
+/// its calls to the production machine's history, nor read that history back as its own, nor
+/// answer to the production machine's peer identity.
 ///
 /// The fallbacks mirror `SecretStore`'s, and for the same reason — the current directory is `/`
-/// under a systemd unit and whatever a shortcut set for a desktop launch, so a log written there
-/// lands somewhere different every launch.
-fn audit_path(instance: &str) -> std::path::PathBuf {
+/// under a systemd unit and whatever a shortcut set for a desktop launch, so anything written
+/// there lands somewhere different every launch. The last resort is a directory rather than a
+/// prefixed file name, because there is now more than one file to put in it.
+fn data_dir(instance: &str) -> std::path::PathBuf {
     if let Some(dirs) = directories::ProjectDirs::from("cc", "attacca", instance) {
-        return dirs.data_dir().join("audit.jsonl");
+        return dirs.data_dir().to_path_buf();
     }
     if let Some(dirs) = directories::BaseDirs::new() {
-        return dirs.home_dir().join(format!(".{instance}")).join("audit.jsonl");
+        return dirs.home_dir().join(format!(".{instance}"));
     }
     // No directory the platform can name. `AuditLog` survives a path it cannot write — it says
     // so in the process log and never fails a tool call — so an absolute, OS-chosen path is a
     // better last resort than refusing to start.
-    std::env::temp_dir().join(format!("{instance}-audit.jsonl"))
+    std::env::temp_dir().join(instance)
+}
+
+/// Who answers when a machine this one has never seen wants to send it a file.
+///
+/// **`DenyUnknown` in both modes today, and that is a real limitation rather than a placeholder
+/// in the headless arm.** With nobody to ask, refusing is the only safe answer: a peer must not
+/// become trusted merely because no one was around to say no. With a window there *is* someone to
+/// ask, and step 5b replaces the second arm with a confirmer that raises the tray notification
+/// and shows the peer's fingerprint for a person to compare — the whole of that change is the one
+/// expression below. Until then a windowed run refuses an unknown peer exactly as a headless one
+/// does, and a file from a machine that has never been pinned does not arrive.
+///
+/// The two arms are written out rather than collapsed for that reason: this is where the two
+/// modes are about to differ, and the seam is worth more than the line it costs.
+fn peer_confirmer(mode: cli::Mode) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
+    match mode {
+        cli::Mode::Headless => std::sync::Arc::new(zyris_tools::DenyUnknown),
+        cli::Mode::Window | cli::Mode::WindowHidden => {
+            std::sync::Arc::new(zyris_tools::DenyUnknown)
+        }
+    }
 }
 
 #[cfg(test)]

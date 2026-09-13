@@ -8615,6 +8615,7 @@ dependencies = [
  "tokio",
  "tracing",
  "zyris",
+ "zyris-attacca",
  "zyris-fs",
  "zyris-input",
  "zyris-runtime",

@@ -143,6 +143,23 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// is the same question about a file that already existed. Neither weakens the reasoning above:
 /// both are bare booleans off the parameter list and neither can carry a payload.
 ///
+/// `file_transfer` adds `node` and `name`, and its two tools are the whole of what it can say:
+/// `send_to(node, path, name, overwrite)` names the machine a file was sent to, the file that was
+/// read, what it was called on arrival and whether it replaced something there — four facts that
+/// identify a transfer and not one byte of one. `inbox_list` takes no parameters, so it writes an
+/// empty detail, which is the right answer. Neither name collides: none of the other four
+/// capabilities has a parameter called `node` or `name`, and a future one that did would have to
+/// be checked here before it was announced.
+///
+/// **`peer_transfer` is deliberately not accounted for here, because it never reaches this
+/// function.** It is announced on the peer link by `zyris-transfer` rather than by
+/// [`Tools`](crate::Tools) — see [`crate::transfer`] — so no `push_offer` or `pull` is ever
+/// wrapped in a `Guarded`. Its record is `TransferConfig::audit`, written per received file. Were
+/// one ever announced here, note where its bytes actually are: `push_offer` carries a
+/// `TransferOffer` (a name, a size, a hash) and `pull` a transfer id and an offset, and the file
+/// itself travels in `pull`'s reply stream — which this function never reads, the same way a
+/// screenshot stays out of the log.
+///
 /// These are the wire names: the capability macro derives the request struct straight from the
 /// trait's parameter list with no `rename_all`, so they stay snake_case. `exec` carries its
 /// command line in `command` **or** `argv`, never both, and `pty` identifies the target of every
@@ -151,6 +168,8 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// The array's order is the line's order, so `path=` stays first.
 const LOGGED_FIELDS: &[&str] = &[
     "path",
+    "node",
+    "name",
     "command",
     "argv",
     "cwd",
@@ -221,8 +240,9 @@ fn truncate(text: String) -> String {
 mod tests {
     use super::*;
     use zyris::caps::{
-        Display, FileIoServer, ImageFormat, Input, InputServer, MouseButton, Region, ScreenCapture,
-        ScreenCaptureServer, file_io_capability,
+        Display, FileIoServer, FileTransfer, FileTransferServer, ImageFormat, InboxEntry, Input,
+        InputServer, MouseButton, Region, ScreenCapture, ScreenCaptureServer, SendReceipt,
+        file_io_capability,
     };
     use zyris::{Datum, IncomingCall, Payload, Serialization};
 
@@ -318,6 +338,52 @@ mod tests {
         let gate = crate::Gate::running();
         let log = crate::AuditLog::new(dir.join("audit.jsonl"));
         let cap = Guarded::new(ScreenCaptureServer(FakeScreen), gate.clone(), log.clone());
+        (gate, log, cap)
+    }
+
+    /// `file_transfer` with nothing behind it. The real one needs a bound endpoint and a live
+    /// Attacca connection to look a peer up through, and without those every call would come back
+    /// `Failed` — which would make a redaction assertion below prove only that a call that never
+    /// ran logged nothing.
+    struct FakeTransfer;
+
+    /// What the peer says it wrote. A fact about the *other* machine, returned rather than asked
+    /// for, and the test below is what keeps it out of a line describing what was asked for.
+    const RECEIPT_PATH: &str = "/home/them/inbox/this-machine/renamed.txt";
+
+    #[zyris::async_trait]
+    impl FileTransfer for FakeTransfer {
+        async fn send_to(
+            &self,
+            node: String,
+            _path: String,
+            _name: Option<String>,
+            _overwrite: Option<bool>,
+        ) -> zyris::Result<SendReceipt> {
+            Ok(SendReceipt {
+                node,
+                written: RECEIPT_PATH.to_string(),
+                bytes: 12,
+                sha256: "de.ad".to_string(),
+                replaced: false,
+                undo: None,
+                direct: true,
+                pending: false,
+                next: None,
+            })
+        }
+
+        async fn inbox_list(&self) -> zyris::Result<Vec<InboxEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn guarded_transfer(
+        dir: &std::path::Path,
+    ) -> (crate::Gate, crate::AuditLog, Guarded<FileTransferServer<FakeTransfer>>) {
+        let gate = crate::Gate::running();
+        let log = crate::AuditLog::new(dir.join("audit.jsonl"));
+        let cap = Guarded::new(FileTransferServer(FakeTransfer), gate.clone(), log.clone());
         (gate, log, cap)
     }
 
@@ -651,5 +717,63 @@ mod tests {
             "the capture has to have actually run, or this test proves nothing"
         );
         assert!(entry.detail.contains("HDMI-1"), "which display is missing: {}", entry.detail);
+    }
+
+    #[tokio::test]
+    async fn a_send_records_which_machine_got_which_file_under_what_name() {
+        // The only line that will ever say a file left this machine. `send_to` is the one
+        // announced tool whose whole effect is somewhere else, so a log that cannot name the
+        // destination cannot answer the question it exists for.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_transfer(dir.path());
+
+        let _ = cap
+            .dispatch(call(
+                "send_to",
+                serde_json::json!({
+                    "node": "laptop",
+                    "path": "notes/x.txt",
+                    "name": "renamed.txt",
+                    "overwrite": true,
+                }),
+            ))
+            .await;
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the send has to have actually run, or this test proves nothing"
+        );
+        let detail = &entry.detail;
+        assert!(detail.contains("node=laptop"), "which machine is missing: {detail}");
+        assert!(detail.contains("path=notes/x.txt"), "which file is missing: {detail}");
+        assert!(detail.contains("name=renamed.txt"), "what it landed as is missing: {detail}");
+        assert!(
+            detail.contains("overwrite=true"),
+            "whether it replaced a file over there is part of what was asked for: {detail}"
+        );
+        assert!(
+            !detail.contains(RECEIPT_PATH),
+            "the receipt leaked into a line about what was asked for: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reading_the_inbox_is_recorded_even_though_it_has_nothing_to_say() {
+        // `inbox_list` takes no parameters, so the detail is empty and that is the right answer:
+        // the tool name and the timestamp are still the record that something read what had
+        // arrived. The alternative — dumping the params object when the allowlist matches
+        // nothing — is where a payload would land.
+        let dir = tempfile::tempdir().unwrap();
+        let (_gate, log, cap) = guarded_transfer(dir.path());
+
+        let out = cap.dispatch(call("inbox_list", serde_json::json!({}))).await;
+
+        assert!(out.is_ok());
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(entry.capability, "file_transfer");
+        assert_eq!(entry.tool, "inbox_list");
+        assert_eq!(entry.detail, "");
     }
 }
