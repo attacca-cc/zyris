@@ -14,7 +14,24 @@ export type CoreEvent =
   | { kind: "disconnected"; reason: string; retrying: boolean }
   | { kind: "setupFailed"; reason: string }
   | { kind: "paused"; paused: boolean }
+  | ({ kind: "needsPeerApproval" } & PeerQuestion)
   | ({ kind: "toolCall" } & ToolCall);
+
+// A machine this computer is about to send a file to and has never sent to before, waiting for a
+// person to say yes or no. `id` names the question an answer has to name back — the core refuses
+// an answer that names a question no longer waiting, which is what stops a stale window or a
+// second click from approving something nobody was looking at.
+//
+// `fingerprint` is upstream's rendering of that machine's key: 128 bits as eight space-separated
+// groups of four uppercase hex digits. It is carried and shown exactly as given — the person is
+// comparing it against another screen character by character, and anything that re-cases,
+// re-groups or truncates it makes that comparison fail for a reason that has nothing to do with
+// the keys. crates/zyris-app/src/bridge.rs pins these field names from the Rust side.
+export type PeerQuestion = {
+  id: number;
+  label: string;
+  fingerprint: string;
+};
 
 // One call an agent made. `outcome` is "allowed", "refused" or "failed", spelled the same way in
 // a live event and in a stored line of the audit log — Outcome::as_str and its serde form in
@@ -40,8 +57,13 @@ export type Screen = "starting" | "onboarding" | Tab;
 
 // What the window can be told. Core events arrive from the bus; `navigate` is the one thing a
 // person does that changes state, and it goes through the same reducer so there is exactly one
-// place that decides which screen is showing.
-export type Action = CoreEvent | { kind: "navigate"; to: Tab };
+// place that decides which screen is showing. `peerQuestion` carries what a command answered
+// rather than what the bus published — the question a late window fetched, or the news that the
+// one it was showing has stopped waiting.
+export type Action =
+  | CoreEvent
+  | { kind: "navigate"; to: Tab }
+  | { kind: "peerQuestion"; question: PeerQuestion | null };
 
 // How many calls the window keeps and how many it asks the audit file for. This is a tail, not a
 // record: the whole history is the file on disk, and an unbounded list would grow for as long as
@@ -64,6 +86,14 @@ export type State = {
   // Newest first, capped at MAX_TOOL_CALLS. Only the calls this window saw live; the durable
   // tail comes from the audit file through a command.
   toolCalls: ToolCallRow[];
+  // The machine waiting to be approved, or null. There is never more than one: the core refuses
+  // a second question while one waits rather than queueing it, so that nobody is trained to click
+  // through a fingerprint they did not read.
+  //
+  // Not a `Screen`. A question arrives while somebody is somewhere — mid-way through the Settings
+  // switch, reading the audit tail — and it has to hand that screen back untouched when it is
+  // answered, which a screen change cannot do. App.tsx renders it over whatever is showing.
+  question: PeerQuestion | null;
 };
 
 export const initialState: State = {
@@ -75,6 +105,7 @@ export const initialState: State = {
   retrying: false,
   paused: false,
   toolCalls: [],
+  question: null,
 };
 
 // Where a core event that means "past enrolment" leaves the window.
@@ -150,6 +181,20 @@ export function reduce(state: State, action: Action): State {
       };
     case "paused":
       return { ...state, paused: action.paused };
+    case "needsPeerApproval":
+      // Replaces rather than appends, which is what makes it idempotent: the same question
+      // arriving twice — live, and again when the forwarder resends it after falling behind —
+      // leaves the same question showing. Only one can ever be waiting, so there is nothing to
+      // queue behind it.
+      return {
+        ...state,
+        question: { id: action.id, label: action.label, fingerprint: action.fingerprint },
+      };
+    case "peerQuestion":
+      // What a command said, which is the authority on whether a question is still waiting.
+      // `null` ends the screen: the person answered, or nobody did in time, or the machine that
+      // asked gave up. PeerConfirm.tsx only sends that once it knows which.
+      return { ...state, question: action.question };
     case "toolCall":
       return {
         ...state,
@@ -189,4 +234,17 @@ export function subscribe(onEvent: (event: CoreEvent) => void): Promise<() => vo
 // Meant to be called exactly once, right after `subscribe`'s promise resolves.
 export function fetchLatestEvent(): Promise<CoreEvent | null> {
   return invoke<CoreEvent | null>("latest_event");
+}
+
+// The question waiting for a person right now, if there is one.
+//
+// Two callers, for two different reasons. App.tsx asks once at startup, because
+// `needsPeerApproval` is published transiently and so is never in the one-slot catch-up value
+// `fetchLatestEvent` reads — a window raised by the question itself may not have registered its
+// listener by the time the question went past. PeerConfirm.tsx asks repeatedly while it is
+// showing one, because a question can stop waiting with no event to say so: its caller can be cut
+// off mid-ask, which cancels the future and clears the slot from inside a destructor with nowhere
+// to publish from.
+export function fetchPendingPeer(): Promise<PeerQuestion | null> {
+  return invoke<PeerQuestion | null>("pending_peer");
 }

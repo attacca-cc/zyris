@@ -14,6 +14,7 @@ use zyris_runtime::{lifecycle, CoreEvent, EventBus};
 use zyris_tools::Tools;
 
 use crate::cli::Mode;
+use crate::confirm::Pending;
 use crate::{bridge, tray};
 
 pub fn run(
@@ -21,6 +22,9 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     connector: Connector,
     tools: Tools,
+    // Where a question about an unapproved peer waits. The same handle `main` gave the confirmer,
+    // so what the window reads and answers is the question an agent's `send_to` is blocked on.
+    pending: Pending,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -37,6 +41,7 @@ pub fn run(
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
     let setup_gate = tools.gate().clone();
+    let setup_pending = pending.clone();
 
     let mut builder = tauri::Builder::default();
 
@@ -93,6 +98,9 @@ pub fn run(
         // `spawn_blocking`, which needs something that outlives the borrow Tauri's state gives
         // out for one call. See `bridge::off_the_ui_thread`.
         .manage(std::sync::Arc::new(zyris_autostart::Autostart::for_this_machine()))
+        // A handle on the slot, like the gate and the log above: what `pending_peer` reads and
+        // `answer_peer` writes is the question the confirmer is waiting on, not a copy of it.
+        .manage(pending)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -102,6 +110,8 @@ pub fn run(
             bridge::announced_tools,
             bridge::autostart_state,
             bridge::set_autostart,
+            bridge::pending_peer,
+            bridge::answer_peer,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:
@@ -189,6 +199,20 @@ pub fn run(
                 app.handle().clone(),
                 setup_bus.clone(),
                 setup_gate.clone(),
+                setup_pending.clone(),
+                &setup_runtime,
+            );
+
+            // Registered in **both** modes, unlike the enrolment watcher above, and for a reason
+            // that is not about `--minimized`: closing the window hides it rather than quitting
+            // (see `on_window_event` below), so a run that started with a window on the screen
+            // spends most of its life with no window on the screen. A question nobody is shown
+            // refuses itself three quarters of a minute later, and the agent is told only that
+            // the peer was not approved.
+            raise_the_window_for_a_peer_question(
+                app.handle().clone(),
+                setup_bus.clone(),
+                setup_pending.clone(),
                 &setup_runtime,
             );
             // Published only now that the bridge above is already subscribed — publishing
@@ -276,6 +300,74 @@ fn show_when_enrolment_needs_a_person(
                     if matches!(bus.latest(), Some(CoreEvent::NeedsEnrolment)) {
                         tray::show_main_window(&app);
                         return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+/// Put the window on the screen whenever a peer is waiting to be approved.
+///
+/// **Not one shot, unlike [`show_when_enrolment_needs_a_person`].** Enrolment happens once and is
+/// then over; this happens every time an agent sends to a machine this one has not pinned, which
+/// is once per new machine and again whenever a ledger is moved or rebuilt. The task lives for the
+/// app's run.
+///
+/// **Called from a tokio worker, which is where this had to be established rather than assumed.**
+/// `show`, `unminimize` and `set_focus` each go through `tauri-runtime-wry`'s `send_user_message`,
+/// which compares the calling thread against the event loop's: on the main thread it handles the
+/// message inline, and off it — here — it posts through the tao event loop proxy. So all three are
+/// legal from here and are applied in the order they were sent. What changes off the main thread
+/// is that they are *queued* rather than done: this function returns before the window is up, and
+/// the proxy's only failure is the event loop being gone, which `show_main_window` already
+/// discards.
+///
+/// **What `--minimized` costs is focus, not the window.** A run started hidden has a real window
+/// all along — `tauri.conf.json` declares it `"visible": false` — so `show` maps it exactly as it
+/// maps one that was closed into the tray. `set_focus` is the part that can quietly do nothing:
+/// tao guards it on the window already being visible (`window.get_visible()` on Linux, the
+/// `VISIBLE` flag on Windows), and on Linux `set_visible` only *queues* a request onto the GTK
+/// main context, so the focus call that follows it in the same batch can still see a window that
+/// has not been mapped yet. On Windows the flag is set inline on the event loop thread and the
+/// focus goes through. Either way the window appears, which is what a fingerprint needs; on Linux
+/// whether it comes to the front is the window manager's usual new-window policy.
+///
+/// That is why there is no desktop notification here and no `tauri-plugin-notification`: the
+/// window is the only surface that can show 32 hex digits to compare, showing it works from here,
+/// and a plugin plus its permissions would buy a second way of saying what this already says.
+fn raise_the_window_for_a_peer_question(
+    app: AppHandle,
+    bus: EventBus,
+    pending: crate::confirm::Pending,
+    runtime: &tokio::runtime::Handle,
+) {
+    // Subscribed synchronously, before the connector is spawned, for the reason the caller's
+    // comment gives: `broadcast` never replays a send to a subscriber that arrived after it.
+    let mut events = bus.subscribe();
+
+    runtime.spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(CoreEvent::NeedsPeerApproval { label, .. }) => {
+                    tracing::info!(
+                        %label,
+                        "opening the window: a machine this one has not approved is waiting"
+                    );
+                    tray::show_main_window(&app);
+                }
+                Ok(_) => {}
+                // Tool calls can outrun this subscriber, and the bus drops a contiguous range of
+                // the ring when they do — a question among them. It is published transiently, so
+                // `bus.latest()` never holds it; the slot it actually lives in is the one to ask,
+                // and it answers `None` unless a question is waiting this very moment. Worth the
+                // four lines: the alternative is an agent blocked for three quarters of a minute
+                // behind a window that was never raised.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "fell behind while watching for a peer question");
+                    if pending.question().is_some() {
+                        tray::show_main_window(&app);
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,

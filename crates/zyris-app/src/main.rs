@@ -9,12 +9,6 @@
 
 mod bridge;
 mod cli;
-// **Nothing reaches this yet, and that is deliberate.** `peer_confirmer` below still answers
-// `DenyUnknown` in both arms: installing `WindowConfirmer` means an event carrying the question, a
-// command carrying the answer back, and a screen to read a fingerprint on — none of which exist
-// yet. Until they do, a confirmer that waited three quarters of a minute with nothing on the
-// screen to answer would be strictly worse than the immediate refusal that is there now.
-#[allow(dead_code)]
 mod confirm;
 mod gui;
 mod headless;
@@ -135,6 +129,15 @@ fn main() -> anyhow::Result<()> {
     // `terminal`, and the one directory `file_transfer` will read a file out of.
     let root = zyris_tools::default_root();
 
+    // The slot a question about an unapproved peer waits in, built here because both ends of it
+    // are built here: `peer_confirmer` below fills it from a tokio worker, and `gui::run` hands
+    // the very same handle to the two commands the window answers through. A second `Pending`
+    // would be a question nobody could answer.
+    //
+    // Built in both modes. Headless never installs the confirmer that fills it, so it stays empty
+    // for that run — which costs an `Arc` and keeps this line out of the branch.
+    let pending = confirm::Pending::new();
+
     // **Bound before the `Tools`, because what is announced depends on whether it bound.**
     // `block_on` rather than an async main: the GUI runtime owns the main thread synchronously,
     // and the endpoint's background work keeps running on the runtime's worker threads after
@@ -142,7 +145,7 @@ fn main() -> anyhow::Result<()> {
     let transfers = match runtime.block_on(zyris_tools::Transfers::bind(
         &data,
         root.clone(),
-        peer_confirmer(mode),
+        peer_confirmer(mode, &pending, &bus),
     )) {
         Ok(transfers) => Some(transfers),
         // How loudly this is said depends on *why* it failed, which is why it is not one line
@@ -224,6 +227,9 @@ fn main() -> anyhow::Result<()> {
             runtime.handle().clone(),
             connector,
             tools,
+            // The other end of the slot `peer_confirmer` fills. The window reads and answers
+            // through this handle; it is not a copy.
+            pending,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether
@@ -386,21 +392,39 @@ fn report_no_peer_identity(error: &anyhow::Error) {
 /// incoming files, and replacing `DenyUnknown` here will not make it one — a file from another
 /// node of this account arrives whether or not that node has ever been pinned.
 ///
-/// **`DenyUnknown` in both modes today, and that is a real limitation rather than a placeholder
-/// in the headless arm.** With nobody to ask, refusing is the only safe answer: a peer must not
-/// become trusted merely because no one was around to say no. With a window there *is* someone to
-/// ask, and step 5b replaces the second arm with a confirmer that raises the tray notification
-/// and shows the peer's fingerprint for a person to compare — the whole of that change is the one
-/// expression below. Until then a windowed run refuses to send to an unpinned peer exactly as a
-/// headless one does.
+/// **`DenyUnknown` in headless, and that is a real limitation rather than a gap.** With nobody to
+/// ask, refusing is the only safe answer: a peer must not become trusted merely because no one was
+/// around to say no. A `--headless` run therefore cannot send a file to a machine it has not
+/// already pinned, and no amount of waiting changes that.
 ///
-/// The two arms are written out rather than collapsed for that reason: this is where the two
-/// modes are about to differ, and the seam is worth more than the line it costs.
-fn peer_confirmer(mode: cli::Mode) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
+/// With a window there *is* somebody to ask. The windowed arm installs [`confirm::WindowConfirmer`]
+/// instead, which parks the question in `pending` and publishes it; `gui.rs` is what puts the
+/// window on the screen when that event goes past, and the window answers back through
+/// [`bridge::answer_peer`] into the same slot.
+///
+/// **The question travels on the bus rather than through an `AppHandle`, and that is not
+/// incidental.** This function runs before Tauri exists — `Transfers::bind` needs a confirmer, and
+/// the app is not built until `gui::run` — so there is no window to hold onto here. The bus is
+/// already the one thing both halves of this program can reach, and publishing on it gets the
+/// question to the webview through the forwarder that is already running, for nothing.
+///
+/// Transiently, for the reason [`zyris_runtime::CoreEvent::NeedsPeerApproval`] gives: a question
+/// answered a minute ago must not be handed to every window that opens afterwards.
+fn peer_confirmer(
+    mode: cli::Mode,
+    pending: &confirm::Pending,
+    bus: &EventBus,
+) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
     match mode {
         cli::Mode::Headless => std::sync::Arc::new(zyris_tools::DenyUnknown),
         cli::Mode::Window | cli::Mode::WindowHidden => {
-            std::sync::Arc::new(zyris_tools::DenyUnknown)
+            let bus = bus.clone();
+            std::sync::Arc::new(confirm::WindowConfirmer::new(
+                pending.clone(),
+                std::sync::Arc::new(move |question: &confirm::Question| {
+                    bus.publish_transient(bridge::peer_question_event(question));
+                }),
+            ))
         }
     }
 }
@@ -408,6 +432,66 @@ fn peer_confirmer(mode: cli::Mode) -> std::sync::Arc<dyn zyris_tools::PeerConfir
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn headless_refuses_an_unknown_peer_without_asking_anybody() {
+        // The arm that must never grow a window. There is nobody at a `--headless` run to read a
+        // fingerprint, so the answer is no — and it has to be *immediately* no: a headless
+        // confirmer that parked the question somewhere would block an agent's `send_to` for three
+        // quarters of a minute and then refuse it anyway.
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+        let mut watching = bus.subscribe();
+
+        let confirmer = peer_confirmer(cli::Mode::Headless, &pending, &bus);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
+        )
+        .await
+        .expect("headless has to answer at once rather than wait for somebody");
+
+        assert!(!answer, "nobody is there, so nothing may be approved");
+        assert!(pending.question().is_none(), "headless must not park a question anywhere");
+        assert!(
+            watching.try_recv().is_err(),
+            "there is no window to publish a question to, and a tray-less run has no surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_windowed_run_asks_and_says_so_on_the_bus() {
+        // The seam this step opens. Both halves are asserted because either alone is useless: a
+        // question parked where the commands can reach it, and an event so that something raises
+        // the window and draws it.
+        const FINGERPRINT: &str = "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8";
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+        let mut watching = bus.subscribe();
+
+        let confirmer = peer_confirmer(cli::Mode::WindowHidden, &pending, &bus);
+        let asked = tokio::spawn(async move { confirmer.confirm("kitchen-pi", FINGERPRINT).await });
+
+        let published = tokio::time::timeout(std::time::Duration::from_secs(1), watching.recv())
+            .await
+            .expect("a windowed run publishes the question rather than refusing it")
+            .unwrap();
+        let zyris_runtime::CoreEvent::NeedsPeerApproval { id, label, fingerprint } = published
+        else {
+            panic!("a question must be published as one: {published:?}");
+        };
+        assert_eq!(label, "kitchen-pi");
+        assert_eq!(fingerprint, FINGERPRINT, "the person compares this character by character");
+
+        // And the same question is reachable by the command a window that opened late calls, at
+        // the same id the answer will name.
+        let waiting = pending.question().expect("the question is parked for a late window");
+        assert_eq!(waiting.id, id);
+        assert_eq!(waiting.fingerprint, FINGERPRINT);
+
+        assert!(pending.answer(id, true), "the id on the wire is the id an answer names");
+        assert!(asked.await.unwrap(), "and the answer reaches the caller");
+    }
 
     #[test]
     fn the_default_instance_keeps_the_name_an_existing_install_already_uses() {

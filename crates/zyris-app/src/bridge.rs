@@ -22,11 +22,35 @@ use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
 use zyris_tools::{Announcement, AuditLog, Entry, Gate, Tools};
 
+use crate::confirm::{Pending, Question};
+
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
 
+/// The one place a waiting question becomes an event.
+///
+/// Two callers, which is why it is a function rather than a struct literal written twice: `main`
+/// builds it when [`crate::confirm::WindowConfirmer`] asks, and [`forward`] rebuilds it for a
+/// window that fell behind. A second literal would be a second chance to drop a field, and the
+/// field most worth dropping is the one a person is meant to read.
+pub fn peer_question_event(question: &Question) -> CoreEvent {
+    CoreEvent::NeedsPeerApproval {
+        id: question.id,
+        label: question.label.clone(),
+        fingerprint: question.fingerprint.clone(),
+    }
+}
+
 /// Subscribes to the bus and republishes onto the webview for as long as the app lives.
-pub fn forward(app: AppHandle, bus: EventBus, gate: Gate, runtime: &tokio::runtime::Handle) {
+pub fn forward(
+    app: AppHandle,
+    bus: EventBus,
+    gate: Gate,
+    // For the lag path below, and for nothing else. A question is published transiently, so it is
+    // never in the catch-up slot — the only way to name it again is to ask the slot it lives in.
+    pending: Pending,
+    runtime: &tokio::runtime::Handle,
+) {
     let mut events = bus.subscribe();
     runtime.spawn(async move {
         loop {
@@ -55,6 +79,18 @@ pub fn forward(app: AppHandle, bus: EventBus, gate: Gate, runtime: &tokio::runti
                     let paused = CoreEvent::Paused { paused: gate.is_paused() };
                     if let Err(error) = app.emit(EVENT_NAME, &paused) {
                         tracing::warn!(%error, "could not resend the switch");
+                    }
+                    // And the question, for the same reason and read the same way: off the thing
+                    // that owns it rather than off the bus, because a transient publish leaves
+                    // nothing behind. Losing this one costs more than losing a tool call — an
+                    // agent's `send_to` is blocked on it, and it answers itself with a refusal
+                    // three quarters of a minute later if nobody is shown it. Absent is the
+                    // ordinary case and says nothing: `question()` is `None` whenever there is
+                    // no question, which is almost always.
+                    if let Some(question) = pending.question() {
+                        if let Err(error) = app.emit(EVENT_NAME, peer_question_event(&question)) {
+                            tracing::warn!(%error, "could not resend the waiting peer question");
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -116,6 +152,50 @@ pub fn set_paused(paused: bool, gate: State<Gate>, bus: State<EventBus>) {
 #[tauri::command]
 pub fn is_paused(gate: State<Gate>) -> bool {
     gate.is_paused()
+}
+
+/// The peer question waiting for a person, if there is one.
+///
+/// The catch-up half of a pair, exactly as [`is_paused`] is to `Paused`: the event reaches a
+/// window that was already listening, and this reaches one that was not. A window raised *by* the
+/// question is the case that makes it necessary rather than tidy — `NeedsPeerApproval` is
+/// published the instant `confirm` is called, and on a run started `--minimized` the webview may
+/// not have finished registering its listener by then. An event alone would lose the question to
+/// exactly the run that most needs it.
+///
+/// It is also how the window learns a question **ended**, which no event reports. A question
+/// stops waiting three ways — answered, expired, or its caller cut off mid-`confirm` and the
+/// future dropped — and the last of those runs inside a `Drop`, on cancellation, with no place to
+/// publish from. So the screen re-asks while it is open, and `None` is the whole answer: a
+/// question that is not waiting is not a question, whichever of the three ended it.
+#[tauri::command]
+pub fn pending_peer(pending: State<Pending>) -> Option<Question> {
+    pending.question()
+}
+
+/// A person's answer to the peer question named by `id`.
+///
+/// **`false` is not a failure and must not be reported as one.** It means that question was no
+/// longer waiting — it expired, the machine that asked gave up, or this is the second click on a
+/// button that was never redrawn — and that nothing was pinned as a result. The window turns it
+/// into a line saying the question has gone, not into an error.
+///
+/// Nothing is decided here. `Pending::answer` checks the id against the question actually
+/// waiting and refuses an answer with nobody left to receive it; this command only carries.
+#[tauri::command]
+pub fn answer_peer(id: u64, approved: bool, pending: State<Pending>) -> bool {
+    let reached = pending.answer(id, approved);
+    // Written down because it is a decision a person made about what this machine will do, and
+    // the audit log does not cover it — that records what an agent called, and this is the answer
+    // underneath one such call. At `info` either way: "nobody was waiting" is as worth having in
+    // the log as the answer itself when somebody later asks why a send failed.
+    tracing::info!(
+        id,
+        approved,
+        reached,
+        "a person answered whether to send to a machine this one has not approved"
+    );
+    reached
 }
 
 /// What this machine announces, and the two paths that make the rest of the screen readable.
@@ -304,6 +384,36 @@ mod tests {
             bus.latest(),
             Some(connected),
             "the switch took the catch-up slot; a cold window would strand on its starting screen"
+        );
+    }
+
+    #[test]
+    fn a_question_reaches_the_window_with_both_strings_untouched() {
+        // The one thing this conversion can get wrong, and the way it would be got wrong: an
+        // event built field by field in two places, one of which trims or re-cases the string a
+        // person is about to compare against another machine's screen. Both surfaces the window
+        // has — this event and the `pending_peer` command's `Question` — must hand over the same
+        // characters, so both are asserted against the same constant.
+        const FINGERPRINT: &str = "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8";
+        let question =
+            Question { id: 3, label: "Kitchen-Pi".into(), fingerprint: FINGERPRINT.into() };
+
+        assert_eq!(
+            peer_question_event(&question),
+            CoreEvent::NeedsPeerApproval {
+                id: 3,
+                label: "Kitchen-Pi".into(),
+                fingerprint: FINGERPRINT.into(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&question).unwrap(),
+            serde_json::json!({
+                "id": 3,
+                "label": "Kitchen-Pi",
+                "fingerprint": FINGERPRINT,
+            }),
+            "ui/src/PeerConfirm.tsx transcribes these field names; nothing checks that at build time"
         );
     }
 

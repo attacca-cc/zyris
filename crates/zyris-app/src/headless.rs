@@ -62,6 +62,16 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
                 CoreEvent::ToolCall { capability, tool, detail, outcome } => {
                     tracing::debug!(%capability, %tool, %detail, %outcome, "a tool call")
                 }
+                // Not published on this path, by construction: `main`'s `peer_confirmer` hands a
+                // headless run `DenyUnknown`, which refuses an unknown peer at once rather than
+                // parking a question. Said out loud rather than swallowed, because the only way
+                // to arrive here is a confirmer that asked a run with nobody to answer — an
+                // agent's `send_to` blocked until a deadline, and nothing anywhere saying why.
+                CoreEvent::NeedsPeerApproval { label, .. } => tracing::warn!(
+                    %label,
+                    "a machine is waiting to be approved, but a headless run has nobody to ask; \
+                     the send will be refused"
+                ),
                 CoreEvent::Started | CoreEvent::ShuttingDown => {}
             }
         }
