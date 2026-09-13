@@ -11,7 +11,7 @@
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus};
-use zyris_tools::Tools;
+use zyris_tools::{Tools, Transfers};
 
 use crate::cli::Mode;
 use crate::confirm::Pending;
@@ -25,6 +25,10 @@ pub fn run(
     // Where a question about an unapproved peer waits. The same handle `main` gave the confirmer,
     // so what the window reads and answers is the question an agent's `send_to` is blocked on.
     pending: Pending,
+    // File transfer, for the one thing the window does with it: listing what has arrived. A
+    // handle on the same wiring the announced capability is, not a second one — see `main`. `None`
+    // is a machine with no peer identity, which announces no `file_transfer` and has no inbox.
+    transfers: Option<Transfers>,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -101,6 +105,11 @@ pub fn run(
         // A handle on the slot, like the gate and the log above: what `pending_peer` reads and
         // `answer_peer` writes is the question the confirmer is waiting on, not a copy of it.
         .manage(pending)
+        // The `Option` is managed as it is rather than only when it is `Some`, because the two
+        // answers are not the same answer and Tauri has no way to ask whether a type was
+        // registered: a machine with no peer identity has no inbox to read, which the window has
+        // to say differently from an inbox nothing has arrived in. See `bridge::inbox`.
+        .manage(transfers)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -112,6 +121,7 @@ pub fn run(
             bridge::set_autostart,
             bridge::pending_peer,
             bridge::answer_peer,
+            bridge::inbox,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:

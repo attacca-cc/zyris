@@ -196,6 +196,15 @@ fn main() -> anyhow::Result<()> {
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(capabilities);
 
+    // The window's handle on file transfer, taken before the hook below consumes the value.
+    //
+    // A clone rather than a second `Transfers`: every clone is the same wiring — the same
+    // endpoint, the same ledger, the same inbox — so what the Tools screen lists is the
+    // capability's own answer rather than a second reader's idea of where files land. `None` is
+    // the machine that has no peer identity, where there is no inbox to read and nothing can
+    // arrive; the window says that rather than showing an empty list.
+    let window_transfers = transfers.clone();
+
     // The other half of file transfer, and the reason `Connector` has a hook at all. There is
     // room for exactly one, which is why everything per-connection happens inside this one call:
     // replacing the rendezvous client, republishing where this machine can be reached, and — the
@@ -230,6 +239,9 @@ fn main() -> anyhow::Result<()> {
             // The other end of the slot `peer_confirmer` fills. The window reads and answers
             // through this handle; it is not a copy.
             pending,
+            // What the Tools screen lists the inbox from, and the only reason the window has any
+            // handle on transfer at all.
+            window_transfers,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether

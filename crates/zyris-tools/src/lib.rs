@@ -11,5 +11,6 @@ pub use audit::{AuditLog, Entry, Outcome};
 pub use gate::Gate;
 pub use guarded::Guarded;
 pub use transfer::{
-    DenyUnknown, KeyError, PeerConfirmer, Peering, Transfers, WIRE_DEADLINE, async_trait,
+    DenyUnknown, InboxEntry, KeyError, PeerConfirmer, Peering, Transfers, WIRE_DEADLINE,
+    async_trait,
 };

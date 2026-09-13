@@ -186,6 +186,21 @@ section { margin-bottom: 2rem; }
   overflow-wrap: anywhere;
 }
 
+/* The sending machine's name and the file's, neither of them chosen by this program: a peer
+   directory is named after what Attacca calls that node, and the file name came from whoever
+   sent it. So it gets `.call-detail`'s rule rather than `.call-what`'s — wrap, then stop at two
+   lines, with the whole value on the row itself. A name long enough to scroll this screen
+   sideways is a name somebody chose to be that long. */
+.inbox-what {
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
 .badge {
   border: 1px solid var(--line);
   border-radius: 999px;

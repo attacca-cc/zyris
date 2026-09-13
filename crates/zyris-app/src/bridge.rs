@@ -20,7 +20,7 @@ use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
-use zyris_tools::{Announcement, AuditLog, Entry, Gate, Tools};
+use zyris_tools::{Announcement, AuditLog, Entry, Gate, InboxEntry, Tools, Transfers};
 
 use crate::confirm::{Pending, Question};
 
@@ -221,6 +221,39 @@ pub fn recent_tool_calls(limit: usize, log: State<AuditLog>) -> Result<Vec<Entry
     log.recent(limit).map_err(|error| error.to_string())
 }
 
+/// What has arrived in this machine's inbox, newest first.
+///
+/// **Three answers, and the window says something different for each.** `Err` is a read that
+/// failed. `Ok(None)` is a machine with no peer identity: `file_transfer` is not announced, no
+/// file can arrive, and there is no inbox to read. `Ok(Some(entries))` is the list, and an empty
+/// one there is the only case that means nothing has arrived — the same distinction
+/// [`recent_tool_calls`] draws, made with an `Option` rather than an empty vector because
+/// "nothing can arrive here" and "nothing has" are two different sentences.
+///
+/// **Read through the capability rather than off the filesystem.** The layout under the inbox is
+/// `zyris-transfer`'s — a directory per sending peer, `.part` for a transfer still in flight —
+/// and a walker written on this side would be a second copy of those rules for upstream to drift
+/// away from. `Transfers::inbox_list` is the same call an agent's `inbox_list` makes.
+///
+/// `async`, and deliberately **not** through [`off_the_ui_thread`]. Tauri runs a blocking command
+/// inline on the IPC handler — the GTK main loop on Linux, the WebView2 UI thread on Windows —
+/// and walking a directory there is the window not repainting while the disk is slow. The walk
+/// underneath is `tokio::fs`, which yields to the runtime rather than occupying a thread, so this
+/// belongs on the async runtime and not in the blocking pool the autostart commands need.
+///
+/// The clone out of state is for the borrow rather than the cost: `State<'_, T>` hands out a
+/// reference tied to one call, and every clone of a `Transfers` is the same wiring anyway.
+#[tauri::command]
+pub async fn inbox(
+    transfers: State<'_, Option<Transfers>>,
+) -> Result<Option<Vec<InboxEntry>>, String> {
+    let Some(transfers) = transfers.inner().clone() else {
+        return Ok(None);
+    };
+
+    transfers.inbox_list().await.map(Some).map_err(|error| error.to_string())
+}
+
 /// Everything the Settings screen needs to draw the autostart switch, read off the machine in
 /// one go.
 ///
@@ -415,6 +448,47 @@ mod tests {
             }),
             "ui/src/PeerConfirm.tsx transcribes these field names; nothing checks that at build time"
         );
+    }
+
+    #[test]
+    fn the_inbox_rows_the_tools_screen_reads_are_snake_case_and_absent_is_not_empty() {
+        // Two agreements with `ui/src/Tools.tsx`, neither of which anything checks at build time.
+        //
+        // The field names are the first, and they are the exception on this boundary.
+        // `InboxEntry` comes from the protocol stack and derives a plain `Serialize` with no
+        // `rename_all`, so the time the window renders is at `received_unix_ms` — snake_case,
+        // unlike every structure this workspace writes and serializes camelCase. A screen that
+        // reached for `receivedUnixMs` would get `undefined` and render every arrival at the
+        // epoch.
+        let entry = InboxEntry {
+            from: "kitchen-pi".into(),
+            name: "notes.txt".into(),
+            bytes: 12,
+            path: "/home/ada/.local/share/zyris/inbox/kitchen-pi/notes.txt".into(),
+            received_unix_ms: 1_757_000_000_000,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            serde_json::json!({
+                "from": "kitchen-pi",
+                "name": "notes.txt",
+                "bytes": 12,
+                "path": "/home/ada/.local/share/zyris/inbox/kitchen-pi/notes.txt",
+                "received_unix_ms": 1_757_000_000_000u64,
+            })
+        );
+
+        // The second is that `None` and an empty list do not arrive looking the same. `null` is
+        // a machine with no peer identity, where nothing can arrive at all; `[]` is an inbox that
+        // was read and is empty. The screen says a different sentence for each, and only the
+        // second one is "Nothing has arrived yet."
+        let nothing_can_arrive = serde_json::to_value(None::<Vec<InboxEntry>>).unwrap();
+        let nothing_has = serde_json::to_value(Some(Vec::<InboxEntry>::new())).unwrap();
+
+        assert_eq!(nothing_can_arrive, serde_json::json!(null));
+        assert_eq!(nothing_has, serde_json::json!([]));
+        assert_ne!(nothing_can_arrive, nothing_has);
     }
 
     #[test]
