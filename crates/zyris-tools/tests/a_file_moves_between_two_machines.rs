@@ -66,6 +66,25 @@ const ARRIVAL_DEADLINE: Duration = Duration::from_secs(20);
 // The four things this file claims
 // -------------------------------------------------------------------------------------------
 
+/// The receipt names the file that appeared — whatever spelling of it the platform hands back.
+///
+/// Not a string comparison. `zyris-transfer`'s inbox canonicalizes its root (`inbox.rs`), and on
+/// Windows that resolves an 8.3 short component and prefixes the extended-length `\\\\?\\` form, so
+/// the receipt reads `\\\\?\\C:\\Users\\runneradmin\\…` where a `PathBuf` built from
+/// `tempfile`'s directory reads `C:\\Users\\RUNNER~1\\…`. Both name one file, and that is the
+/// claim: comparing the spellings asserted something about the platform instead.
+fn assert_same_file(written: &str, landed: &std::path::Path) {
+    let from_receipt = std::fs::canonicalize(written)
+        .unwrap_or_else(|error| panic!("the receipt names {written}, which cannot be opened: {error}"));
+    let appeared = std::fs::canonicalize(landed)
+        .unwrap_or_else(|error| panic!("{} cannot be opened: {error}", landed.display()));
+
+    assert_eq!(
+        from_receipt, appeared,
+        "the receipt names a different file from the one that appeared"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_moves_between_two_machines_byte_for_byte() {
     let account = Account::new();
@@ -89,11 +108,7 @@ async fn a_file_moves_between_two_machines_byte_for_byte() {
     let landed = alpha.inbox().join("beta").join("letter.txt");
     let arrived = wait_for_file(&landed, "the file beta sent to alpha").await;
     assert_eq!(arrived, sent, "the bytes that landed are not the bytes that were sent");
-    assert_eq!(
-        receipt.written,
-        landed.display().to_string(),
-        "the receipt names a different file from the one that appeared"
-    );
+    assert_same_file(&receipt.written, &landed);
     assert_eq!(receipt.bytes, sent.len() as u64);
 }
 
@@ -146,7 +161,7 @@ async fn the_pin_still_matches_after_both_machines_are_rebuilt() {
     let landed = alpha.inbox().join("beta").join("after.txt");
     let arrived = wait_for_file(&landed, "the file sent after the restart").await;
     assert_eq!(arrived, b"after the restart");
-    assert_eq!(receipt.written, landed.display().to_string());
+    assert_same_file(&receipt.written, &landed);
 }
 
 #[tokio::test(flavor = "multi_thread")]
