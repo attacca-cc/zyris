@@ -21,13 +21,19 @@ open = { workspace = true }
 serde = { workspace = true }
 tauri = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+# `time` and `sync` are `confirm.rs`: a question waits on a `oneshot` and answers itself when the
+# deadline fires. `signal` is headless's shutdown, `rt-multi-thread` the runtime `main` builds.
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 # The wire shape of what the Settings screen reads, pinned by a test in `bridge.rs`.
 serde_json = { workspace = true }
+# `macros` for `#[tokio::test]`, which `confirm.rs` needs: every assertion there is about what a
+# waiting `async fn` does, and `test-util` is what lets the deadline test move the clock instead of
+# sitting out the real 45 seconds.
+tokio = { workspace = true, features = ["macros", "test-util"] }
 
 [build-dependencies]
 tauri-build = { workspace = true }

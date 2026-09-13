@@ -9,6 +9,13 @@
 
 mod bridge;
 mod cli;
+// **Nothing reaches this yet, and that is deliberate.** `peer_confirmer` below still answers
+// `DenyUnknown` in both arms: installing `WindowConfirmer` means an event carrying the question, a
+// command carrying the answer back, and a screen to read a fingerprint on — none of which exist
+// yet. Until they do, a confirmer that waited three quarters of a minute with nothing on the
+// screen to answer would be strictly worse than the immediate refusal that is there now.
+#[allow(dead_code)]
+mod confirm;
 mod gui;
 mod headless;
 mod tray;

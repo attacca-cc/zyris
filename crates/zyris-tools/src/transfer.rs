@@ -72,6 +72,28 @@ use zyris_transfer::{
 /// **The sending side only.** See this module's "What gates a transfer, in each direction".
 pub use zyris::p2p::fingerprint::{DenyUnknown, PeerConfirmer};
 
+/// The attribute [`PeerConfirmer`] is declared with, without which it cannot be implemented.
+///
+/// Re-exported for the same reason the trait is, and it is the half that makes the other one
+/// useful: the trait has an `async fn` in it, so upstream declares it under `#[async_trait]` and
+/// every implementation has to be written under the same attribute. Naming the trait without
+/// being able to name that macro leaves `main` no way to write a confirmer of its own except by
+/// depending on the protocol stack — which is exactly what re-exporting the trait was for.
+pub use zyris::async_trait;
+
+/// How long `file_transfer.send_to` gives the whole of one call — the file hash, the peer lookup,
+/// [`PeerConfirmer::confirm`] and the dial together — before it answers `pending` instead of
+/// finishing. Upstream's `DEFAULT_WIRE_DEADLINE`, and the value [`Transfers`] configures.
+///
+/// Re-exported because a [`PeerConfirmer`] that waits for a person has to fit inside it and has no
+/// other way to know what "inside" is. Past this point the caller's future is dropped mid-`confirm`
+/// and an answer given afterwards reaches nobody, so a confirmer whose own deadline is longer than
+/// this one has no deadline at all — it only ever ends by being cut off, which is reported to the
+/// agent as "the peer had not been reached yet" rather than as "nobody approved this".
+///
+/// Upstream's reason for 55: "Attacca cuts a node call off at 60 seconds with a `Timeout` error."
+pub use zyris_transfer::DEFAULT_WIRE_DEADLINE as WIRE_DEADLINE;
+
 /// Why loading this machine's key failed, for a caller that has to say something different about
 /// each one.
 ///
