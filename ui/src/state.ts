@@ -57,13 +57,18 @@ export type Screen = "starting" | "onboarding" | Tab;
 
 // What the window can be told. Core events arrive from the bus; `navigate` is the one thing a
 // person does that changes state, and it goes through the same reducer so there is exactly one
-// place that decides which screen is showing. `peerQuestion` carries what a command answered
-// rather than what the bus published — the question a late window fetched, or the news that the
-// one it was showing has stopped waiting.
+// place that decides which screen is showing.
+//
+// The two peer actions carry what a *command* answered rather than what the bus published, and
+// they are two rather than one on purpose. `peerQuestion` can only ever name a question, so there
+// is no way to write the call that folds in an absence; `peerQuestionEnded` is the only way to
+// clear one and it has to name which, because by the time it is dispatched the question it refers
+// to may no longer be the one on the screen. See the reducer arms.
 export type Action =
   | CoreEvent
   | { kind: "navigate"; to: Tab }
-  | { kind: "peerQuestion"; question: PeerQuestion | null };
+  | { kind: "peerQuestion"; question: PeerQuestion }
+  | { kind: "peerQuestionEnded"; id: number };
 
 // How many calls the window keeps and how many it asks the audit file for. This is a tail, not a
 // record: the whole history is the file on disk, and an unbounded list would grow for as long as
@@ -86,9 +91,9 @@ export type State = {
   // Newest first, capped at MAX_TOOL_CALLS. Only the calls this window saw live; the durable
   // tail comes from the audit file through a command.
   toolCalls: ToolCallRow[];
-  // The machine waiting to be approved, or null. There is never more than one: the core refuses
-  // a second question while one waits rather than queueing it, so that nobody is trained to click
-  // through a fingerprint they did not read.
+  // The machine waiting to be approved, or null. There is never more than one: the core refuses a
+  // second question while one waits rather than queueing it, and keeps refusing for a moment after
+  // one ends, so that nobody is trained to click through a fingerprint they did not read.
   //
   // Not a `Screen`. A question arrives while somebody is somewhere — mid-way through the Settings
   // switch, reading the audit tail — and it has to hand that screen back untouched when it is
@@ -191,10 +196,23 @@ export function reduce(state: State, action: Action): State {
         question: { id: action.id, label: action.label, fingerprint: action.fingerprint },
       };
     case "peerQuestion":
-      // What a command said, which is the authority on whether a question is still waiting.
-      // `null` ends the screen: the person answered, or nobody did in time, or the machine that
-      // asked gave up. PeerConfirm.tsx only sends that once it knows which.
+      // What a command said, which is the authority on what is waiting right now. Replaces
+      // whatever was showing, for the same reason `needsPeerApproval` does: only one question can
+      // be waiting at a time, so there is nothing to queue behind it.
       return { ...state, question: action.question };
+    case "peerQuestionEnded":
+      // **Only the question it names.** The person answered, or nobody did in time, or they
+      // closed a question that had already gone — and every one of those is decided a round trip
+      // before this arrives. `Pending::answer` empties the slot before its reply leaves the
+      // process, so a second question can be installed and its `needsPeerApproval` can reach this
+      // reducer *ahead of* the reply to the first. Clearing unconditionally would blank that
+      // second question, unmount PeerConfirm.tsx, stop the poll that would have re-surfaced it,
+      // and leave a live question holding the slot invisibly for its whole 45 seconds while
+      // somebody sat at the screen.
+      //
+      // The same guard `Pending::withdraw` applies on the Rust side, and the same one
+      // PeerConfirm.tsx's recheck applies when it decides whether to replace what it is showing.
+      return state.question?.id === action.id ? { ...state, question: null } : state;
     case "toolCall":
       return {
         ...state,

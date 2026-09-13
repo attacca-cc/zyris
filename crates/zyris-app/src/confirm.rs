@@ -30,6 +30,18 @@
 //! future is **dropped mid-`confirm`**, and an answer given afterwards has nobody left to reach.
 //! Two consequences shape everything below — [`ANSWER_DEADLINE`], and the withdrawal that happens
 //! when a `confirm` future is cancelled rather than finished.
+//!
+//! # Why a question cannot follow another straight away
+//!
+//! Refusing a second question *while one waits* is not enough on its own, and the gap it leaves is
+//! the same attack [`WindowConfirmer`] refuses to queue for, reached by retrying instead. The
+//! instant a question ends — answered, expired, or its caller cut off — the slot is free, and a
+//! sender that simply asks again lands a new label and a new fingerprint in the same place on the
+//! screen, under the same two buttons, in the moment a person is least likely to look. So the slot
+//! stays shut for [`ASK_COOL_OFF`] after every question leaves it, and the window keeps its buttons
+//! dead for a shorter beat whenever the question it is showing changes. Neither guard is the whole
+//! of it: this one decides when a replacement may exist at all, and the window's covers a click
+//! already on its way down when one does.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,6 +49,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::oneshot;
+// tokio's clock rather than `std`'s, so [`ASK_COOL_OFF`] can be tested by moving time instead of
+// by sitting out two real seconds. Outside a runtime — which is where `answer` runs, on Tauri's
+// IPC thread — it reads the same monotonic clock `std::time::Instant` does, so a process that
+// never pauses the clock cannot tell the two apart.
+use tokio::time::Instant;
 
 /// How long a question stays on the screen before it answers itself with "no".
 ///
@@ -56,6 +73,35 @@ use tokio::sync::oneshot;
 /// answered in seconds by the person who is now at the screen. An approval nobody gave costs a
 /// pin, and a pin is what every later send to that name is measured against.
 pub const ANSWER_DEADLINE: Duration = Duration::from_secs(45);
+
+/// How long the slot stays shut after a question leaves it, however it left.
+///
+/// **This is a guard against a swap, not a rate limit.** The thing it has to make impossible is a
+/// second question taking the screen while a person's hand is still on the first one: they have
+/// finished reading Q1's fingerprint, they are pressing Approve, and if Q2 can appear in that
+/// instant — same place, same two buttons, a slug the other side chose to be the same width — the
+/// click they decided on for Q1 pins a key nobody read. Refusing only *while one waits* does not
+/// cover it, because the dangerous moment begins exactly when the waiting stops.
+///
+/// **Two seconds, because that is one full recheck of the window plus room for the answer to get
+/// there.** `PeerConfirm.tsx` re-asks whether its question is still waiting once a second
+/// (`RECHECK_MS`), and replaces both buttons with a sentence the moment it learns one has ended.
+/// A cool-off longer than that poll guarantees the screen has had a whole cycle in which to stop
+/// offering an Approve button *before* anything else can be installed behind it — so the two
+/// guards overlap rather than leaving a seam between them. The window's own lockout
+/// (`SWAP_LOCKOUT_MS`, 750 ms) is the shorter backstop for the case where a swap does reach the
+/// screen anyway, and it is deliberately the smaller of the two.
+///
+/// **Nothing checks these two numbers against each other**, any more than anything checks the
+/// event name or the field names that cross the same boundary. Shortening this below `RECHECK_MS`
+/// takes the overlap away, and the only thing that would notice is somebody reading both files.
+///
+/// **What it costs is bounded and the cost is on the right side.** A legitimate second caller is
+/// refused for two seconds out of the 55 it has, is told `peer_not_confirmed`, and asks again;
+/// nothing is pinned either way. It also puts a ceiling on how often a retrying sender can make
+/// `gui::raise_the_window_for_a_peer_question` bring the window to the front, which is otherwise
+/// once per attempt for as long as it cares to keep asking.
+pub const ASK_COOL_OFF: Duration = Duration::from_secs(2);
 
 /// What the window shows: the name a person picked for the other machine, and the fingerprint to
 /// compare against what that machine displays on its own screen.
@@ -84,6 +130,20 @@ struct Waiting {
     answer: oneshot::Sender<bool>,
 }
 
+/// What the slot holds: the question waiting in it, and when the last one left.
+///
+/// The two are one value behind one lock because [`Pending::ask`] reads both to make a single
+/// decision. Kept apart they would be two locks to take in the right order, for a question that is
+/// only ever asked while the slot is already held.
+#[derive(Default)]
+struct Slot {
+    waiting: Option<Waiting>,
+    /// When a question last left this slot — answered, expired, or withdrawn — or `None` while no
+    /// question has ever been in it. Every path that empties the slot stamps this, and
+    /// [`Pending::ask`] refuses for [`ASK_COOL_OFF`] afterwards.
+    vacated: Option<Instant>,
+}
+
 /// The slot a question sits in while it waits, reachable from both sides.
 ///
 /// Cheap to clone and shared by handle: the confirmer running on a tokio worker and the window
@@ -94,11 +154,41 @@ struct Waiting {
 /// which runs when a future is *cancelled* and so cannot await anything at all.
 #[derive(Clone, Default)]
 pub struct Pending {
-    waiting: Arc<Mutex<Option<Waiting>>>,
+    slot: Arc<Mutex<Slot>>,
     /// Monotonic and never reused. Counted from 1 rather than 0, so that zero — what an
     /// uninitialised field on the other side of the wire holds — can never name a question. See
     /// [`Question::id`].
     next_id: Arc<AtomicU64>,
+}
+
+/// Why [`Pending::ask`] would not install a question.
+///
+/// Told apart rather than folded into one `None`, because the agent's side of either is a bare
+/// `peer_not_confirmed` and the log line is the only place the difference can be read. "Somebody
+/// else's question is on the screen" and "the last question ended a moment ago" call for different
+/// things from whoever is looking at the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Busy {
+    /// A question is on the screen right now, and a second one would have to queue behind it. See
+    /// [`WindowConfirmer`] for why that is refused rather than queued.
+    AnotherIsWaiting,
+    /// One left the screen less than [`ASK_COOL_OFF`] ago. See that constant.
+    OneJustEnded,
+    /// The lock is poisoned, so the slot cannot be read at all. Only reachable after a panic
+    /// somewhere else in this process; refusing is the answer that pins nothing.
+    SlotUnreadable,
+}
+
+impl Busy {
+    /// What to say in the log. Not `Display`: this is one field of a structured event rather than
+    /// a sentence, and the sentence around it is the caller's.
+    fn reason(self) -> &'static str {
+        match self {
+            Busy::AnotherIsWaiting => "another peer is already waiting to be approved",
+            Busy::OneJustEnded => "another peer's question ended a moment ago",
+            Busy::SlotUnreadable => "the question slot could not be read",
+        }
+    }
 }
 
 impl Pending {
@@ -114,7 +204,7 @@ impl Pending {
     /// is not a question, and leaving it visible would put a live-looking button in front of
     /// somebody whose click cannot land.
     pub fn question(&self) -> Option<Question> {
-        self.waiting.lock().ok()?.as_ref().map(|waiting| waiting.question.clone())
+        self.slot.lock().ok()?.waiting.as_ref().map(|waiting| waiting.question.clone())
     }
 
     /// Answers the question with `id`, and says whether that reached anyone.
@@ -131,26 +221,43 @@ impl Pending {
     /// to succeed: a caller whose future was already dropped is not "still waiting" in any sense a
     /// window should be told `true` about.
     pub fn answer(&self, id: u64, approved: bool) -> bool {
-        let Ok(mut slot) = self.waiting.lock() else {
+        let Ok(mut slot) = self.slot.lock() else {
             return false;
         };
         // Peeked before it is taken. Taking first and putting a mismatch back would be the same
         // thing on a good day and a dropped question on a panic between the two.
-        if slot.as_ref().is_none_or(|waiting| waiting.question.id != id) {
+        if slot.waiting.as_ref().is_none_or(|waiting| waiting.question.id != id) {
             return false;
         }
-        let Some(waiting) = slot.take() else {
+        let Some(waiting) = slot.waiting.take() else {
             return false;
         };
+        // Stamped whether or not the answer reaches anybody below. The cool-off is about what the
+        // *screen* just did, and a question whose caller had already gone still occupied that
+        // screen until this moment.
+        slot.vacated = Some(Instant::now());
         waiting.answer.send(approved).is_ok()
     }
 
-    /// Installs a question, or refuses to because one is already waiting. See [`WindowConfirmer`]
-    /// for why the second is refused rather than queued.
-    fn ask(&self, label: &str, fingerprint: &str) -> Option<(Question, oneshot::Receiver<bool>)> {
-        let mut slot = self.waiting.lock().ok()?;
-        if slot.is_some() {
-            return None;
+    /// Installs a question, or refuses to.
+    ///
+    /// Two refusals, and the second is the one this method exists for. A question already waiting
+    /// is refused rather than queued — see [`WindowConfirmer`] — and a question that has only just
+    /// *stopped* waiting shuts the slot for [`ASK_COOL_OFF`] afterwards, because the instant after
+    /// one ends is exactly when a replacement would be read least carefully. See that constant.
+    fn ask(
+        &self,
+        label: &str,
+        fingerprint: &str,
+    ) -> Result<(Question, oneshot::Receiver<bool>), Busy> {
+        let Ok(mut slot) = self.slot.lock() else {
+            return Err(Busy::SlotUnreadable);
+        };
+        if slot.waiting.is_some() {
+            return Err(Busy::AnotherIsWaiting);
+        }
+        if slot.vacated.is_some_and(|left| left.elapsed() < ASK_COOL_OFF) {
+            return Err(Busy::OneJustEnded);
         }
         // Inside the lock, so two callers racing here cannot both take an id and cannot both
         // believe they installed one.
@@ -161,8 +268,8 @@ impl Pending {
             fingerprint: fingerprint.to_string(),
         };
         let (answer, receiver) = oneshot::channel();
-        *slot = Some(Waiting { question: question.clone(), answer });
-        Some((question, receiver))
+        slot.waiting = Some(Waiting { question: question.clone(), answer });
+        Ok((question, receiver))
     }
 
     /// Clears the slot if — and only if — it still holds the question with `id`.
@@ -171,11 +278,16 @@ impl Pending {
     /// question may already have been answered and a *different* one asked, and clearing that one
     /// would take a live question off the screen while its caller waited out the full deadline.
     fn withdraw(&self, id: u64) {
-        let Ok(mut slot) = self.waiting.lock() else {
+        let Ok(mut slot) = self.slot.lock() else {
             return;
         };
-        if slot.as_ref().is_some_and(|waiting| waiting.question.id == id) {
-            *slot = None;
+        if slot.waiting.as_ref().is_some_and(|waiting| waiting.question.id == id) {
+            slot.waiting = None;
+            // Stamped here too, and only here: this arm is the one that actually took a question
+            // off the screen. The answered path ran the same `Drop` a moment after `answer`
+            // emptied the slot, finds no match, and so cannot push the cool-off out past the
+            // moment the person's own answer ended it.
+            slot.vacated = Some(Instant::now());
         }
     }
 }
@@ -227,8 +339,19 @@ pub type Show = Arc<dyn Fn(&Question) + Send + Sync>;
 ///
 /// **The second caller is refused, not dropped.** It gets `false` at once, which `authorize` turns
 /// into `peer_not_confirmed`; nothing is pinned, and calling again once the first question is
-/// answered asks properly. The first question is untouched — it keeps its slot and its answer
-/// still reaches its own caller.
+/// answered *and the slot has cooled off* asks properly. The first question is untouched — it
+/// keeps its slot and its answer still reaches its own caller.
+///
+/// # And the second is refused for a moment after the first ends, too
+///
+/// Refusing only while a question waits would hand back the same moment by another road. The slot
+/// is free the instant Q1 ends, so a sender that keeps calling gets its question onto the screen a
+/// millisecond later — in the same place, with the same two buttons, while a person who has
+/// finished reading Q1's fingerprint is pressing Approve. The retry reaches exactly the moment the
+/// queue was refused for. [`ASK_COOL_OFF`] shuts the slot for a beat after every question leaves
+/// it, and `PeerConfirm.tsx` keeps both buttons dead for a shorter beat whenever the question on
+/// the screen changes; the first decides whether a replacement may exist, the second catches a
+/// click already on its way down when one does.
 pub struct WindowConfirmer {
     pending: Pending,
     show: Show,
@@ -243,15 +366,20 @@ impl WindowConfirmer {
 #[zyris_tools::async_trait]
 impl zyris_tools::PeerConfirmer for WindowConfirmer {
     async fn confirm(&self, label: &str, fingerprint: &str) -> bool {
-        let Some((question, answer)) = self.pending.ask(label, fingerprint) else {
+        let (question, answer) = match self.pending.ask(label, fingerprint) {
+            Ok(installed) => installed,
             // Said out loud because the agent's side of this is a bare `peer_not_confirmed`, and
-            // "somebody else's question is on the screen" is not something it can work out.
-            tracing::warn!(
-                %label,
-                "refusing to send to an unapproved machine: another peer is already waiting to be \
-                 approved. Answer that one, then ask again"
-            );
-            return false;
+            // neither "somebody else's question is on the screen" nor "one ended a moment ago" is
+            // something it can work out.
+            Err(why) => {
+                tracing::warn!(
+                    %label,
+                    reason = why.reason(),
+                    "refusing to send to an unapproved machine: nothing was asked and nothing was \
+                     pinned. Answer whatever is on the screen, then ask again"
+                );
+                return false;
+            }
         };
 
         // Held for the rest of this function, and dropped by cancellation too. See `Withdraw`.
@@ -523,13 +651,102 @@ mod tests {
             "and cannot be approved after the fact"
         );
         // The slot is free again, which is the part that would otherwise stay broken for the rest
-        // of the process.
+        // of the process. The clock is moved past the cool-off first: a withdrawal empties the
+        // screen exactly as an answer does and shuts the slot for the same beat. That is the
+        // subject of the test below rather than of this one.
+        tokio::time::pause();
+        tokio::time::advance(ASK_COOL_OFF).await;
         let confirmer = WindowConfirmer::new(pending.clone(), recorder().0);
         let next = tokio::spawn(async move { confirmer.confirm("desktop", "EF56 7890").await });
         let after = wait_for_question(&pending).await;
         assert_ne!(after.id, question.id, "the next question is a new one");
         pending.answer(after.id, false);
         let _ = next.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_question_cannot_take_the_screen_the_instant_the_last_one_left() {
+        // The attack the cool-off exists for, and the one `a_second_question_while_one_waits_\
+        // does_not_lose_the_first` does not reach: the same sender waits for the first question to
+        // *stop* waiting and then asks again. Nothing is queued, so nothing there refuses it — the
+        // slot is free a microsecond after Approve is pressed, and a replacement lands in the same
+        // place, under the same two buttons, while a person's hand is still coming down.
+        let pending = Pending::new();
+        let (show, seen) = recorder();
+        let confirmer = Arc::new(WindowConfirmer::new(pending.clone(), show));
+
+        let first = {
+            let confirmer = confirmer.clone();
+            tokio::spawn(async move { confirmer.confirm("laptop", "AB12 CD34").await })
+        };
+        let question = wait_for_question(&pending).await;
+        assert!(pending.answer(question.id, true), "the first question is answered normally");
+        assert!(first.await.unwrap(), "and its answer reaches its own caller");
+
+        // Immediately, the way a retry loop would. The bound is the same one the queue test uses
+        // and for the same reason: the refusal takes no await at all, so anything approaching it
+        // means this waited for the cool-off rather than refusing through it.
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(1),
+            confirmer.confirm("laptop-2", "AB12 CD34"),
+        )
+        .await
+        .expect("a replacement is refused at once rather than held until the slot reopens");
+        assert!(!replacement, "and the refusal is a no, so nothing is pinned");
+        assert!(
+            pending.question().is_none(),
+            "nothing may take the screen in the instant after an answer"
+        );
+
+        // The other half, and the reason this is not only about the buttons: `show` is what
+        // publishes the event `gui::raise_the_window_for_a_peer_question` brings the window
+        // forward on. A sender that could retry freely would raise it once per attempt.
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a refused replacement must not reach a screen, or raise a window"
+        );
+
+        // And the cool-off is a beat, not a door: past it the next caller is asked properly.
+        tokio::time::advance(ASK_COOL_OFF).await;
+        let next = {
+            let confirmer = confirmer.clone();
+            tokio::spawn(async move { confirmer.confirm("desktop", "EF56 7890").await })
+        };
+        let after = wait_for_question(&pending).await;
+        assert_ne!(after.id, question.id, "the next question is a new one");
+        assert_eq!(after.label, "desktop");
+        assert!(pending.answer(after.id, false), "and it can be answered");
+        assert!(!next.await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_question_shuts_the_slot_for_the_same_beat_an_answered_one_does() {
+        // The expiry path empties the slot from inside `Withdraw::drop` rather than from `answer`,
+        // so it is a second place the stamp has to be written — and the person at the screen is in
+        // the worse position of the two: nothing they did ended the question, so they have no
+        // reason to expect the screen to change at all.
+        let pending = Pending::new();
+        let (show, seen) = recorder();
+        let confirmer = Arc::new(WindowConfirmer::new(pending.clone(), show));
+
+        let first = {
+            let confirmer = confirmer.clone();
+            tokio::spawn(async move { confirmer.confirm("laptop", "AB12 CD34").await })
+        };
+        wait_for_question(&pending).await;
+        tokio::time::advance(ANSWER_DEADLINE + Duration::from_secs(1)).await;
+        assert!(!first.await.unwrap(), "an unanswered question expires as a refusal");
+
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(1),
+            confirmer.confirm("laptop-2", "AB12 CD34"),
+        )
+        .await
+        .expect("a replacement after an expiry is refused at once too");
+        assert!(!replacement);
+        assert!(pending.question().is_none());
+        assert_eq!(seen.lock().unwrap().len(), 1, "and it never reached a screen");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -622,6 +839,26 @@ mod tests {
             stranger.fingerprint(),
             "the person was shown a fingerprint the other machine does not report for itself"
         );
+    }
+
+    #[test]
+    fn the_cool_off_covers_a_whole_recheck_of_the_window() {
+        // Why two seconds rather than a round number that felt safe. `PeerConfirm.tsx` re-asks
+        // once a second whether the question it is showing is still waiting, and that poll is the
+        // only thing that takes the Approve button away when a question ends with no answer. A
+        // cool-off shorter than it would let a replacement be installed while the screen still
+        // offered the *previous* question's buttons, which is the whole failure.
+        //
+        // The other side of this is a number in a different language that nothing can read from
+        // here; `ASK_COOL_OFF`'s own documentation says so. This asserts the half that is
+        // checkable: the margin over one poll is real rather than incidental.
+        assert!(
+            ASK_COOL_OFF >= Duration::from_millis(1000) * 2,
+            "ASK_COOL_OFF is {ASK_COOL_OFF:?}, which no longer covers a whole RECHECK_MS cycle \
+             and the round trip that answers it"
+        );
+        // And it stays far enough inside the caller's budget to be a beat rather than a refusal.
+        assert!(ASK_COOL_OFF * 4 < ANSWER_DEADLINE);
     }
 
     #[test]

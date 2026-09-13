@@ -15,6 +15,27 @@ import { fetchPendingPeer, type Action, type PeerQuestion } from "./state";
 // question is on the screen for well under a minute, a handful of times in a machine's life.
 const RECHECK_MS = 1000;
 
+// How long both answers stay dead after the question on this screen changes.
+//
+// **A click decided about one question must not be able to land on another.** A question can be
+// replaced under somebody's hand: the one they were reading ends — answered, expired, or its
+// caller gave up — and another is installed and rendered here, in the same place, with the same
+// two buttons, under a name whose length the other side chose. React reuses this component for it
+// (App.tsx renders it without a `key`), so the effect below and the new label and fingerprint
+// land on the same commit. Without this, Approve is live again in that same instant, and a person
+// mid-click on the old question finishes the click on the new one — pinning a key nobody read.
+//
+// 750 ms, from the two things it has to outlast. A person who has already decided to click
+// completes it within about 300 ms; a person who has not yet noticed the screen changed needs
+// something like 250 to 400 ms to see it and stop. Beyond that it stops buying anything and starts
+// being a dead button in front of somebody who *has* read the new fingerprint and wants to answer.
+//
+// The shorter of the two guards, and deliberately so. `ASK_COOL_OFF` in
+// crates/zyris-app/src/confirm.rs keeps the core from installing a replacement at all for two
+// seconds, which is the guard that does most of the work; this one covers the click already on its
+// way down when a swap does reach the screen. Nothing checks the two numbers against each other.
+const SWAP_LOCKOUT_MS = 750;
+
 // A rejected `invoke` carries whatever the command returned as its error. `answer_peer` returns a
 // boolean and never an error, so anything here means the bridge itself broke.
 function asMessage(error: unknown, fallback: string): string {
@@ -49,16 +70,51 @@ export function PeerConfirm({
   // would flash "no longer waiting" a moment before the screen closes on a successful approval.
   const answering = useRef(false);
   const [busy, setBusy] = useState(false);
+  // True for SWAP_LOCKOUT_MS after the question on this screen changes, including the first time
+  // it appears. Both buttons are disabled while it holds.
+  //
+  // Kept twice on purpose. The state is what the render reads, and the ref is what `answer` reads:
+  // a handler closes over the state from the render it was created in, and the one render whose
+  // value must not be trusted is the one this is guarding against. A disabled button emits no
+  // click event, so the ref is a belt to the state's braces rather than the mechanism — but the
+  // mechanism here is one `disabled` attribute away from a security bug, and this is the cheaper
+  // of the two ways to find that out.
+  const locked = useRef(true);
+  const [settling, setSettling] = useState(true);
+  // Which question the lockout above was armed for.
+  const [lockedFor, setLockedFor] = useState(question.id);
+
+  // **Everything about the previous question is dropped during the render, not from an effect.**
+  // A passive effect runs *after* the browser has painted, so a reset done there leaves one
+  // painted frame in which this screen shows the new question's name and fingerprint while still
+  // carrying the last one's state — both answers live again, or the "no longer waiting" line and
+  // its Close button sitting over a question that is very much waiting. That frame is exactly the
+  // one a click already on its way down lands in. Adjusting state during render is what React
+  // documents for a value that has to follow a prop within the same commit: it re-renders
+  // immediately, before anything reaches the DOM.
+  if (lockedFor !== question.id) {
+    setLockedFor(question.id);
+    setSettling(true);
+    setGone(false);
+    setProblem(null);
+    setBusy(false);
+    locked.current = true;
+    answering.current = false;
+  }
 
   useEffect(() => {
     // Keyed on the id, not on the question object: the same question arrives again whenever the
     // forwarder resends it, and restarting the clock on each of those would be pointless churn.
-    // A genuinely different question resets everything, which is what it should do.
     let cancelled = false;
-    answering.current = false;
-    setGone(false);
-    setProblem(null);
-    setBusy(false);
+
+    // The other end of the lockout armed during the render above: this is only what lets it go.
+    // Keyed on the question's id like everything else in this effect, so the beat runs once per
+    // question rather than once per render.
+    const lockout = setTimeout(() => {
+      if (cancelled) return;
+      locked.current = false;
+      setSettling(false);
+    }, SWAP_LOCKOUT_MS);
 
     const timer = setInterval(() => {
       if (answering.current) return;
@@ -86,12 +142,13 @@ export function PeerConfirm({
 
     return () => {
       cancelled = true;
+      clearTimeout(lockout);
       clearInterval(timer);
     };
   }, [question.id, dispatch]);
 
   function answer(approved: boolean) {
-    if (answering.current) return;
+    if (answering.current || locked.current) return;
     answering.current = true;
     setBusy(true);
     setProblem(null);
@@ -102,7 +159,13 @@ export function PeerConfirm({
         // answer arrived, and that nothing was approved as a result. It is the same ending the
         // recheck above finds, so it is shown the same way.
         if (reached) {
-          dispatch({ kind: "peerQuestion", question: null });
+          // **Named, not just cleared.** `Pending::answer` empties the slot before this reply
+          // leaves the process, so another question can be installed and announced in the gap —
+          // and its event can reach the reducer ahead of this. An unconditional clear would blank
+          // that question instead, unmount this screen, stop the poll above with it, and leave a
+          // live question holding the slot unseen until it expired. The reducer drops this on the
+          // floor unless the question it names is still the one showing.
+          dispatch({ kind: "peerQuestionEnded", id: question.id });
           return;
         }
         answering.current = false;
@@ -177,7 +240,7 @@ export function PeerConfirm({
           <button
             type="button"
             className="button button-quiet"
-            onClick={() => dispatch({ kind: "peerQuestion", question: null })}
+            onClick={() => dispatch({ kind: "peerQuestionEnded", id: question.id })}
           >
             Close
           </button>
@@ -190,7 +253,7 @@ export function PeerConfirm({
             <button
               type="button"
               className="button button-quiet"
-              disabled={busy}
+              disabled={busy || settling}
               onClick={() => answer(true)}
             >
               Approve
@@ -198,7 +261,7 @@ export function PeerConfirm({
             <button
               type="button"
               className="button button-quiet"
-              disabled={busy}
+              disabled={busy || settling}
               onClick={() => answer(false)}
             >
               Refuse

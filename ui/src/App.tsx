@@ -75,6 +75,8 @@ export function App() {
       // whenever nothing is waiting, which is almost always, and it is already the initial state
       // — so applying it would buy nothing and would cost a race: a question arriving live in the
       // gap between this call and its answer would be wiped out by an answer that predates it.
+      // `Action` now says so as well: `peerQuestion` cannot carry an absence, and the one action
+      // that clears a question has to name which one it is clearing.
       void fetchPendingPeer().then((question) => {
         if (!cancelled && question) dispatch({ kind: "peerQuestion", question });
       });

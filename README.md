@@ -78,6 +78,13 @@ machine sends there without asking from then on, and a *different* key under the
 refused outright rather than asked about a second time. Refusing pins nothing and fails that one
 send; an agent can try again, and you will be asked again.
 
+**A question cannot be replaced under your hand.** Only one machine is ever waiting to be
+approved: a second one asking while you are being asked is refused outright rather than queued
+behind you, and it stays refused for a moment after you answer, so that nothing can take the
+screen in the instant your click is landing. Both answers are also dead for the first three
+quarters of a second a question is on the screen. The whole point of a fingerprint is that
+somebody read it, and a button you can be trained to click without looking is worth nothing.
+
 **Nobody at the screen is a refusal.** The question gives up after 45 seconds, because the agent's
 call is cut off at 55 and an answer after that reaches nobody. `--headless` refuses every unknown
 peer without asking at all — there is nobody to ask, and nobody being around is not consent.
