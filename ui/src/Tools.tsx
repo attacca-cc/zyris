@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MAX_TOOL_CALLS, type Action, type State, type ToolCallRow } from "./state";
 
 // What the `announced_tools` command answers with: `zyris_tools::Announcement`, serialized
@@ -163,20 +165,47 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
     // What has arrived. Read through the capability by the command, so this is the same answer
     // an agent's `inbox_list` gets rather than a second walk of the same directories.
     //
-    // Mount only, like the audit tail, and for a plainer reason: nothing publishes an event when
-    // a file lands. An incoming transfer does not come through the Attacca connection at all —
-    // it is not a tool call, it is not behind the pause switch, and the event bus never hears of
-    // it — so there is nothing to subscribe to and this list is a snapshot from when the screen
-    // was opened. Leaving and coming back to the tab reads it again.
-    void invoke<InboxEntry[] | null>("inbox")
-      .then((arrived) => {
-        if (!cancelled) setInbox(arrived);
+    // **Read again every time the window comes back to the front**, which is the Settings screen's
+    // idiom one file over and is here for a sharper version of the same reason. Nothing publishes
+    // an event when a file lands: an incoming transfer does not come through the Attacca
+    // connection at all — it is not a tool call, it is not behind the pause switch, and the event
+    // bus never hears of it — so there is nothing to subscribe to and every read is a snapshot.
+    //
+    // A read on mount alone would be a snapshot from the *start of the run*, not from the last
+    // visit to this tab. Closing the window hides it rather than tearing it down (`gui.rs`
+    // prevents the close), so this component is never unmounted and its state outlives every
+    // close and reopen: "Nothing has arrived yet." could sit there for days with files landing
+    // underneath it. Focus is what covers that, because coming back to look is exactly the moment
+    // somebody wants an answer that is current.
+    function readInbox() {
+      void invoke<InboxEntry[] | null>("inbox")
+        .then((arrived) => {
+          if (cancelled) return;
+          setInbox(arrived);
+          // An answer is an answer: a message from a read that failed earlier has stopped being
+          // true, and leaving it above a fresh list reads as a broken screen.
+          setInboxProblem(null);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          // Deliberately not `setInbox([])`. An unreadable inbox is not an empty one, and the
+          // sentence below about nothing having arrived is reserved for a read that succeeded.
+          setInboxProblem(asMessage(error, "Could not read what has arrived."));
+        });
+    }
+
+    readInbox();
+
+    let unlisten: UnlistenFn | undefined;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        // Only on the way in, like Settings. This fires on blur as well, and walking the inbox as
+        // somebody clicks away spends a directory read on an answer nobody sees.
+        if (focused) readInbox();
       })
-      .catch((error: unknown) => {
-        if (cancelled) return;
-        // Deliberately not `setInbox([])`. An unreadable inbox is not an empty one, and the
-        // sentence below about nothing having arrived is reserved for a read that succeeded.
-        setInboxProblem(asMessage(error, "Could not read what has arrived."));
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
       });
 
     // Where the switch is. The `paused` event is the usual way this arrives, but the core's
@@ -194,9 +223,12 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
 
     return () => {
       cancelled = true;
+      unlisten?.();
     };
-    // Mount only, deliberately. The stored tail is a snapshot to sit beneath the live calls, and
-    // re-reading it whenever a call arrived would move the boundary out from under those calls.
+    // Runs once, deliberately, and it is the *effect* that is mount-only rather than every read
+    // inside it. The stored tail is a snapshot to sit beneath the live calls, and re-reading it
+    // whenever a call arrived would move the boundary out from under those calls. The inbox is the
+    // opposite case and re-reads itself on focus, above.
   }, []);
 
   // `indexOf` by identity: `reduce` prepends and keeps the existing row objects, so the mark
