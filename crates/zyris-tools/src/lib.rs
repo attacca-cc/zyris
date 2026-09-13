@@ -4,8 +4,10 @@ pub mod announce;
 pub mod audit;
 pub mod gate;
 pub mod guarded;
+pub mod transfer;
 
 pub use announce::{Announced, Announcement, Tools, default_root};
 pub use audit::{AuditLog, Entry, Outcome};
 pub use gate::Gate;
 pub use guarded::Guarded;
+pub use transfer::{DenyUnknown, KeyError, PeerConfirmer, Peering, Transfers};

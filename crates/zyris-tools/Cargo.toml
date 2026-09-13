@@ -7,18 +7,27 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { workspace = true }
+# `rt` alone: the only thing this crate asks of tokio is `spawn`, for the peer accept loop. The
+# runtime itself is `main`'s to build.
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 zyris = { workspace = true }
+zyris-attacca = { workspace = true }
 zyris-fs = { workspace = true }
 zyris-input = { workspace = true }
 zyris-runtime = { path = "../zyris-runtime" }
 zyris-screen = { workspace = true }
 zyris-terminal = { workspace = true }
+zyris-transfer = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+# `rt-multi-thread` on top of the two the other tests need: binding an iroh endpoint starts
+# background tasks that keep running while the test awaits something else, and a current-thread
+# runtime only drives them at an await point of its own.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
