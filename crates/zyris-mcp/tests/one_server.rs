@@ -238,3 +238,52 @@ async fn a_server_that_dies_is_noticed() {
         "expected TransportClosed on the second call, got {again:#}"
     );
 }
+
+#[tokio::test]
+async fn a_server_that_is_answering_reports_itself_running() {
+    let server = probe(&[]).await;
+
+    assert!(server.is_running(), "a server that just started is running");
+    server.call("echo", json!({ "text": "still here" })).await.expect("`echo` answers");
+    assert!(server.is_running(), "a server that just answered is running");
+
+    // Idle is not dead. Nothing is asked of it for a moment, which is the ordinary state of an
+    // MCP server on a desktop, and a check that reported death for quiet would withdraw every
+    // server on the machine within a second of it announcing them.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(server.is_running(), "an idle server is not a dead one");
+}
+
+#[tokio::test]
+async fn a_server_that_falls_over_with_nobody_asking_is_noticed_without_a_call() {
+    // **The death the whole health check exists for**, and a different one from
+    // `a_server_that_dies_is_noticed` above. There, `die` interrupts a call, so any client that
+    // asked was told. Here the process falls over while the machine is idle — a crash, a parent
+    // that killed it, an out-of-memory — and nothing asks it anything before or after. A signal
+    // that only arrives on the next call cannot see this, and this is exactly the state that
+    // leaves a capability announced with nothing behind it.
+    let server = probe(&["--exit-after", "200"]).await;
+    assert!(server.is_running(), "it is running before it falls over");
+
+    let start = std::time::Instant::now();
+    let mut noticed = None;
+    while start.elapsed() < Duration::from_secs(10) {
+        if !server.is_running() {
+            noticed = Some(start.elapsed());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let noticed = noticed.expect("a server that fell over has to stop reporting itself running");
+
+    // Not merely eventually. Withdrawal is driven off this, and a signal that arrived seconds
+    // after the process did leave a capability announced over nothing for that long.
+    assert!(
+        noticed < Duration::from_secs(1),
+        "the death took {noticed:?} to show up, with the process gone after 200ms"
+    );
+
+    // And it stays noticed rather than flickering back.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!server.is_running());
+}

@@ -169,6 +169,18 @@ fn bad_schema_tools() -> Value {
 
 fn main() {
     let mute = std::env::args().any(|arg| arg == "--mute");
+    // `--exit-after <milliseconds>`: fall over on a timer, with nobody having called anything.
+    //
+    // A different death from the `die` tool's, and the one a health check has to notice. `die`
+    // is noticed by the call it interrupts — any client that asks gets told — whereas a server
+    // that crashes while the machine is idle is invisible until somebody happens to call it,
+    // which is exactly the state that leaves a capability announced with nothing behind it.
+    if let Some(after) = argument("--exit-after").and_then(|value| value.parse::<u64>().ok()) {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(after));
+            std::process::exit(9);
+        });
+    }
     let odd = std::env::args().any(|arg| arg == "--odd-tools");
     let bad_schema = std::env::args().any(|arg| arg == "--bad-schema");
 
@@ -303,4 +315,15 @@ fn ok(id: Value, result: Value) -> Value {
 
 fn error(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// The value that followed `flag` on the command line, if it was there.
+fn argument(flag: &str) -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            return args.next();
+        }
+    }
+    None
 }

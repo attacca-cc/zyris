@@ -89,6 +89,45 @@ pub enum CoreEvent {
     /// method for why this one must stay out of the catch-up slot.
     #[serde(rename_all = "camelCase")]
     ToolCall { capability: String, tool: String, detail: String, outcome: String },
+    /// A local MCP server started being announced, or stopped.
+    ///
+    /// **This event exists because an agent cannot be told the difference and a person has to
+    /// be.** On the wire there is one answer for a server somebody turned off and one whose
+    /// process fell over: the capability is not announced. That is the right answer for an agent
+    /// — there is nothing it could do differently — but it is the wrong answer for whoever is
+    /// looking at the window, who can restart the one that crashed and should not be told to
+    /// restart the one they switched off themselves. [`McpServerChange`] is that distinction, and
+    /// this is the only place the core makes it.
+    ///
+    /// Published through [`EventBus::publish_transient`], for the same reason a tool call is.
+    /// The catch-up slot holds one event and is the window's only way to learn what it missed
+    /// while its listener was being registered; a server change sitting in it would displace the
+    /// `Connected` a window needs to leave its starting screen. A window that opened afterwards
+    /// asks for the whole list instead, exactly as it does for the switch and for a waiting peer
+    /// question.
+    #[serde(rename_all = "camelCase")]
+    McpServer { server: String, change: McpServerChange },
+}
+
+/// What happened to one local MCP server, in the terms a person can act on.
+///
+/// Serialized internally tagged on `change`, so the UI switches on one field and every variant's
+/// own detail travels beside it rather than in a free-text sentence nothing can read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "change", rename_all = "camelCase")]
+pub enum McpServerChange {
+    /// It is running, and its tools are announced. Published when a server joins a node that is
+    /// already up — not at startup, where the whole announcement goes out at once and there is
+    /// nothing to report a change against.
+    #[serde(rename_all = "camelCase")]
+    Announced { capability: String, tools: usize },
+    /// Withdrawn because somebody asked for it. The process was stopped on purpose.
+    Disabled,
+    /// Withdrawn because the process is gone and nobody asked for that. **The one a person is
+    /// meant to act on**, and the whole reason this enum is not a boolean.
+    Died,
+    /// Asked to start, and would not. `reason` is what to check, in the words the failure used.
+    Failed { reason: String },
 }
 
 /// A fan-out channel the core owns and everything else borrows.
@@ -391,5 +430,71 @@ mod tests {
             Some(connected),
             "a transient publish must leave the catch-up slot holding the last real state"
         );
+    }
+
+    #[test]
+    fn a_server_change_pins_its_wire_shape() {
+        // The one event whose whole purpose is a distinction, so the distinction is what is
+        // pinned: four shapes, each naming itself, and the two withdrawals spelled differently.
+        let announced = serde_json::to_string(&CoreEvent::McpServer {
+            server: "desk-notes".into(),
+            change: McpServerChange::Announced { capability: "mcp_desk-notes".into(), tools: 4 },
+        })
+        .unwrap();
+        assert_eq!(
+            announced,
+            r#"{"kind":"mcpServer","server":"desk-notes","change":{"change":"announced","capability":"mcp_desk-notes","tools":4}}"#
+        );
+
+        let disabled = serde_json::to_string(&CoreEvent::McpServer {
+            server: "desk-notes".into(),
+            change: McpServerChange::Disabled,
+        })
+        .unwrap();
+        let died = serde_json::to_string(&CoreEvent::McpServer {
+            server: "desk-notes".into(),
+            change: McpServerChange::Died,
+        })
+        .unwrap();
+        assert_eq!(
+            disabled,
+            r#"{"kind":"mcpServer","server":"desk-notes","change":{"change":"disabled"}}"#
+        );
+        assert_eq!(
+            died,
+            r#"{"kind":"mcpServer","server":"desk-notes","change":{"change":"died"}}"#
+        );
+        assert_ne!(
+            disabled, died,
+            "a server a person turned off and one that fell over must not look the same"
+        );
+
+        let failed = serde_json::to_string(&CoreEvent::McpServer {
+            server: "desk-notes".into(),
+            change: McpServerChange::Failed { reason: "no such command".into() },
+        })
+        .unwrap();
+        assert_eq!(
+            failed,
+            r#"{"kind":"mcpServer","server":"desk-notes","change":{"change":"failed","reason":"no such command"}}"#
+        );
+    }
+
+    #[test]
+    fn a_server_change_stays_out_of_the_catch_up_slot() {
+        // The slot holds one event, and it is what a window folds in to learn which screen to
+        // render. A server that fell over an hour ago sitting in it would push out the
+        // `Connected` a window needs to leave its starting screen. The catch-up route for this is
+        // the command that lists the servers.
+        let bus = EventBus::new(8);
+        let connected = CoreEvent::Connected { node_id: "n_1".into(), node_name: "laptop".into() };
+        bus.publish(connected.clone());
+
+        bus.publish_transient(CoreEvent::McpServer {
+            server: "desk-notes".into(),
+            change: McpServerChange::Died,
+        });
+
+        assert_eq!(bus.latest(), Some(connected));
     }
 }

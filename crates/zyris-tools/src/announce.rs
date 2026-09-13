@@ -287,6 +287,20 @@ impl Tools {
         }
     }
 
+    /// Put an already-shared capability behind this machine's switch and log.
+    ///
+    /// The way a promoted MCP server joins the announcement **after** startup — see
+    /// [`crate::servers`]. It exists so that path cannot diverge from this one: a server enabled
+    /// from the window has to go behind the same gate and write to the same file as one that was
+    /// running when the node was built, and a second call site that built its own [`Guarded`]
+    /// would be a second place for the audit log's MCP rule to be forgotten.
+    pub(crate) fn guard_shared(
+        &self,
+        capability: Arc<dyn ServeCapability>,
+    ) -> Arc<dyn ServeCapability> {
+        self.guard(Shared(capability))
+    }
+
     /// The one place a capability is put behind the switch and the log, so a capability added
     /// later cannot quietly be announced without them.
     fn guard<C: ServeCapability>(&self, inner: C) -> Arc<dyn ServeCapability> {

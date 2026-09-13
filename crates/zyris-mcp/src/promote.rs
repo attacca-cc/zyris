@@ -146,7 +146,7 @@ pub const PROMOTED_VERSION: u32 = 1;
 ///
 /// Exists so that dropping is never silent. Nothing on the wire can carry it — an agent sees a
 /// tool list, not a list of absences — so it is kept for the log and for the window.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DroppedTool {
     /// The name the server used.
     pub name: String,
@@ -213,6 +213,26 @@ impl Promoted {
     /// The server underneath, so whatever owns this can still ask after its health.
     pub fn server(&self) -> &Arc<Server> {
         &self.server
+    }
+
+    /// Whether the process behind this capability is still there.
+    ///
+    /// Named here as well as on [`Server`] because this is the side a supervisor holds: what gets
+    /// withdrawn is a capability, and having to reach through `server()` to ask whether to
+    /// withdraw it would put the shape of the plumbing into the decision. See
+    /// [`Server::is_running`] for what it costs to ask and what it does not cover.
+    pub fn is_running(&self) -> bool {
+        self.server.is_running()
+    }
+
+    /// Stop the server behind this capability. See [`Server::stop`] for why this is asked for
+    /// rather than left to the last handle being dropped.
+    ///
+    /// **Withdraw the capability first.** This one only stops a process; a capability still
+    /// announced in front of a stopped one answers every call with
+    /// [`ErrorCode::CapabilityUnavailable`], which is true and is not what anybody wanted.
+    pub fn stop(&self) {
+        self.server.stop();
     }
 
     /// The tools the server offered that this machine did not announce, and why.

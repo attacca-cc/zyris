@@ -22,7 +22,7 @@ pub mod config;
 pub mod promote;
 pub mod server;
 
-pub use config::{CONFIG_FILE, Config, ServerConfig};
+pub use config::{CONFIG_FILE, Config, ServerConfig, Started};
 pub use promote::{CAPABILITY_PREFIX, DroppedTool, PROMOTED_VERSION, Promoted, capability_name};
 pub use rmcp::model::Tool;
 pub use server::{STARTUP_DEADLINE, Server, is_disconnected};

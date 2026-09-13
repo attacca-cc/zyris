@@ -20,7 +20,9 @@ use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
-use zyris_tools::{Announcement, AuditLog, Entry, Gate, InboxEntry, Tools, Transfers};
+use zyris_tools::{
+    Announcement, AuditLog, Entry, Gate, InboxEntry, ServerView, Servers, Tools, Transfers,
+};
 
 use crate::confirm::{Pending, Question};
 
@@ -273,6 +275,42 @@ pub async fn inbox(
 #[tauri::command]
 pub fn peer_fingerprint(transfers: State<'_, Option<Transfers>>) -> Option<String> {
     transfers.inner().as_ref().map(|transfers| transfers.peering().fingerprint())
+}
+
+/// Every configured MCP server and what it is doing right now.
+///
+/// **The catch-up half of [`CoreEvent::McpServer`]**, exactly as [`is_paused`] is to `Paused`: the
+/// event reaches a window that was already listening, and this reaches one that was not. It is a
+/// command rather than state on the bus for the reason the module doc gives — a server change is
+/// published transiently, so the bus's one-slot catch-up value never holds one.
+///
+/// It is also the only place the two withdrawals stay apart. An agent on the other end cannot tell
+/// a server somebody turned off from one whose process fell over, and does not need to; the person
+/// reading this can and does, through `ServerState`.
+///
+/// Read straight through the supervisor, which is the same one the core watches with — so what
+/// this lists is what the node announces, not a second reader's idea of it.
+#[tauri::command]
+pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<Vec<ServerView>, String> {
+    Ok(servers.list().await)
+}
+
+/// Turn one MCP server on or off, and answer with what that left it as.
+///
+/// It returns the server's state afterwards rather than `()`, for the same reason
+/// [`apply_autostart`] does: a screen that renders its own request is a screen that can be wrong.
+/// Turning one on is the case that proves it — the command may not be there any more, and the
+/// answer is a `Failed` carrying the reason rather than the `Running` the click asked for.
+///
+/// **Nothing is written to the server list on disk.** Whether this run's switch outlives the run
+/// is a question about the file, and the file is Task 5's; `zyris_tools::servers` records why.
+#[tauri::command]
+pub async fn set_mcp_server_enabled(
+    name: String,
+    enabled: bool,
+    servers: State<'_, Servers>,
+) -> Result<ServerView, String> {
+    servers.set_enabled(&name, enabled).await
 }
 
 /// Everything the Settings screen needs to draw the autostart switch, read off the machine in

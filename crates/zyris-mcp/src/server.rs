@@ -22,16 +22,39 @@
 //! `rmcp`'s service loop reads the child's stdout; when that returns end-of-file the loop quits
 //! with `QuitReason::Closed` and drops every pending responder. The call that was in flight
 //! therefore fails with [`ServiceError::TransportClosed`], and so does every call made
-//! afterwards. There is no notification and no callback — **a death is noticed by asking**, and
-//! [`is_disconnected`] is how the answer is told apart from a tool that merely refused.
+//! afterwards. There is no notification and no callback, so [`is_disconnected`] is how the answer
+//! to a call is told apart from a tool that merely refused.
 //!
-//! **`rmcp`'s own `RunningService::is_closed()` is not a health check, and no wrapper around it
-//! can be.** Measured against a server that exits mid-call (2026-09-14): it stays `false` before
-//! the death, immediately after it, half a second later, and after a second call has already
-//! failed with `TransportClosed`. It reports *cancellation* — this end deciding to stop — and the
-//! service loop does not cancel its token when the child goes away. A liveness flag built on it
-//! would say "running" about a process that is not there, which is exactly the state the window
-//! has to be able to show.
+//! **But a death does not have to be waited for until somebody calls.** [`Server::is_running`] is
+//! a read of a flag, and it is the one `rmcp` primitive that tells the truth here. The two
+//! neighbouring candidates do not, and the difference between the three is not guessable from
+//! their names:
+//!
+//! | asked of a child that has exited | answer |
+//! |---|---|
+//! | `RunningService::is_closed()` | `false` — **wrong**, and stays wrong |
+//! | `RunningService::waiting()` | correct, but consumes the service |
+//! | `Peer::is_transport_closed()` | `true`, within milliseconds, with nothing asked of the server |
+//!
+//! **`is_closed()` is not a health check, and no wrapper around it can be.** Measured against a
+//! server that exits mid-call (2026-09-14): it stays `false` before the death, immediately after
+//! it, half a second later, and after a second call has already failed with `TransportClosed`. It
+//! reports *cancellation* — this end deciding to stop — and the service loop does not cancel its
+//! token when the child goes away.
+//!
+//! **`is_transport_closed()` is**, and it was measured the same way rather than read (2026-09-14,
+//! against `rmcp` 3.3.0). It is `Peer`'s, reached through `RunningService`'s `Deref`, so it takes
+//! `&self` and works through an `Arc` — nothing is consumed and nothing is spawned. Its body is
+//! `self.tx.is_closed()`: `tx` sends into the service loop, the loop owns the receiver, and the
+//! loop drops it on the way out of `QuitReason::Closed`. Four readings around a child that exits
+//! during a call: `false` before, `true` immediately after, `true` half a second later, `true`
+//! after a second call had already failed. And the reading that actually matters, because a
+//! signal only a call can produce is no use to a health check — a child that exits on a timer
+//! with **no call ever made**, before or after: `true` about six milliseconds later.
+//!
+//! The five-second drain `rmcp` puts between `QuitReason::Closed` and the end of its loop does
+//! not delay this for a client: the drain waits on handler tasks, and a client that serves `()`
+//! has none.
 //!
 //! The child itself is reaped without anybody asking: dropping the [`Server`] cancels the
 //! service, which closes the transport, which waits briefly for the child and then kills it.
@@ -130,6 +153,48 @@ impl Server {
     /// This server's name in the configuration.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the process behind this is still there.
+    ///
+    /// **Cheap enough to ask on a timer, and that is the whole point.** It reads a flag on the
+    /// channel into `rmcp`'s service loop: no round trip, nothing written to the child, nothing
+    /// spawned, no `&mut self` and no consuming. Asking it a thousand times costs what asking it
+    /// once costs, so whoever polls it is choosing how stale an announcement may be and nothing
+    /// else.
+    ///
+    /// `true` for a server that is merely idle — see [the module documentation](self#death) for
+    /// the four readings this was established with, and for why `rmcp`'s own `is_closed()` cannot
+    /// answer this.
+    ///
+    /// **It reports the transport, which is the process.** A server that is alive but wedged —
+    /// answering nothing, or answering nonsense — still reads as running, and correctly: it is
+    /// there, and withdrawing it would say it is not. What that costs is that the only way to
+    /// learn a server has stopped being *useful* is still to call it.
+    pub fn is_running(&self) -> bool {
+        !self.service.is_transport_closed()
+    }
+
+    /// Stop the server: end the session, close the pipes, and reap the child.
+    ///
+    /// **Explicit, rather than left to the last [`Arc`](std::sync::Arc) going away.** Dropping a
+    /// `Server` does reap the child — `ChildWithCleanup::drop` kills it — but a `Server` that has
+    /// been promoted and announced is held in several places at once, and "the process stops when
+    /// the last of them lets go" is a rule that quietly stops being true the moment anything keeps
+    /// a handle. What that looks like is a server somebody switched off that is still running: no
+    /// longer announced, so nothing can reach it and nothing lists it, and still there.
+    ///
+    /// Takes `&self`, which is what makes it usable through an `Arc` at all. `rmcp`'s
+    /// `RunningService::cancellation_token()` hands out a token from `&self`; cancelling it ends
+    /// the service loop, which closes the transport, which closes the child's stdin and waits
+    /// briefly for it to exit before killing it.
+    ///
+    /// Returns immediately. The teardown runs on `rmcp`'s own task, so
+    /// [`is_running`](Self::is_running) goes false a moment later rather than on this line.
+    /// Calling it on a server that has already died is harmless and does nothing.
+    pub fn stop(&self) {
+        tracing::info!(server = self.name, "stopping an MCP server");
+        self.service.cancellation_token().cancel();
     }
 
     /// What the server said it has, as it said it.
@@ -240,6 +305,62 @@ fn kind_of(value: &Value) -> &'static str {
 mod tests {
     use super::*;
 
+    /// Where `cargo test` leaves the `probe_server` example.
+    ///
+    /// Derived rather than handed over: there is no `CARGO_BIN_EXE_` for an example. Asserted,
+    /// because a missing file here has one cause — a target selection narrow enough that cargo
+    /// skipped examples — and saying so beats a spawn failure that reads like broken code.
+    fn probe_server() -> String {
+        let mut directory = std::env::current_exe().expect("the test binary knows its own path");
+        directory.pop();
+        if directory.ends_with("deps") {
+            directory.pop();
+        }
+        let path = directory
+            .join("examples")
+            .join(format!("probe_server{}", std::env::consts::EXE_SUFFIX));
+        assert!(
+            path.is_file(),
+            "the `probe_server` example is not at {}; `cargo test -p zyris-mcp` builds it",
+            path.display()
+        );
+        path.into_os_string().into_string().expect("a path cargo produced is UTF-8")
+    }
+
+    /// The four readings [`Server::is_running`] is built on, taken here rather than trusted.
+    ///
+    /// The sibling of `rmcp_does_not_report_a_dead_child_as_closed` below and deliberately the
+    /// same shape: the two differ only in which `rmcp` primitive they ask, and that is the whole
+    /// finding. If a later `rmcp` moves either answer, exactly one of these two fails and names
+    /// what changed.
+    #[tokio::test]
+    async fn a_dead_child_stops_reporting_itself_as_running() {
+        let server = Server::spawn("probe", &probe_server(), &[])
+            .await
+            .expect("the probe server starts");
+
+        // Before.
+        assert!(server.is_running(), "a server that just started is running");
+
+        let died = server
+            .call("die", serde_json::json!({}))
+            .await
+            .expect_err("the server exits during the call");
+        assert!(
+            died.downcast_ref::<ServiceError>().is_some_and(is_disconnected),
+            "expected a disconnection, got {died:#}"
+        );
+
+        // Immediately after, half a second later, and after a second call has already failed.
+        // All three, because `is_closed()` passes the first of them and fails the rest, and a
+        // test that took only one reading would not have caught it.
+        assert!(!server.is_running(), "immediately after the death");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!server.is_running(), "half a second after the death");
+        let _ = server.call("echo", serde_json::json!({ "text": "anybody" })).await;
+        assert!(!server.is_running(), "after a second call had already failed");
+    }
+
     /// The claim in this module's "Death" section, kept honest.
     ///
     /// It lives here rather than in `tests/one_server.rs` because it is about a private field: no
@@ -248,21 +369,7 @@ mod tests {
     /// becomes possible and the module doc has to change.
     #[tokio::test]
     async fn rmcp_does_not_report_a_dead_child_as_closed() {
-        let mut directory = std::env::current_exe().expect("the test binary knows its own path");
-        directory.pop();
-        if directory.ends_with("deps") {
-            directory.pop();
-        }
-        let probe = directory
-            .join("examples")
-            .join(format!("probe_server{}", std::env::consts::EXE_SUFFIX));
-        assert!(
-            probe.is_file(),
-            "the `probe_server` example is not at {}; `cargo test -p zyris-mcp` builds it",
-            probe.display()
-        );
-
-        let server = Server::spawn("probe", &probe.to_string_lossy(), &[])
+        let server = Server::spawn("probe", &probe_server(), &[])
             .await
             .expect("the probe server starts");
 

@@ -11,7 +11,7 @@
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus};
-use zyris_tools::{Tools, Transfers};
+use zyris_tools::{Servers, Tools, Transfers};
 
 use crate::cli::Mode;
 use crate::confirm::Pending;
@@ -29,6 +29,10 @@ pub fn run(
     // handle on the same wiring the announced capability is, not a second one — see `main`. `None`
     // is a machine with no peer identity, which announces no `file_transfer` and has no inbox.
     transfers: Option<Transfers>,
+    // The local MCP servers: what each is doing, and the switch that turns one on or off. The
+    // same supervisor the core is already watching for deaths with, so the window and the node
+    // cannot disagree about which servers are announced.
+    servers: Servers,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -110,6 +114,10 @@ pub fn run(
         // registered: a machine with no peer identity has no inbox to read, which the window has
         // to say differently from an inbox nothing has arrived in. See `bridge::inbox`.
         .manage(transfers)
+        // The MCP servers. A handle on the same supervisor the death watcher holds, for the same
+        // reason the gate is: a window that read a second copy would show servers this node is
+        // not announcing, and its switch would move something nothing else could see.
+        .manage(servers)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -123,6 +131,8 @@ pub fn run(
             bridge::answer_peer,
             bridge::inbox,
             bridge::peer_fingerprint,
+            bridge::mcp_servers,
+            bridge::set_mcp_server_enabled,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:

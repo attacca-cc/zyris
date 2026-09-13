@@ -67,7 +67,7 @@ async fn a_configured_server_is_started_and_promoted() {
     let dir = tempfile::tempdir().unwrap();
     write_config(dir.path(), vec![entry("desk-notes", &probe_server())]);
 
-    let promoted = config::start(dir.path()).await;
+    let promoted = config::start(dir.path()).await.running;
 
     assert_eq!(names(&promoted), ["mcp_desk-notes"]);
     // Started and actually asked, rather than announced from the file: the tool names could only
@@ -91,7 +91,7 @@ async fn arguments_reach_the_command() {
     server["args"] = serde_json::json!(["--odd-tools"]);
     write_config(dir.path(), vec![server]);
 
-    let promoted = config::start(dir.path()).await;
+    let promoted = config::start(dir.path()).await.running;
 
     let tools: Vec<String> = promoted[0]
         .descriptor()
@@ -113,7 +113,7 @@ async fn a_server_that_will_not_start_is_absent_and_the_others_are_not() {
         vec![entry("gone", MISSING_COMMAND), entry("desk-notes", &probe_server())],
     );
 
-    let promoted = config::start(dir.path()).await;
+    let promoted = config::start(dir.path()).await.running;
 
     assert_eq!(names(&promoted), ["mcp_desk-notes"]);
 }
@@ -127,7 +127,7 @@ async fn a_server_whose_name_will_not_route_is_absent_and_the_others_are_not() {
     let probe = probe_server();
     write_config(dir.path(), vec![entry("my.notes", &probe), entry("desk-notes", &probe)]);
 
-    let promoted = config::start(dir.path()).await;
+    let promoted = config::start(dir.path()).await.running;
 
     assert_eq!(names(&promoted), ["mcp_desk-notes"]);
 }
@@ -145,7 +145,7 @@ async fn two_servers_with_one_name_start_nothing_at_all() {
         vec![entry("notes", &probe), entry("notes", &probe), entry("calendar", &probe)],
     );
 
-    let promoted = config::start(dir.path()).await;
+    let promoted = config::start(dir.path()).await.running;
 
     assert!(promoted.is_empty(), "an ambiguous file was half-obeyed: {:?}", names(&promoted));
 }
@@ -155,7 +155,7 @@ async fn a_config_that_is_not_json_starts_nothing_and_does_not_fail() {
     let dir = tempfile::tempdir().unwrap();
     write_text(dir.path(), "{ \"servers\": [ oh dear");
 
-    assert!(config::start(dir.path()).await.is_empty());
+    assert!(config::start(dir.path()).await.running.is_empty());
 }
 
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn a_config_of_the_wrong_shape_starts_nothing_and_does_not_fail() {
     let dir = tempfile::tempdir().unwrap();
     write_text(dir.path(), r#"{ "servers": { "notes": { "command": "x" } } }"#);
 
-    assert!(config::start(dir.path()).await.is_empty());
+    assert!(config::start(dir.path()).await.running.is_empty());
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn no_config_file_at_all_is_no_servers_and_no_failure() {
     // The ordinary state of a machine nobody has configured, which is most of them.
     let dir = tempfile::tempdir().unwrap();
 
-    assert!(config::start(dir.path()).await.is_empty());
+    assert!(config::start(dir.path()).await.running.is_empty());
 }
 
 #[tokio::test]
@@ -183,5 +183,5 @@ async fn a_disabled_server_is_not_started() {
     server["enabled"] = serde_json::json!(false);
     write_config(dir.path(), vec![server]);
 
-    assert!(config::start(dir.path()).await.is_empty());
+    assert!(config::start(dir.path()).await.running.is_empty());
 }

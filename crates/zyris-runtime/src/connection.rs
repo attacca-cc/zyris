@@ -12,6 +12,7 @@ use std::sync::Arc;
 use zyris::enroll::{EnrollRequest, Progress};
 use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RegisterError, RotateError};
 
+use crate::announcement::LiveCapabilities;
 use crate::event::{CoreEvent, EventBus};
 use crate::identity::Identity;
 
@@ -74,10 +75,12 @@ pub struct Connector {
     /// [`EventBus`]. Both directions at once is a cycle cargo refuses. `main` owns the `Tools`
     /// and hands over what it built.
     ///
-    /// `Arc`s because `dial` takes `&self` and `run` calls it up to twice — once with the stored
-    /// token, once more after recovering from a dead one — so the same capabilities have to be
-    /// available to a second node without the first having consumed them.
-    capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
+    /// A [`LiveCapabilities`] rather than a plain `Vec`, because the announcement changes while
+    /// the node is running — a server enabled from the window, one a person turned off, one that
+    /// fell over — and because `run` dials up to twice, so the second node has to be built from
+    /// whatever the list says *then* rather than from what it said at startup. It is shared, so
+    /// whoever else holds a clone is changing this node's announcement and not a copy of it.
+    capabilities: LiveCapabilities,
     /// What this node does on each connection it establishes, beyond reporting it. See
     /// [`ConnectHook`].
     connect_hook: Option<ConnectHook>,
@@ -90,7 +93,7 @@ impl Connector {
             bus,
             server: zyris::DEFAULT_SERVER_URL.to_string(),
             ever_connected: Arc::new(AtomicBool::new(false)),
-            capabilities: Vec::new(),
+            capabilities: LiveCapabilities::default(),
             connect_hook: None,
         }
     }
@@ -102,10 +105,13 @@ impl Connector {
 
     /// What this node offers an agent on the other end. A connector with none is a legitimate
     /// node: it connects, and announces nothing.
-    pub fn with_capabilities(
-        mut self,
-        capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
-    ) -> Connector {
+    ///
+    /// **Takes the changeable handle rather than a list**, and there is deliberately no second
+    /// setter that takes a list. What this node announces is one thing, it can change while the
+    /// node is running, and two ways of saying it would be two things to keep in step — with the
+    /// stale one winning at the next dial, which is the failure that would be hardest to see.
+    /// The caller keeps a clone; see [`LiveCapabilities`].
+    pub fn with_capabilities(mut self, capabilities: LiveCapabilities) -> Connector {
         self.capabilities = capabilities;
         self
     }
@@ -171,28 +177,18 @@ impl Connector {
         let name = zyris::machine_name().unwrap_or_else(|| "zyris".to_string());
         self.bus.publish(CoreEvent::Connecting);
 
-        let mut builder = Node::builder()
-            .name(name.as_str())
-            .kind(NodeKind::Desktop)
-            // `Ok(link)` below only means the link is running, not that a connection is up —
-            // `Node::connect` returns it even when the first dial merely failed and is retrying
-            // in the background. This hook is what actually fires per established connection,
-            // the first one and every reconnect, which is the only place `node_id` is real.
-            .on_connect(Connector::per_connection(
-                self.bus.clone(),
-                name.clone(),
-                self.ever_connected.clone(),
-                self.connect_hook.clone(),
-            ));
-
-        // Cloned rather than moved: `run` dials a second time after recovering from a dead
-        // token, and that node has to announce the same capabilities. The `Arc`s are what make
-        // that free, and what keeps both nodes' `Guarded`s sharing one gate and one log.
-        for capability in &self.capabilities {
-            builder = builder.capability_arc(capability.clone());
-        }
-
-        let node = match builder.build() {
+        // **Built through the announcement rather than from a list this function read.** The two
+        // things that have to happen together are building the node and handing
+        // [`LiveCapabilities`] the handle it will re-announce through, and doing them as two
+        // steps leaves a window in which a change goes into neither node — see
+        // [`LiveCapabilities::install`]. This is also what makes the *second* dial announce what
+        // is true now rather than what was true at startup: `run` builds a whole new node after
+        // recovering from a dead token, and whatever was enabled, disabled or withdrawn in
+        // between is in the list this reads.
+        //
+        // The capabilities are cloned rather than moved, which is what keeps both nodes'
+        // `Guarded`s sharing one gate and one log.
+        let node = match self.node(&name).await {
             Ok(node) => node,
             Err(error) => {
                 self.bus.publish(CoreEvent::Disconnected {
@@ -242,6 +238,47 @@ impl Connector {
                 DialEnd::Stopped
             }
         }
+    }
+
+    /// The node this connector dials with, announcing whatever is announced at this moment.
+    ///
+    /// Separate from [`Connector::dial`] so a test can build one without a server to dial: what is
+    /// worth asserting here is that the node announces what the announcement says, and that needs
+    /// no network at all.
+    ///
+    /// **Built through [`LiveCapabilities::install`] rather than from a list read beforehand.**
+    /// The two things that must happen together are building the node and handing the announcement
+    /// the handle it re-announces through; as two steps there is a window in which a change lands
+    /// in neither — see that method. It is also what makes the *second* dial announce what is true
+    /// now rather than what was true at startup: `run` builds a whole new node after recovering
+    /// from a dead token, and whatever was enabled, disabled or withdrawn in between is in the list
+    /// this reads.
+    ///
+    /// The capabilities are cloned rather than moved, which is what keeps both nodes' `Guarded`s
+    /// sharing one gate and one log.
+    async fn node(&self, name: &str) -> zyris::Result<Node> {
+        self.capabilities
+            .install(|capabilities| {
+                let mut builder = Node::builder()
+                    .name(name)
+                    .kind(NodeKind::Desktop)
+                    // `Ok(link)` in `dial` only means the link is running, not that a connection
+                    // is up — `Node::connect` returns it even when the first dial merely failed
+                    // and is retrying in the background. This hook is what actually fires per
+                    // established connection, the first one and every reconnect, which is the
+                    // only place `node_id` is real.
+                    .on_connect(Connector::per_connection(
+                        self.bus.clone(),
+                        name.to_string(),
+                        self.ever_connected.clone(),
+                        self.connect_hook.clone(),
+                    ));
+                for capability in capabilities {
+                    builder = builder.capability_arc(capability.clone());
+                }
+                builder.build()
+            })
+            .await
     }
 
     /// The single closure a node's `on_connect` slot holds, built here rather than inline in
@@ -1023,5 +1060,56 @@ mod tests {
             }
             other => panic!("expected SetupFailed, not a fresh enrolment prompt; got {other:?}"),
         }
+    }
+
+    /// What a node is actually built to announce.
+    ///
+    /// Everything else about `dial` needs a server; this half does not, and it is the half a
+    /// mistake would be silent in. A builder that forgot to carry the capabilities over produces
+    /// a node that connects perfectly and offers an agent nothing, and the only symptom is an
+    /// empty tool list on somebody else's screen.
+    #[tokio::test]
+    async fn the_node_announces_what_the_announcement_says() {
+        struct Nothing(&'static str);
+        #[zyris::async_trait]
+        impl zyris::ServeCapability for Nothing {
+            fn descriptor(&self) -> zyris::CapabilityDescriptor {
+                zyris::CapabilityDescriptor {
+                    name: self.0.to_string(),
+                    version: 1,
+                    tools: Vec::new(),
+                }
+            }
+            async fn dispatch(&self, _: zyris::IncomingCall) -> zyris::Result<zyris::Outgoing> {
+                zyris::encode_response(&())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let live = LiveCapabilities::new(vec![
+            Arc::new(Nothing("terminal")) as Arc<dyn zyris::ServeCapability>,
+            Arc::new(Nothing("mcp_notes")),
+        ]);
+        let connector =
+            Connector::new(identity, EventBus::new(16)).with_capabilities(live.clone());
+
+        let node = connector.node("this-machine").await.expect("the node builds");
+        assert_eq!(
+            node.capabilities().descriptors().into_iter().map(|d| d.name).collect::<Vec<_>>(),
+            ["terminal", "mcp_notes"]
+        );
+
+        // And a second node, the one `run` builds after recovering from a dead token, announces
+        // what is true *then* rather than what was true when the first one was built.
+        assert!(live.remove("mcp_notes").await);
+        live.add(Arc::new(Nothing("mcp_calendar"))).await.expect("a name nothing else uses");
+        let second = connector.node("this-machine").await.expect("the second node builds");
+        assert_eq!(
+            second.capabilities().descriptors().into_iter().map(|d| d.name).collect::<Vec<_>>(),
+            ["terminal", "mcp_calendar"]
+        );
     }
 }

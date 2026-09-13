@@ -185,7 +185,26 @@ impl Config {
     }
 }
 
-/// Read the configured servers, start them, and hand back the ones that are running.
+/// What [`start`] found on disk and what it managed to run.
+///
+/// **Both halves, because they answer different questions.** `running` is what gets announced;
+/// `config` is what a person wrote, and it is the only way anything downstream can know that an
+/// entry exists at all — a server the file disables, or one that would not start, is absent from
+/// `running` and indistinguishable there from a server nobody ever configured. Whatever supervises
+/// these afterwards has to be able to tell those apart.
+///
+/// A file that could not be read gives [`Default`]: no entries and nothing running. That is the
+/// same answer as a machine with no file at all, which is deliberate here — the difference is
+/// already logged by `start`, loudly, and nothing downstream can act on it differently.
+#[derive(Debug, Default)]
+pub struct Started {
+    /// The file, as it was read, disabled entries included.
+    pub config: Config,
+    /// The servers that are running, in the order the file lists them.
+    pub running: Vec<Arc<Promoted>>,
+}
+
+/// Read the configured servers, start them, and hand back the file and the ones that are running.
 ///
 /// **This cannot fail**, by design: every way it can go wrong is logged and costs only what it
 /// has to. See [the module documentation](self#what-a-bad-file-costs) for which failures cost the
@@ -198,7 +217,7 @@ impl Config {
 /// wrote and the order the window will list. The cost is named: a server that starts and never
 /// speaks holds this up for [`crate::STARTUP_DEADLINE`], and several of them hold it up for that
 /// many multiples. The deadline is what keeps that bounded.
-pub async fn start(data_dir: &Path) -> Vec<Arc<Promoted>> {
+pub async fn start(data_dir: &Path) -> Started {
     let config = match Config::read(data_dir) {
         Ok(config) => config,
         // `error!`, unlike a machine with no display server or no network: this file exists only
@@ -211,14 +230,14 @@ pub async fn start(data_dir: &Path) -> Vec<Arc<Promoted>> {
                  their tools are announced; everything else on this machine is unaffected. Fix \
                  the file and restart Zyris."
             );
-            return Vec::new();
+            return Started::default();
         }
     };
 
-    let mut promoted = Vec::new();
+    let mut running = Vec::new();
     for server in config.enabled() {
-        match promote_one(server).await {
-            Ok(one) => promoted.push(Arc::new(one)),
+        match start_one(server).await {
+            Ok(one) => running.push(Arc::new(one)),
             Err(error) => tracing::error!(
                 server = server.name,
                 command = server.command,
@@ -234,7 +253,7 @@ pub async fn start(data_dir: &Path) -> Vec<Arc<Promoted>> {
             ),
         }
     }
-    promoted
+    Started { config, running }
 }
 
 /// One entry, from a line in a file to a capability.
@@ -243,7 +262,7 @@ pub async fn start(data_dir: &Path) -> Vec<Arc<Promoted>> {
 /// announced whatever it does — `capability.tool` splits at the first dot, so every call to it
 /// would be addressed to `mcp_my`, which nothing announced — and starting a process only to drop
 /// it is a side effect nobody asked for on the way to an error that was knowable without it.
-async fn promote_one(config: &ServerConfig) -> anyhow::Result<Promoted> {
+pub async fn start_one(config: &ServerConfig) -> anyhow::Result<Promoted> {
     capability_name(&config.name)?;
     let server = Server::spawn(&config.name, &config.command, &config.args).await?;
     Promoted::new(Arc::new(server))
@@ -440,7 +459,7 @@ mod tests {
         // This error is the whole of what the log line above carries, and that line is all a
         // person gets: a machine with four servers on it and one of them silent is not a puzzle
         // anybody can solve from "an MCP server did not start".
-        let error = promote_one(&entry("desk-notes", MISSING_COMMAND))
+        let error = start_one(&entry("desk-notes", MISSING_COMMAND))
             .await
             .expect_err("this command is not on any machine");
 
@@ -455,7 +474,7 @@ mod tests {
         // an error that was knowable without it. The command here is one that does not exist, so
         // an implementation that spawned first would fail with *its* name in the message instead
         // — which is what the second assertion is watching for.
-        let error = promote_one(&entry("my.notes", MISSING_COMMAND))
+        let error = start_one(&entry("my.notes", MISSING_COMMAND))
             .await
             .expect_err("a dot makes a capability nothing can address");
 

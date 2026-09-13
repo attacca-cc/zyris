@@ -4,7 +4,7 @@
 //! `gui.rs` calls — so nothing that matters can live only in one runtime's copy-pasted code.
 
 use zyris_runtime::connection::Connector;
-use zyris_runtime::{lifecycle, CoreEvent, EventBus};
+use zyris_runtime::{lifecycle, CoreEvent, EventBus, McpServerChange};
 
 /// Runs until interrupted. Ctrl-C is this program's decision, not the core's.
 pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
@@ -72,6 +72,20 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
                     "a machine is waiting to be approved, but a headless run has nobody to ask; \
                      the send will be refused"
                 ),
+                // **`warn!` for a death and `info!` for the rest**, because on this path the log
+                // *is* the window. A headless run has nobody to show a red badge to, and a
+                // capability that stopped being announced because somebody else's process fell
+                // over is the one thing here that a person would want to go and look at. The
+                // other three are ordinary: two of them somebody asked for, and a server that
+                // will not start has already said so at startup.
+                CoreEvent::McpServer { server, change: McpServerChange::Died } => tracing::warn!(
+                    %server,
+                    "an MCP server's process is gone and its tools are no longer announced; \
+                     nobody asked for this"
+                ),
+                CoreEvent::McpServer { server, change } => {
+                    tracing::info!(%server, ?change, "an MCP server changed")
+                }
                 CoreEvent::Started | CoreEvent::ShuttingDown => {}
             }
         }

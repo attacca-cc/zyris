@@ -167,7 +167,22 @@ fn main() -> anyhow::Result<()> {
     // configured and announce them to a development server, and the other way round. That is why
     // `zyris_mcp::Config::path` takes a directory rather than finding one — the decision about
     // what this instance is belongs on this line, with the others.
-    let promoted = runtime.block_on(zyris_mcp::config::start(&data));
+    //
+    // **Still before the window, and still one after another**, now that a server can join an
+    // announcement that is already live. Letting them start in the background and announce
+    // themselves as they came up would take the worst case — several misconfigured servers, ten
+    // seconds each — off the startup path, and it was weighed rather than skipped. Three things
+    // decided against it. `zyris.announce` is full replacement, so a node that grows capabilities
+    // after connecting announces twice, and an agent that read the first one saw a machine with no
+    // MCP tools and may already have acted on it; blocking is what makes the first announcement
+    // the complete one. `Tools::announced()` is a snapshot taken once, on purpose, so that the
+    // window reports what the node was given rather than a fresh look — servers arriving later
+    // would make it permanently incomplete, and a screen that understates what this machine hands
+    // out is worse than a slow start. And the delay is paid only by servers that are *broken*: a
+    // server that works answers `initialize` in well under a second, and the ten is the ceiling
+    // for one that never speaks at all.
+    let started = runtime.block_on(zyris_mcp::config::start(&data));
+    let promoted = started.running.clone();
 
     // Built here, once, for the same reason the connector is: the switch has to stop tools with
     // the window closed exactly as it does with it open, and a `Tools` per runtime would be two
@@ -211,8 +226,22 @@ fn main() -> anyhow::Result<()> {
         "tools are announced: what ran is written here, and a relative path starts at the root"
     );
 
+    // **The one handle on what this node announces**, and the reason it is built here rather than
+    // inside the connector: the connector is not the only thing that changes it. A server a person
+    // enables, one they turn off, and one whose process falls over all reach the same list, and
+    // `run` builds a fresh node after recovering from a dead token — so a list captured at the
+    // first build would have the second node announcing whatever was true at startup.
+    let live = zyris_runtime::LiveCapabilities::new(capabilities);
+
+    // What keeps that list honest about the MCP servers: a window's switch on one side, and a
+    // process that died on the other. Built in **both** modes and watched in both — a headless
+    // node is exactly the one nobody is looking at, and a capability announced over a process
+    // that is gone is worse there than anywhere.
+    let servers = zyris_tools::Servers::new(&tools, live.clone(), bus.clone(), started);
+    runtime.spawn(servers.clone().watch());
+
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
-        .with_capabilities(capabilities);
+        .with_capabilities(live);
 
     // The window's handle on file transfer, taken before the hook below consumes the value.
     //
@@ -260,6 +289,10 @@ fn main() -> anyhow::Result<()> {
             // What the Tools screen lists the inbox from, and the only reason the window has any
             // handle on transfer at all.
             window_transfers,
+            // The MCP servers, so the window can list them and move their switches. A clone of
+            // the same supervisor the watcher above is running, not a second one: two would be
+            // two opinions about which server died.
+            servers,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether
