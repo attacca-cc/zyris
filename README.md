@@ -71,12 +71,17 @@ on your account.
 
 *Sending* is gated on a pin, and that is the one you are asked about. The first time this machine
 sends to a name, the window comes up with the fingerprint of the key answering to that name and
-waits for you. Compare it against what the other machine says about itself — Zyris writes its own
-fingerprint to its log when it starts, on the line reading `peer identity ready` — and approve
-only if the two match character for character. Approving pins that key under that name: this
-machine sends there without asking from then on, and a *different* key under the same name is
-refused outright rather than asked about a second time. Refusing pins nothing and fails that one
-send; an agent can try again, and you will be asked again.
+waits for you. Compare it against what the other machine says about itself — open Zyris on that
+machine and read its Status screen, under **This computer's fingerprint** — and approve only if
+the two match character for character. Approving pins that key under that name: this machine sends
+there without asking from then on, and a *different* key under the same name is refused outright
+rather than asked about a second time. Refusing pins nothing and fails that one send; an agent can
+try again, and you will be asked again.
+
+A machine running `--headless` has no window to read that off. Every Zyris writes the same value
+to its log when it starts, on the line reading `peer identity ready`, so on a headless machine
+that is where you look. It is not worth relying on anywhere else: Zyris logs to standard output,
+and a copy started by the autostart entry has no console for that output to reach.
 
 **A question cannot be replaced under your hand.** Only one machine is ever waiting to be
 approved: a second one asking while you are being asked is refused outright rather than queued

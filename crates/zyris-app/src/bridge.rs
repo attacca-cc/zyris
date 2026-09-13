@@ -254,6 +254,27 @@ pub async fn inbox(
     transfers.inbox_list().await.map(Some).map_err(|error| error.to_string())
 }
 
+/// This machine's own peer fingerprint, or `None` when it has no peer identity.
+///
+/// **The other half of [`pending_peer`], and the window had no way to show it.** The approval
+/// screen tells a person to compare eight groups of four against what the *other* machine reports
+/// for itself, and until this command existed the only place that value appeared was a
+/// `tracing::info!` line at startup — which on an autostarted Windows node goes to a stdout nobody
+/// is attached to. Following the instruction dead-ended, and a person who cannot find the other
+/// side of a comparison approves blind, which is the one thing this whole module argues against.
+///
+/// Computed once at `Peering::bind` and held, so this is a clone of a `String` rather than a walk
+/// of anything. It cannot fail and it never changes while the process runs: the same key means the
+/// same fingerprint, which is the property `Peering` exists for.
+///
+/// `None` is the machine with no peer identity — the same one [`inbox`] answers `Ok(None)` for,
+/// and for the same reason: there is no key, `file_transfer` is not announced, and an empty string
+/// would read as a fingerprint made of nothing.
+#[tauri::command]
+pub fn peer_fingerprint(transfers: State<'_, Option<Transfers>>) -> Option<String> {
+    transfers.inner().as_ref().map(|transfers| transfers.peering().fingerprint())
+}
+
 /// Everything the Settings screen needs to draw the autostart switch, read off the machine in
 /// one go.
 ///

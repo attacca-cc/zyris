@@ -122,6 +122,7 @@ pub fn run(
             bridge::pending_peer,
             bridge::answer_peer,
             bridge::inbox,
+            bridge::peer_fingerprint,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:

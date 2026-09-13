@@ -205,9 +205,17 @@ export function PeerConfirm({
             spaces. `white-space: pre-wrap` keeps them, and wrapping happens only at the spaces,
             so a group is never split across lines and selecting the value copies it whole. */}
         <p className="fingerprint">{question.fingerprint}</p>
+        {/* It has to name somewhere a person can actually get to. This used to point at a log
+            line, which is where the value is written — and on an installed, autostarted node
+            there is no console attached to read it on, so following the instruction dead-ended
+            and the only way left was to approve blind. The Status screen shows the same string
+            through the `peer_fingerprint` command. */}
         <p className="muted note">
-          Check it group by group against the fingerprint {name} reports for itself. Zyris writes
-          its own when it starts, on the line that reads{" "}
+          Check it group by group against the fingerprint {name} reports for itself. Open Zyris on
+          that machine and read it off its Status screen, under{" "}
+          <span className="mono">This computer&rsquo;s fingerprint</span>. A machine running{" "}
+          <span className="mono">--headless</span> has no window, and writes the same value to its
+          log at startup on the line that reads{" "}
           <span className="mono">peer identity ready</span>. If the two differ anywhere, refuse.
         </p>
       </section>
