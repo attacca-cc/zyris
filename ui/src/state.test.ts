@@ -53,3 +53,53 @@ describe("peerQuestionEnded", () => {
     expect(reduce(state, { kind: "peerQuestionEnded", id: FIRST.id }).screen).toBe("tools");
   });
 });
+
+describe("mcpServer", () => {
+  it("carries what happened and to which server", () => {
+    const after = reduce(initialState, {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "died" },
+    });
+
+    expect(after.mcpChange).toEqual({ server: "desk-notes", change: { change: "died" } });
+  });
+
+  it("replaces rather than accumulating, and does not move anybody off their screen", () => {
+    // A server dying is not a reason to take somebody off the tab they are reading — the same rule
+    // `connecting` and `disconnected` follow. And the MCP screen re-reads the whole list from the
+    // command when this changes, so there is nothing to queue here: only the fact that something
+    // moved has to survive.
+    const state = { ...initialState, screen: "settings" as const };
+
+    const first = reduce(state, {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "disabled" },
+    });
+    const second = reduce(first, {
+      kind: "mcpServer",
+      server: "calendar",
+      change: { change: "announced", capability: "mcp_calendar", tools: 3 },
+    });
+
+    expect(second.screen).toBe("settings");
+    expect(second.mcpChange).toEqual({
+      server: "calendar",
+      change: { change: "announced", capability: "mcp_calendar", tools: 3 },
+    });
+  });
+
+  it("leaves the same state applying the same event twice", () => {
+    // The rule every arm here follows, because App.tsx's catch-up can hand the reducer an event
+    // that was also delivered live. A server change is published transiently and so is never in
+    // the one-slot value that catch-up reads, but the arm is written to tolerate it anyway.
+    const event = {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "failed" as const, reason: "no such file" },
+    } as const;
+
+    expect(reduce(reduce(initialState, event), event)).toEqual(reduce(initialState, event));
+  });
+});

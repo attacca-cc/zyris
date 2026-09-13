@@ -187,21 +187,32 @@ impl Config {
 
 /// What [`start`] found on disk and what it managed to run.
 ///
-/// **Both halves, because they answer different questions.** `running` is what gets announced;
-/// `config` is what a person wrote, and it is the only way anything downstream can know that an
-/// entry exists at all — a server the file disables, or one that would not start, is absent from
-/// `running` and indistinguishable there from a server nobody ever configured. Whatever supervises
-/// these afterwards has to be able to tell those apart.
+/// **Four things, because they answer four different questions.** `running` is what gets
+/// announced; `config` is what a person wrote, and it is the only way anything downstream can know
+/// that an entry exists at all — a server the file disables, or one that would not start, is
+/// absent from `running` and indistinguishable there from a server nobody ever configured.
+/// `problem` is the file itself having failed, and `path` is where to go and fix it.
 ///
-/// A file that could not be read gives [`Default`]: no entries and nothing running. That is the
-/// same answer as a machine with no file at all, which is deliberate here — the difference is
-/// already logged by `start`, loudly, and nothing downstream can act on it differently.
-#[derive(Debug, Default)]
+/// **`problem` exists because "the list could not be read" and "there is no list" are two
+/// different sentences, and this used to answer both with [`Default`].** That was defensible while
+/// the only reader was a log line — `start` says which it was, loudly, and nothing downstream
+/// *could* act on it differently. The window can. A screen handed an empty list for an unreadable
+/// file tells somebody who wrote one that they have no MCP servers configured, which is the same
+/// confident false negative the audit tail and the inbox each shipped once. So the reason travels
+/// with the answer, and the log line stays exactly as it was.
+#[derive(Debug)]
 pub struct Started {
-    /// The file, as it was read, disabled entries included.
+    /// Where the list was read from, whether or not it could be. Carried rather than derived a
+    /// second time, so a screen naming the file and an error naming the file cannot name two
+    /// different ones.
+    pub path: PathBuf,
+    /// The file, as it was read, disabled entries included. Empty whenever `problem` is set.
     pub config: Config,
     /// The servers that are running, in the order the file lists them.
     pub running: Vec<Arc<Promoted>>,
+    /// Why the list could not be read, in the words the failure used, or `None` when it was read
+    /// — which includes the ordinary machine that has no such file at all.
+    pub problem: Option<String>,
 }
 
 /// Read the configured servers, start them, and hand back the file and the ones that are running.
@@ -218,19 +229,28 @@ pub struct Started {
 /// speaks holds this up for [`crate::STARTUP_DEADLINE`], and several of them hold it up for that
 /// many multiples. The deadline is what keeps that bounded.
 pub async fn start(data_dir: &Path) -> Started {
+    let path = Config::path(data_dir);
     let config = match Config::read(data_dir) {
         Ok(config) => config,
         // `error!`, unlike a machine with no display server or no network: this file exists only
         // because somebody wrote it, so a file that cannot be read is always a mistake somebody
         // can fix, and nothing about it is the ordinary state of an ordinary machine.
         Err(error) => {
+            // The same string in both places, so what the window shows and what the log says are
+            // one sentence rather than two renderings of one error that can drift apart.
+            let problem = format!("{error:#}");
             tracing::error!(
-                error = format!("{error:#}"),
+                error = problem,
                 "the MCP server list could not be read, so no MCP server is started and none of \
                  their tools are announced; everything else on this machine is unaffected. Fix \
                  the file and restart Zyris."
             );
-            return Started::default();
+            return Started {
+                path,
+                config: Config::default(),
+                running: Vec::new(),
+                problem: Some(problem),
+            };
         }
     };
 
@@ -253,7 +273,7 @@ pub async fn start(data_dir: &Path) -> Started {
             ),
         }
     }
-    Started { config, running }
+    Started { path, config, running, problem: None }
 }
 
 /// One entry, from a line in a file to a capability.
@@ -484,6 +504,33 @@ mod tests {
             !message.contains(MISSING_COMMAND),
             "the command was run before the name was checked: {message}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_list_that_could_not_be_read_is_not_the_same_answer_as_no_list() {
+        // **The distinction the window renders.** Both cases start nothing, so for a long while
+        // they were one answer; a screen that folds them together tells somebody who wrote a file
+        // with a typo in it that this machine has no MCP servers configured, and they go looking
+        // for the file they are already looking at.
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::write(Config::path(broken.path()), "servers: notes").unwrap();
+
+        let started = start(broken.path()).await;
+
+        assert!(started.config.servers.is_empty());
+        assert!(started.running.is_empty());
+        let problem = started.problem.expect("a file that will not parse is a problem");
+        // What to open, in the reason itself: the log line this shares its wording with is the
+        // only other place it is said, and on an autostarted machine nobody is reading that.
+        assert!(problem.contains(CONFIG_FILE), "the reason has to name the file: {problem}");
+        assert_eq!(started.path, Config::path(broken.path()));
+
+        // And the ordinary machine, which is every machine until somebody configures one.
+        let none = tempfile::tempdir().unwrap();
+        let started = start(none.path()).await;
+
+        assert_eq!(started.problem, None, "a machine with no file has nothing wrong with it");
+        assert_eq!(started.path, Config::path(none.path()));
     }
 
     #[test]

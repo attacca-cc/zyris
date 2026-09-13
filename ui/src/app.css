@@ -213,6 +213,37 @@ section { margin-bottom: 2rem; }
 .badge-refused { border-color: var(--warn); color: var(--warn); }
 .badge-failed { border-color: var(--problem); color: var(--problem); }
 
+/* An MCP server's state. Named apart from the three above even where the colour is the same: an
+   audit line's outcome and a server's state are different facts, and one set of names for both
+   would make a rename on either side silently repaint the other.
+
+   The three that are not running are three colours because they are three different situations —
+   a switch somebody moved, a process that fell over, and one that never started. The words on the
+   badge say which; the colour only has to keep them from being scanned as one thing. */
+.badge-on { border-color: var(--on); color: var(--on); }
+.badge-off { border-color: var(--off); color: var(--muted); }
+.badge-down { border-color: var(--problem); color: var(--problem); }
+
+/* The server list's shape, for a machine that has none. `pre-wrap` rather than `pre`: a long
+   argument would otherwise be the one thing on this screen that scrolls sideways. */
+.snippet {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.9rem;
+  margin: 0.6rem 0;
+  overflow-wrap: anywhere;
+  padding: 0.6rem 0.8rem;
+  white-space: pre-wrap;
+}
+
+/* Tools a server offered that this machine did not announce. Indented under the server rather
+   than bulleted beside its own tools, because these are absences and must not read as a second
+   list of things an agent can call. */
+.dropped { list-style: none; margin: 0.15rem 0 0; padding: 0; }
+.dropped li { margin-top: 0.15rem; }
+
 /* The fingerprint a person compares against another machine's screen.
    `pre-wrap` keeps the string exactly as the core rendered it — eight groups of four uppercase
    hex digits, single spaces — and, with the default `overflow-wrap`, the only place a line can

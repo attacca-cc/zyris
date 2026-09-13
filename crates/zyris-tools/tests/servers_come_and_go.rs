@@ -113,7 +113,15 @@ impl Machine {
             &tools,
             live.clone(),
             bus.clone(),
-            Started { config: Config { servers: entries }, running: running.clone() },
+            Started {
+                // A file that was read, in a directory this test owns. `problem` is `None`
+                // because these entries came from somewhere readable; the case where it is not is
+                // `zyris-mcp`'s to prove, and what it costs here is only what the window says.
+                path: zyris_mcp::Config::path(log.path()),
+                config: Config { servers: entries },
+                running: running.clone(),
+                problem: None,
+            },
         );
 
         let builtin = live

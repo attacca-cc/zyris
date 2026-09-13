@@ -120,6 +120,31 @@ pub struct ServerView {
     pub dropped: Vec<DroppedTool>,
 }
 
+/// Everything a window's MCP screen lists, in one answer.
+///
+/// **Three answers live in here and only one of them is a list.** `problem` set is a server list
+/// that could not be read; `problem` clear with an empty `servers` is a machine nobody has
+/// configured. Both run no servers, so for a long while they were one answer — and a screen handed
+/// an empty list for an unreadable file tells the person who wrote that file that they have
+/// configured nothing, which sends them looking for the file they are already looking at.
+///
+/// `path` travels with them rather than being spelled out by whatever renders this, because it is
+/// the *instance's*: a `--server` run keeps its own list, and a path written into the window would
+/// name the production one from a development window.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerList {
+    /// The file this run reads its servers from, named so a person can go and edit it. Read once,
+    /// at startup; nothing writes it.
+    pub path: String,
+    /// Why that file could not be read, or `None` — which includes the ordinary machine that has
+    /// no such file at all.
+    pub problem: Option<String>,
+    /// Every configured server, in the order the file lists them. Empty is a real answer, and it
+    /// means nobody has configured one.
+    pub servers: Vec<ServerView>,
+}
+
 /// The MCP servers this run owns.
 ///
 /// Clone it freely; every clone supervises the same servers. `main` keeps one for the window's
@@ -128,6 +153,16 @@ pub struct ServerView {
 pub struct Servers(Arc<Inner>);
 
 struct Inner {
+    /// Where the server list is, so anything asking a person to edit it can name it. Read once at
+    /// startup and never again: see [`Servers::set_enabled`] for why nothing here writes it.
+    path: std::path::PathBuf,
+    /// Why the server list could not be read, when it could not.
+    ///
+    /// **Carried so that an empty list is never the answer to a broken file.** Both start nothing,
+    /// and to this type they look identical — the difference exists only in
+    /// [`zyris_mcp::Started`], and it is the difference between "you have configured no servers"
+    /// and "the file you configured them in has a typo in it".
+    problem: Option<String>,
     /// What this machine puts in front of a capability. Held rather than the pieces, because a
     /// server that joined mid-session has to go behind the very same switch and log as one that
     /// was there at startup — see [`Tools::guard_shared`].
@@ -163,7 +198,7 @@ impl Servers {
     /// is not running is [`ServerState::Failed`]; the reason it failed was logged by
     /// [`zyris_mcp::config::start`] where it happened, and nothing carries it here yet.
     pub fn new(tools: &Tools, live: LiveCapabilities, bus: EventBus, started: Started) -> Servers {
-        let Started { config, running } = started;
+        let Started { path, config, running, problem } = started;
         let entries = config
             .servers
             .into_iter()
@@ -188,7 +223,14 @@ impl Servers {
             })
             .collect();
 
-        Servers(Arc::new(Inner { tools: tools.clone(), live, bus, entries: Mutex::new(entries) }))
+        Servers(Arc::new(Inner {
+            path,
+            problem,
+            tools: tools.clone(),
+            live,
+            bus,
+            entries: Mutex::new(entries),
+        }))
     }
 
     /// Every configured server and what it is doing, in the order the file lists them.
@@ -196,11 +238,44 @@ impl Servers {
         self.0.entries.lock().await.iter().map(Entry::view).collect()
     }
 
+    /// The same list with the two things a screen needs in order to say why it is empty.
+    ///
+    /// **Assembled here rather than by the window's command**, so the one place that knows whether
+    /// the file was readable is the one place that says so. `problem` is fixed for the life of the
+    /// run — the file is read once, at startup — so a screen showing it is showing why there is
+    /// nothing to show, not a condition that might clear on its own.
+    pub async fn view(&self) -> ServerList {
+        ServerList {
+            path: self.0.path.display().to_string(),
+            problem: self.0.problem.clone(),
+            servers: self.list().await,
+        }
+    }
+
     /// Turn one server on or off, and re-announce.
     ///
-    /// **Nothing is written to disk.** The file is what this machine starts from, and a switch
-    /// that edited it would mean a person could not tell a server they turned off for the
-    /// afternoon from one they removed. Task 5 owns whatever writing there is to do.
+    /// **Nothing is written to disk, and that is now a decision rather than a gap.** The switch
+    /// lasts as long as this run; the file is what the next one starts from. Three things decided
+    /// it, and the window says so in as many words rather than letting a person find out at the
+    /// next restart:
+    ///
+    /// - **The file is read once, at startup, and never again.** A write-back would serialize the
+    ///   snapshot taken then over whatever the file says now — so a server somebody added by hand
+    ///   at ten o'clock would be erased by a click at five past, on a row that had nothing to do
+    ///   with it. Making that safe means re-reading, merging and deciding what to do about a file
+    ///   that has since become invalid, which is a great deal of machinery to hang off a switch.
+    /// - **The file is a person's document.** Nothing in Zyris writes it. `ServerConfig` derives
+    ///   `Serialize`, so a rewrite would lose no *field* — but it would replace their key order,
+    ///   their indentation and their grouping with `serde_json`'s, and write `"enabled": true`
+    ///   onto every entry that had been content with the default.
+    /// - **"Off for now" is a real thing to want**, and it is the one a window is good at:
+    ///   stopping a server that is misbehaving, without editing anything, and getting it back by
+    ///   restarting Zyris. "Off until I say otherwise" is a real thing to want too, and it already
+    ///   has an answer — `"enabled": false` in the file — which the window points at.
+    ///
+    /// The trap this avoids is the reverse one, and it is worth naming: a switch that *silently*
+    /// forgets is a screen that lied. What makes this defensible is entirely in the copy, so
+    /// `ui/src/Mcp.tsx` says which run the switch lasts for and names the file that outlives it.
     ///
     /// Asking for the state it is already in is not an error and does nothing — a second click on
     /// a button that was never redrawn is not a fresh instruction.
@@ -371,5 +446,202 @@ impl Entry {
 impl std::fmt::Debug for Servers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Servers").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A supervisor over the entries a file listed, none of them running.
+    fn listing(servers: Vec<ServerConfig>) -> Servers {
+        let tools = Tools::new(
+            crate::Gate::running(),
+            crate::AuditLog::new(std::path::PathBuf::from("/nonexistent/audit.jsonl")),
+            std::path::PathBuf::from("/"),
+        );
+        Servers::new(
+            &tools,
+            LiveCapabilities::new(Vec::new()),
+            EventBus::new(4),
+            Started {
+                path: std::path::PathBuf::from("/data/zyris/mcp-servers.json"),
+                config: zyris_mcp::Config { servers },
+                running: Vec::new(),
+                problem: None,
+            },
+        )
+    }
+
+    fn entry(name: &str) -> ServerConfig {
+        ServerConfig {
+            name: name.to_string(),
+            command: "x".to_string(),
+            args: Vec::new(),
+            enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_that_could_never_be_announced_is_listed_as_having_no_capability() {
+        // **The one thing the window can offer somebody in this state is the rename**, and it can
+        // only offer it if this says so. A capability name computed from the name regardless —
+        // `mcp_` glued to whatever is there — would list `mcp_my.notes` as though it were
+        // addressable, and every call to it would be read as a call to `mcp_my`, which nothing
+        // announced. The same check `zyris_mcp::config::start_one` makes before it runs anything.
+        let listed = listing(vec![entry("notes"), entry("my.notes"), entry("")]).list().await;
+
+        assert_eq!(listed[0].capability.as_deref(), Some("mcp_notes"));
+        assert_eq!(listed[1].capability, None, "a dot makes a capability nothing can address");
+        assert_eq!(listed[2].capability, None, "`mcp_` alone names nothing");
+    }
+
+    /// A supervisor over a file that was read, or was not, and started nothing either way.
+    fn supervising(path: &str, problem: Option<&str>) -> Servers {
+        let tools = Tools::new(
+            crate::Gate::running(),
+            crate::AuditLog::new(std::path::PathBuf::from("/nonexistent/audit.jsonl")),
+            std::path::PathBuf::from("/"),
+        );
+        Servers::new(
+            &tools,
+            LiveCapabilities::new(Vec::new()),
+            EventBus::new(4),
+            Started {
+                path: std::path::PathBuf::from(path),
+                config: zyris_mcp::Config::default(),
+                running: Vec::new(),
+                problem: problem.map(str::to_string),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_list_that_could_not_be_read_is_not_a_machine_with_no_servers() {
+        // Both of these run nothing, and to this type they are identical. The difference is the
+        // whole of what a person needs: one of them means "you have not configured any", and the
+        // other means "the file you configured them in has a typo in it".
+        let unreadable = supervising("/data/zyris/mcp-servers.json", Some("expected value"))
+            .view()
+            .await;
+        let nobody_configured_one =
+            supervising("/data/zyris/mcp-servers.json", None).view().await;
+
+        assert!(unreadable.servers.is_empty());
+        assert!(nobody_configured_one.servers.is_empty());
+        assert_eq!(unreadable.problem.as_deref(), Some("expected value"));
+        assert_eq!(nobody_configured_one.problem, None);
+
+        // And both name the file, because "go and fix it" and "go and write one" are each an
+        // instruction only with the path in them.
+        assert_eq!(unreadable.path, "/data/zyris/mcp-servers.json");
+        assert_eq!(nobody_configured_one.path, "/data/zyris/mcp-servers.json");
+    }
+
+    #[test]
+    fn the_mcp_screen_can_tell_those_two_apart_on_the_wire() {
+        // The same distinction, as `ui/src/Mcp.tsx` receives it. A screen rendering `servers`
+        // alone would have no way back to it.
+        let unreadable = ServerList {
+            path: "/data/zyris/mcp-servers.json".to_string(),
+            problem: Some("expected value at line 1 column 1".to_string()),
+            servers: Vec::new(),
+        };
+        let nobody_configured_one = ServerList { problem: None, ..unreadable.clone() };
+
+        assert_eq!(
+            serde_json::to_value(&unreadable).unwrap(),
+            serde_json::json!({
+                "path": "/data/zyris/mcp-servers.json",
+                "problem": "expected value at line 1 column 1",
+                "servers": [],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&nobody_configured_one).unwrap()["problem"],
+            serde_json::json!(null)
+        );
+        assert_ne!(
+            serde_json::to_value(&unreadable).unwrap(),
+            serde_json::to_value(&nobody_configured_one).unwrap()
+        );
+    }
+
+    fn view(state: ServerState) -> ServerView {
+        ServerView {
+            name: "desk-notes".to_string(),
+            capability: Some("mcp_desk-notes".to_string()),
+            command: "notes-mcp".to_string(),
+            args: vec!["--root".to_string(), "/home/ada/notes".to_string()],
+            state,
+            tools: Vec::new(),
+            dropped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_mcp_screen_reads_these_field_names() {
+        // `ui/src/Mcp.tsx` transcribes this shape rather than importing it — there is no way to
+        // share a type across the IPC boundary — so this is the Rust half of that agreement, and
+        // nothing checks it at build time.
+        //
+        // The nesting is the part worth pinning. `state` is an internally tagged enum inside a
+        // field also called `state`, so the screen switches on `server.state.state`; a screen
+        // reaching for `server.state` alone would compare an object against a string and every
+        // server would render as the fallback.
+        let mut running = view(ServerState::Running);
+        running.tools = vec!["search".to_string(), "append".to_string()];
+        running.dropped = vec![DroppedTool {
+            name: "search".to_string(),
+            reason: "this server offers two tools called `search`".to_string(),
+        }];
+
+        assert_eq!(
+            serde_json::to_value(&running).unwrap(),
+            serde_json::json!({
+                "name": "desk-notes",
+                "capability": "mcp_desk-notes",
+                "command": "notes-mcp",
+                "args": ["--root", "/home/ada/notes"],
+                "state": { "state": "running" },
+                "tools": ["search", "append"],
+                "dropped": [{
+                    "name": "search",
+                    "reason": "this server offers two tools called `search`",
+                }],
+            })
+        );
+
+        // And the name that can never make a capability, which the screen renders as the one
+        // thing a person can do about it. `null` rather than an empty string: `mcp_` prefixed to
+        // nothing is a name too, and it would read as one.
+        let mut unaddressable = view(ServerState::Failed { reason: "a dot".to_string() });
+        unaddressable.capability = None;
+        assert_eq!(
+            serde_json::to_value(&unaddressable).unwrap()["capability"],
+            serde_json::json!(null)
+        );
+    }
+
+    #[test]
+    fn a_server_that_died_does_not_look_like_one_somebody_turned_off() {
+        // The distinction the core goes to real trouble to keep — it is the whole reason
+        // `ServerState` is not a boolean — and it survives exactly as far as the last thing that
+        // renders it. Both end as "not announced"; only one of them is a process to restart.
+        let died = serde_json::to_value(view(ServerState::Died).state).unwrap();
+        let disabled = serde_json::to_value(view(ServerState::Disabled).state).unwrap();
+
+        assert_eq!(died, serde_json::json!({ "state": "died" }));
+        assert_eq!(disabled, serde_json::json!({ "state": "disabled" }));
+        assert_ne!(died, disabled);
+
+        // And the third way a server is not running, which carries what to check with it.
+        assert_eq!(
+            serde_json::to_value(
+                view(ServerState::Failed { reason: "no such file".to_string() }).state
+            )
+            .unwrap(),
+            serde_json::json!({ "state": "failed", "reason": "no such file" })
+        );
     }
 }

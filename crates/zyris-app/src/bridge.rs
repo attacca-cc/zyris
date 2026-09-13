@@ -21,7 +21,8 @@ use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
 use zyris_tools::{
-    Announcement, AuditLog, Entry, Gate, InboxEntry, ServerView, Servers, Tools, Transfers,
+    Announcement, AuditLog, Entry, Gate, InboxEntry, ServerList, ServerView, Servers, Tools,
+    Transfers,
 };
 
 use crate::confirm::{Pending, Question};
@@ -290,9 +291,18 @@ pub fn peer_fingerprint(transfers: State<'_, Option<Transfers>>) -> Option<Strin
 ///
 /// Read straight through the supervisor, which is the same one the core watches with — so what
 /// this lists is what the node announces, not a second reader's idea of it.
+///
+/// **Three answers, and the window says something different for each** — the same rule [`inbox`]
+/// follows. `ServerList::problem` set is a server list that could not be read; clear, with no
+/// servers, is a machine nobody has configured. Assembled by the supervisor rather than here, so
+/// the one thing that knows whether the file was readable is the one thing that says so.
+///
+/// `Result` for the shape of the boundary rather than for anything this can do: reading the list
+/// cannot fail, and the window still has to handle a rejection, because an `invoke` that never
+/// reaches here fails on the TypeScript side whatever this signature says.
 #[tauri::command]
-pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<Vec<ServerView>, String> {
-    Ok(servers.list().await)
+pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<ServerList, String> {
+    Ok(servers.view().await)
 }
 
 /// Turn one MCP server on or off, and answer with what that left it as.
@@ -302,8 +312,12 @@ pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<Vec<ServerView>,
 /// Turning one on is the case that proves it — the command may not be there any more, and the
 /// answer is a `Failed` carrying the reason rather than the `Running` the click asked for.
 ///
-/// **Nothing is written to the server list on disk.** Whether this run's switch outlives the run
-/// is a question about the file, and the file is Task 5's; `zyris_tools::servers` records why.
+/// **Nothing is written to the server list on disk, and the window says so.** This switch lasts
+/// as long as this run; the file decides what the next one starts. `zyris_tools::Servers::
+/// set_enabled` records the three things that decided that, the first of which is that the file is
+/// read once at startup — so a write-back would put a stale snapshot over whatever a person has
+/// edited since. `ui/src/Mcp.tsx` is where it is said out loud, which is the half that makes it a
+/// decision rather than a screen that forgets.
 #[tauri::command]
 pub async fn set_mcp_server_enabled(
     name: String,
