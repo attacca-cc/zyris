@@ -4,6 +4,8 @@
 //! again — so nothing here retries. This actor establishes the identity, hands it to the link,
 //! and reports what it observes.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -33,6 +35,28 @@ pub const ACCOUNT_SCOPES: &[&str] = &[
 pub const NODE_SCOPES: &[&str] =
     &["agents:read", "sessions:read", "sessions:write", "events:read", "peers:write"];
 
+/// Work that has to happen again on every connection this node establishes, handed in by
+/// whoever owns the things that need it.
+///
+/// **Not a `Tools`.** Taking one would make this crate depend on `zyris-tools`, which depends on
+/// this one — the same cycle [`Connector::with_capabilities`] documents — so what arrives here
+/// is a plain callback `main` installs.
+///
+/// It is handed the [`zyris::Connection`] because everything per-connection is reached through
+/// it: a capability the server announced back (`wait_capability`), and the calls made on that.
+/// It is async because none of that is free — publishing where this machine can be reached is a
+/// network round trip.
+///
+/// **Every connection, not the first one.** `zyris-transfer`'s `Rendezvous` records what a
+/// write-once version of this costs: its API client used to live in a `OnceLock`, a websocket
+/// reset left it bound to the dead connection, and every send afterwards failed with `connection
+/// lost` on a node that otherwise looked perfectly healthy, until the process was restarted. So
+/// this is an `Fn`, run once per established connection — the first and every redial alike — and
+/// a hook that holds anything belonging to a connection has to replace it here, not keep what
+/// the first connection gave it.
+pub type ConnectHook =
+    Arc<dyn Fn(zyris::Connection) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 pub struct Connector {
     identity: Identity,
     bus: EventBus,
@@ -54,6 +78,9 @@ pub struct Connector {
     /// token, once more after recovering from a dead one — so the same capabilities have to be
     /// available to a second node without the first having consumed them.
     capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
+    /// What this node does on each connection it establishes, beyond reporting it. See
+    /// [`ConnectHook`].
+    connect_hook: Option<ConnectHook>,
 }
 
 impl Connector {
@@ -64,6 +91,7 @@ impl Connector {
             server: zyris::DEFAULT_SERVER_URL.to_string(),
             ever_connected: Arc::new(AtomicBool::new(false)),
             capabilities: Vec::new(),
+            connect_hook: None,
         }
     }
 
@@ -79,6 +107,20 @@ impl Connector {
         capabilities: Vec<Arc<dyn zyris::ServeCapability>>,
     ) -> Connector {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Installs the per-connection work described by [`ConnectHook`].
+    ///
+    /// There is room for exactly one, because the library has room for exactly one:
+    /// `NodeBuilder::on_connect` keeps a single closure and setting it twice keeps the second. A
+    /// caller with two things to do on connect does both inside one hook.
+    pub fn with_connect_hook<F, Fut>(mut self, hook: F) -> Connector
+    where
+        F: Fn(zyris::Connection) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.connect_hook = Some(Arc::new(move |conn| Box::pin(hook(conn))));
         self
     }
 
@@ -129,9 +171,6 @@ impl Connector {
         let name = zyris::machine_name().unwrap_or_else(|| "zyris".to_string());
         self.bus.publish(CoreEvent::Connecting);
 
-        let bus = self.bus.clone();
-        let node_name = name.clone();
-        let ever_connected = self.ever_connected.clone();
         let mut builder = Node::builder()
             .name(name.as_str())
             .kind(NodeKind::Desktop)
@@ -139,35 +178,12 @@ impl Connector {
             // `Node::connect` returns it even when the first dial merely failed and is retrying
             // in the background. This hook is what actually fires per established connection,
             // the first one and every reconnect, which is the only place `node_id` is real.
-            .on_connect(move |conn| {
-                let bus = bus.clone();
-                let node_name = node_name.clone();
-                let ever_connected = ever_connected.clone();
-                async move {
-                    // Set before publishing: `report_setup_failure`, called from a concurrent
-                    // recovery attempt, must never read a stale `false` and send a person who is
-                    // already looking at a working connection to the onboarding screen.
-                    ever_connected.store(true, Ordering::Relaxed);
-                    bus.publish(CoreEvent::Connected {
-                        node_id: conn.info().node_id.clone(),
-                        node_name,
-                    });
-
-                    // `conn` is this hook's own clone of the connection, spawned concurrently
-                    // with it — so awaiting its close does not race the link's own bookkeeping,
-                    // it just observes the same close. The link always dials again after an
-                    // established connection closes (it only stops redialling on a *dial*
-                    // refusal no retry can fix, checked before a connection ever came up, or on
-                    // being asked to disconnect — this app never asks), so a close seen here is
-                    // always followed by another attempt: `retrying: true`, then `Connecting`.
-                    let reason = conn.closed().await;
-                    bus.publish(CoreEvent::Disconnected {
-                        reason: reason.to_string(),
-                        retrying: true,
-                    });
-                    bus.publish(CoreEvent::Connecting);
-                }
-            });
+            .on_connect(Connector::per_connection(
+                self.bus.clone(),
+                name.clone(),
+                self.ever_connected.clone(),
+                self.connect_hook.clone(),
+            ));
 
         // Cloned rather than moved: `run` dials a second time after recovering from a dead
         // token, and that node has to announce the same capabilities. The `Arc`s are what make
@@ -225,6 +241,67 @@ impl Connector {
                 });
                 DialEnd::Stopped
             }
+        }
+    }
+
+    /// The single closure a node's `on_connect` slot holds, built here rather than inline in
+    /// [`Connector::dial`] so a test can run it against real connections.
+    ///
+    /// `NodeBuilder::on_connect` takes an `Fn(Connection) -> impl Future<Output = ()>` and hands
+    /// each call its own clone of the connection that was just established, spawned beside it.
+    /// The library calls it from its reconnect loop, so it arrives once per connection, first
+    /// dial and every redial alike — which is the whole reason [`ConnectHook`] can be trusted to
+    /// replace what a previous connection left behind.
+    ///
+    /// The installed hook runs *beside* the close report rather than before it: whatever it does
+    /// is a network round trip, and a connection that dies while it is still going has to be
+    /// reported the moment it dies, not whenever the hook is finished with it.
+    fn per_connection(
+        bus: EventBus,
+        node_name: String,
+        ever_connected: Arc<AtomicBool>,
+        hook: Option<ConnectHook>,
+    ) -> impl Fn(zyris::Connection) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static
+    {
+        move |conn| {
+            let bus = bus.clone();
+            let node_name = node_name.clone();
+            let ever_connected = ever_connected.clone();
+            let hook = hook.clone();
+            Box::pin(async move {
+                // Set before publishing: `report_setup_failure`, called from a concurrent
+                // recovery attempt, must never read a stale `false` and send a person who is
+                // already looking at a working connection to the onboarding screen.
+                ever_connected.store(true, Ordering::Relaxed);
+                bus.publish(CoreEvent::Connected {
+                    node_id: conn.info().node_id.clone(),
+                    node_name,
+                });
+
+                let per_connection_work = async {
+                    if let Some(hook) = &hook {
+                        hook(conn.clone()).await;
+                    }
+                };
+
+                // `conn` is this hook's own clone of the connection, spawned concurrently with
+                // it — so awaiting its close does not race the link's own bookkeeping, it just
+                // observes the same close. The link always dials again after an established
+                // connection closes (it only stops redialling on a *dial* refusal no retry can
+                // fix, checked before a connection ever came up, or on being asked to
+                // disconnect — this app never asks), so a close seen here is always followed by
+                // another attempt: `retrying: true`, then `Connecting`.
+                let report_the_close = async {
+                    let reason = conn.closed().await;
+                    bus.publish(CoreEvent::Disconnected {
+                        reason: reason.to_string(),
+                        retrying: true,
+                    });
+                    bus.publish(CoreEvent::Connecting);
+                };
+
+                tokio::join!(per_connection_work, report_the_close);
+            })
         }
     }
 
@@ -555,7 +632,127 @@ fn credential_cannot_mint_this_node(error: &RegisterError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
     use super::*;
+
+    /// Poll until something holds, or give up loudly. The link's backoff floor is a second, so a
+    /// deadline for anything involving a redial has to sit well past it or a loaded CI runner
+    /// reads as a node that never came back.
+    async fn wait_until(what: &str, mut settled: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !settled() {
+            assert!(tokio::time::Instant::now() < deadline, "never {what}");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Two nodes wired to each other inside this process: a real [`zyris::Connection`], with no
+    /// socket and no server. The far end comes back too because dropping it closes the near one.
+    async fn in_process_connection() -> (zyris::Connection, zyris::Connection) {
+        let dialer = Node::builder().name("probe").kind(NodeKind::Desktop).build().unwrap();
+        let acceptor = Node::builder().name("server").kind(NodeKind::Server).build().unwrap();
+        zyris::testing::duplex(&dialer, &acceptor).await.expect("an in-process duplex comes up")
+    }
+
+    /// The `conn_id` of each connection the hook was handed, in order.
+    fn recording_hook(seen: Arc<Mutex<Vec<String>>>) -> ConnectHook {
+        Arc::new(move |conn: zyris::Connection| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.lock().expect("the recorder is not poisoned").push(conn.info().conn_id.clone());
+            })
+        })
+    }
+
+    /// The closure `dial` installs is `Fn`, and this is what that has to buy: a second connection
+    /// gets the hook run again, on the second connection, not on a remembered first one.
+    ///
+    /// This drives the closure directly, with connections that are real but in-process — the
+    /// redial that produces the second one in a running node is the library's to make, and
+    /// `zyris-core`'s own `the_connect_hook_runs_again_on_the_connection_that_replaces_a_dropped_one`
+    /// is where that is covered. What is covered here is everything this crate wrote.
+    #[tokio::test]
+    async fn every_connection_runs_the_hook_and_runs_it_on_that_connection() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let on_connect = Connector::per_connection(
+            EventBus::new(16),
+            "test".to_string(),
+            Arc::new(AtomicBool::new(false)),
+            Some(recording_hook(seen.clone())),
+        );
+
+        // Held, not dropped: the far end of each is what keeps the connection open, and the
+        // closure's own future does not finish until the connection it was given closes.
+        let (first, _first_server) = in_process_connection().await;
+        let (second, _second_server) = in_process_connection().await;
+        let expected =
+            vec![first.info().conn_id.clone(), second.info().conn_id.clone()];
+        assert_ne!(expected[0], expected[1], "two connections, two ids");
+
+        tokio::spawn(on_connect(first));
+        wait_until("ran the hook on the first connection", || {
+            seen.lock().unwrap().len() == 1
+        })
+        .await;
+
+        tokio::spawn(on_connect(second));
+        wait_until("ran the hook on the second connection", || {
+            seen.lock().unwrap().len() == 2
+        })
+        .await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            expected,
+            "each connection has to reach the hook as itself; a hook that keeps what the first \
+             one gave it is the `connection lost` bug `ConnectHook` exists to prevent"
+        );
+    }
+
+    /// A hook still busy when its connection dies must not hold up the report that it died. The
+    /// window this closes is small and the symptom is not: a link that has already gone back to
+    /// dialling, while the person watching still sees a green light.
+    #[tokio::test]
+    async fn a_hook_that_is_still_working_does_not_delay_the_disconnect_report() {
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+        let released = Arc::new(tokio::sync::Notify::new());
+        let hold = released.clone();
+        let on_connect = Connector::per_connection(
+            bus,
+            "test".to_string(),
+            Arc::new(AtomicBool::new(false)),
+            Some(Arc::new(move |_conn| {
+                let hold = hold.clone();
+                Box::pin(async move { hold.notified().await })
+            })),
+        );
+
+        let (conn, server) = in_process_connection().await;
+        let running = tokio::spawn(on_connect(conn));
+        assert!(matches!(events.recv().await.unwrap(), CoreEvent::Connected { .. }));
+
+        server.close("server restarting");
+        let reported = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("the close was not reported while the hook was still running")
+            .unwrap();
+        assert!(
+            matches!(reported, CoreEvent::Disconnected { retrying: true, .. }),
+            "got: {reported:?}"
+        );
+
+        // And the hook is still awaited rather than abandoned: the task is only finished once it
+        // is let go.
+        assert!(!running.is_finished());
+        released.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .expect("the closure outlived the hook it was waiting for")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn with_nothing_stored_it_asks_for_enrolment_first() {
