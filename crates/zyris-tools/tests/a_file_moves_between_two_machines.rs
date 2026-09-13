@@ -115,9 +115,10 @@ async fn a_file_moves_between_two_machines_byte_for_byte() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pin_still_matches_after_both_machines_are_rebuilt() {
     // The whole reason the key is persisted, and the exact shape of the failure: a machine that
-    // generated a fresh key each launch would still *receive* perfectly — the accept loop never
-    // consults a pin — while every peer that had pinned it refused it from then on, and only when
-    // sending. So what this asserts is a second send that was never re-pinned.
+    // generated a fresh key each launch would still *receive* perfectly — nothing on the receiving
+    // side turns on this machine's own key being pinned anywhere — while every peer that had
+    // pinned it refused it from then on, and only when sending. So what this asserts is a second
+    // send that was never re-pinned.
     //
     // `serve_peers` owns a clone of the endpoint and never returns, so the first pair's sockets are
     // still bound when the second pair comes up: this is a re-bind inside one process rather than a

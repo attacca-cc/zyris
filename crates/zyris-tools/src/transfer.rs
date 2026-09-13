@@ -8,8 +8,29 @@
 //! made fresh on every dial would not be an identity.
 //!
 //! The failure this exists to prevent hides well. A node that generates a new key each launch
-//! still *receives* files perfectly — the accept loop never consults a pin — so the only symptom
-//! is that every peer which pinned this machine refuses it from then on, and only when sending.
+//! still *receives* files perfectly — nothing on the receiving side turns on this machine's own
+//! key being pinned anywhere — so the only symptom is that every peer which pinned this machine
+//! refuses it from then on, and only when sending.
+//!
+//! # What gates a transfer, in each direction
+//!
+//! They are not the same gate, and the pin is only one of them.
+//!
+//! **Receiving is gated on the account.** `serve_peers` takes the `EndpointId` QUIC authenticated,
+//! asks the rendezvous for the account's node list, and closes anything not on it before the zyris
+//! handshake happens. It then calls `TofuStore::check` — **read-only**: a name already pinned
+//! refuses a changed key, a name nothing is pinned under passes and stays unpinned. No
+//! [`PeerConfirmer`] is consulted on this path and none can be; there is nothing here to ask a
+//! person about, and a window would not change that. So a file from another node of this account
+//! arrives whether or not that node was ever pinned.
+//!
+//! **Sending is gated on the pin.** `LocalFileTransfer::send_to` calls `TofuStore::authorize`,
+//! which settles a known name itself and hands an unknown one to the [`PeerConfirmer`] this module
+//! is given. That is the only place the confirmer is reached from.
+//!
+//! The consequence worth stating plainly, because the README used to say the opposite: **this
+//! layer has no approval gate on incoming files.** What bounds them is who is enrolled on the
+//! account.
 //!
 //! # One capability is announced here, not two
 //!
@@ -44,9 +65,11 @@ use zyris_transfer::{
     TransferConfig, serve_peers,
 };
 
-/// Who is asked about a peer this machine has never seen, and the answer a node with nobody to
+/// Who is asked about a peer this machine has never sent to, and the answer a node with nobody to
 /// ask gives. Re-exported so `main` can name the confirmer it installs without taking a
 /// dependency on the protocol stack of its own.
+///
+/// **The sending side only.** See this module's "What gates a transfer, in each direction".
 pub use zyris::p2p::fingerprint::{DenyUnknown, PeerConfirmer};
 
 /// Points this machine at a relay of its own instead of the public ones.
@@ -83,9 +106,9 @@ const API_WAIT: Duration = Duration::from_secs(30);
 /// either and every pin in the ledger silently stops meaning anything.
 ///
 /// The confirmer travels with them because it is the answer to the one question the ledger
-/// cannot answer on its own: what to do about a peer it has never seen. In `--headless` that is
-/// `DenyUnknown`, and nothing else can be right there — nobody being around to ask is not
-/// consent.
+/// cannot answer on its own **when this machine dials out**: what to do about a peer it has never
+/// sent to. In `--headless` that is `DenyUnknown`, and nothing else can be right there — nobody
+/// being around to ask is not consent. It is not consulted on anything arriving.
 pub struct Peering {
     endpoint: iroh::Endpoint,
     tofu: TofuStore,
@@ -168,7 +191,8 @@ impl Peering {
         &self.tofu
     }
 
-    /// Who decides about a peer the ledger has never seen.
+    /// Who decides about a peer the ledger has never seen, on the one path that asks: a send to a
+    /// name this machine has not pinned. Nothing on the receiving side reaches this.
     pub fn confirmer(&self) -> Arc<dyn PeerConfirmer> {
         self.confirmer.clone()
     }
@@ -457,8 +481,8 @@ mod tests {
     async fn the_key_survives_a_restart() {
         // The whole reason this is persisted. Without it this is a different node after every
         // launch, and a pin another peer made expires with the process — which is not a pin.
-        // The failure hides: the accept loop never consults a pin, so receiving keeps working
-        // and only sending breaks.
+        // The failure hides: receiving turns on being a node of the account rather than on this
+        // machine's own key, so receiving keeps working and only sending breaks.
         let dir = tempfile::tempdir().unwrap();
 
         let first = Peering::bind(dir.path(), Arc::new(DenyUnknown)).await.unwrap();

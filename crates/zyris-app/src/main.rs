@@ -332,15 +332,23 @@ fn data_dir(instance: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(instance)
 }
 
-/// Who answers when a machine this one has never seen wants to send it a file.
+/// Who answers when this machine is about to **send** a file to a peer it has never pinned.
+///
+/// **Sending only, and that is the whole of its reach.** The confirmer goes to exactly one place
+/// — the `LocalFileTransfer` behind `file_transfer` — and `TofuStore::authorize` consults it on
+/// the dial, for the one case a pin cannot settle on its own. Nothing on the receiving side asks
+/// it anything: `serve_peers` admits a connection whose key is on the account's node list and
+/// closes one whose key is not, and it only ever *reads* the ledger. So this is not a door on
+/// incoming files, and replacing `DenyUnknown` here will not make it one — a file from another
+/// node of this account arrives whether or not that node has ever been pinned.
 ///
 /// **`DenyUnknown` in both modes today, and that is a real limitation rather than a placeholder
 /// in the headless arm.** With nobody to ask, refusing is the only safe answer: a peer must not
 /// become trusted merely because no one was around to say no. With a window there *is* someone to
 /// ask, and step 5b replaces the second arm with a confirmer that raises the tray notification
 /// and shows the peer's fingerprint for a person to compare — the whole of that change is the one
-/// expression below. Until then a windowed run refuses an unknown peer exactly as a headless one
-/// does, and a file from a machine that has never been pinned does not arrive.
+/// expression below. Until then a windowed run refuses to send to an unpinned peer exactly as a
+/// headless one does.
 ///
 /// The two arms are written out rather than collapsed for that reason: this is where the two
 /// modes are about to differ, and the seam is worth more than the line it costs.

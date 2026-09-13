@@ -57,14 +57,29 @@ reconstructs one just as well, so neither the text nor its length is written dow
 The bytes travel over [iroh](https://iroh.computer), and what arrives lands in an inbox under a
 folder named after the machine that sent it.
 
-**A machine you have not approved cannot send you anything, and right now there is no way to
-approve one from the window** — that is the next piece of work. Until it lands, a peer has to
-have been pinned already, so this is useful between machines you have set up and not yet useful
-for a machine you just added.
+**The two directions are not gated the same way, and it is worth knowing which is which.**
+
+*Receiving* is gated on your account rather than on an approval. An arriving connection is
+authenticated against the sending machine's own key, and that key has to belong to a node of your
+Attacca account: Zyris asks Attacca for the account's node list and closes anything not on it
+before a word is exchanged. So **any machine you have enrolled can send this one a file**, and
+nothing else can. Zyris does not ask you first, there is no per-machine approval on this side, and
+the window will not add one — what stops a machine of your own sending here is revoking that node
+on your account.
+
+*Sending* is gated on a pin. Before this machine sends to a name for the first time, someone has
+to confirm the key behind that name, and **there is no way to confirm one from the window yet** —
+that is the next piece of work. Until it lands a peer has to have been pinned already, so sending
+is useful between machines you have set up and not yet useful for a machine you just added.
+
+Once a name is pinned, the pin keeps working in both directions: a key that is not the one pinned
+for that name is refused, whether this machine is dialling it or it is dialling here. What that
+does not cover is a name nothing is pinned under — and on the receiving side the name comes from
+Attacca rather than from you, so a node of your account that arrives under a name you have never
+sent to is simply let through, and stays unpinned.
 
 Each computer keeps a long-lived key so it stays the same peer across restarts. That key is what
-an approval is an approval *of*; lose it and every machine that approved this one stops
-accepting from it.
+a pin is a pin *of*; lose it and every machine that pinned this one refuses to send to it.
 
 Without a relay of your own, the connection rides the public ones run by the iroh project. **A
 relay cannot read what is transferred** — it is encrypted end to end — but it does see which of
@@ -186,7 +201,8 @@ lands in what order. Nothing here is ready to install yet.
 2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
-5. File transfer — peer endpoint, inbox (done); approving a new machine from the window still to come
+5. File transfer — peer endpoint, inbox (done); confirming a new peer's key from the window, so
+   this machine can send to one it has not pinned, still to come
 6. MCP — local servers promoted to capabilities
 7. Voice in — audio, echo cancellation, wake word, transcription
 8. Voice out — streaming speech, interruption
@@ -202,8 +218,12 @@ side of the connection regardless of what the server says:
 - **An audit log** of what ran — every call, allowed or refused, with what it was asked to touch
   but never what it read or wrote. On disk as one JSON line each, and as a tail on the Tools tab.
 
-File transfers from a machine you have not seen before are refused until you compare the
-fingerprint yourself. With no window to ask in, the answer is no.
+A file can only arrive from a machine enrolled on your own Attacca account: a peer whose key is
+not on the account's node list is closed before the two ends have said anything to each other.
+That is the whole of the check on this side — **an incoming file is not something you are asked
+about**, and a machine of yours that you have never pinned can still send you one. The pin gates
+the other direction, and with no window to confirm a new key in, sending to a machine this one
+has not already pinned is refused.
 
 ## License
 
