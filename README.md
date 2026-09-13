@@ -187,6 +187,50 @@ Zyris writes down some arguments for its own capabilities because it knows what 
 spelled `path` on a server somebody else wrote is a coincidence of spelling and could as easily be
 a password, so nothing an agent sends to an MCP server is written down.
 
+### Checking it against a real agent — this has not been run
+
+Everything above has tests behind it, up to and including a real MCP server started from a real
+`mcp-servers.json`, announced on a live node, and called by a peer on the other end of a real
+connection. **What no test on this side can reach is Attacca.** Whether an agent that was never
+told an MCP server exists picks a promoted tool out of the list and calls it like any other is the
+one claim on this page that only a person can check, and **nobody has checked it.** What follows
+is the procedure, written down rather than performed.
+
+It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
+today; nothing here depends on which. If you are also running the file-transfer check that step 5
+left owed, this rides along with it: same machine, same agent, and only step 7 below wants a
+second computer's attention at all.
+
+1. **Configure it.** Put one entry in the file named above, then **restart Zyris** — the file is
+   read at startup and never again.
+2. **Look at the MCP tab.** Pass: the server is listed as running, with the tools it promoted and
+   the capability name an agent will address (`mcp_<name>`). The log says the same thing on the
+   line reading `an MCP server is promoted`. If it says the server failed, that is the reason, and
+   there is nothing to check further until it starts.
+3. **Ask an agent on Attacca what this machine can do**, without mentioning MCP. Pass: the reply
+   names `mcp_<name>` beside `terminal` and `file_io`, with the server's own tool descriptions.
+   Fail: the agent lists the built-ins only, or describes the promoted one as something it cannot
+   use.
+4. **Ask it to do something only that server can do.** Pass: the answer is the server's own, and
+   the agent treats the call as ordinary — no "I do not have a tool for that", no asking you to
+   run something. That is the whole claim on the front page.
+5. **Read the audit tail on the Tools tab.** Pass: a line naming `mcp_<name>` and the tool, marked
+   allowed, **with no arguments on it** — and the argument you actually sent appears nowhere in
+   `audit.jsonl`. Fail, and it is the serious kind: an MCP server's arguments are being written to
+   disk.
+6. **Hit pause and ask again.** Pass: the agent reports that this machine is paused, in the same
+   words it would use for `terminal` — not that the tool is broken or missing.
+7. **Switch the server off on the MCP tab while the agent is connected**, then ask the agent what
+   it can do. Pass: the capability is gone from its list within a moment, without either end
+   reconnecting, and a call to it fails as not announced rather than hanging. Switch it back on
+   and it comes back.
+8. **Kill the server's process from outside Zyris** — Task Manager, or `kill` on Linux. Pass:
+   within about a second the MCP tab shows it as having stopped on its own, *not* as one you
+   switched off, and the capability is no longer announced to the agent.
+9. **Misspell a field in the file and restart.** Pass: Zyris starts, the MCP tab names the problem
+   and the path of the file, and `terminal` and `file_io` still work. Fail: Zyris does not start,
+   or the tab says you have configured no servers.
+
 ## Voice
 
 Speech runs on this machine. Whisper transcribes, Supertonic speaks, and the models are fetched
@@ -292,7 +336,8 @@ lands in what order. Nothing here is ready to install yet.
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
 5. File transfer — peer endpoint, inbox, approving a new machine's key from the window (done)
-6. MCP — local servers promoted to capabilities
+6. MCP — local servers promoted to capabilities (done, except for the
+   [check against a real agent](#checking-it-against-a-real-agent--this-has-not-been-run))
 7. Voice in — audio, echo cancellation, wake word, transcription
 8. Voice out — streaming speech, interruption
 

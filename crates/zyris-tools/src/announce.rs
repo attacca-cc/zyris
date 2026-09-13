@@ -374,6 +374,29 @@ fn describe(capabilities: &[Arc<dyn ServeCapability>]) -> Vec<Announced> {
 mod tests {
     use super::*;
 
+    /// How many tools each of this machine's own capabilities announces.
+    ///
+    /// Written down here so that the sentence in `README.md` — "between them that is
+    /// twenty-five tools" — is checked by something rather than counted once by somebody. A
+    /// capability that grows or loses a tool when the protocol stack moves fails
+    /// [`the_readme_says_how_many_tools_this_machine_offers_and_it_is_still_right`] with the new
+    /// number in the message, which is the one moment anybody would think to edit the README.
+    ///
+    /// A per-capability table rather than a single total, because the total is not knowable on
+    /// every host: `screen_capture` and `input` are announced only where a display server
+    /// answers. Each row is checked wherever its capability *is* announced, and between the two
+    /// platforms CI runs on, every row is.
+    const TOOLS_PER_CAPABILITY: &[(&str, usize)] = &[
+        ("file_io", 8),
+        ("terminal", 8),
+        ("screen_capture", 2),
+        ("input", 5),
+        ("file_transfer", 2),
+    ];
+
+    /// The README's wording for `TOOLS_PER_CAPABILITY`'s total, as it is spelled there.
+    const README_TOTAL: (usize, &str) = (25, "twenty-five tools");
+
     fn tools(dir: &Path) -> Tools {
         Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
     }
@@ -497,6 +520,62 @@ mod tests {
         assert!(
             !announced.iter().any(|capability| capability.name == "peer_transfer"),
             "peer_transfer is announced on the peer link, never on this one: {announced:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_readme_says_how_many_tools_this_machine_offers_and_it_is_still_right() {
+        // **The number in the README was written once and nothing has ever checked it.** It is
+        // the front page's only quantity, and a wrong one is exactly the class of overclaim this
+        // project has already shipped more than once — so it is pinned here, against the
+        // descriptors the node is actually handed rather than against a count in a comment.
+        let dir = tempfile::tempdir().unwrap();
+        // With a peer identity, so `file_transfer`'s row is checked too; without one it is not
+        // announced and would be the one row nothing ever looked at.
+        let transfers = crate::Transfers::bind(
+            dir.path(),
+            dir.path().join("root"),
+            Arc::new(crate::transfer::DenyUnknown),
+        )
+        .await
+        .unwrap();
+        let tools = tools(dir.path()).with_transfer(&transfers);
+        let _ = tools.clone().into_capabilities();
+
+        for capability in tools.announced() {
+            let (_, expected) = TOOLS_PER_CAPABILITY
+                .iter()
+                .find(|(name, _)| *name == capability.name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "`{}` is announced and is not in the README's count; add it to \
+                         TOOLS_PER_CAPABILITY and say so on the front page",
+                        capability.name
+                    )
+                });
+            assert_eq!(
+                capability.tools.len(),
+                *expected,
+                "`{}` now announces {:?}. README.md says this machine offers {}; the new total is \
+                 {}.",
+                capability.name,
+                capability.tools,
+                README_TOTAL.1,
+                TOOLS_PER_CAPABILITY.iter().map(|(_, n)| n).sum::<usize>() - expected
+                    + capability.tools.len(),
+            );
+        }
+
+        let total: usize = TOOLS_PER_CAPABILITY.iter().map(|(_, count)| count).sum();
+        assert_eq!(total, README_TOTAL.0);
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )
+        .expect("the README is two directories up from this crate");
+        assert!(
+            readme.contains(README_TOTAL.1),
+            "README.md no longer says `{}`, so this test is guarding a sentence that has moved",
+            README_TOTAL.1
         );
     }
 

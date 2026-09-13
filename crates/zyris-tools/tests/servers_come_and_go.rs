@@ -7,7 +7,6 @@
 //! test that asked it what it thought, and would leave an agent calling into a process that is
 //! not there.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,29 +15,10 @@ use zyris_mcp::{Config, ServerConfig, Started};
 use zyris_runtime::{CoreEvent, EventBus, LiveCapabilities, McpServerChange};
 use zyris_tools::{AuditLog, Gate, ServerState, ServerView, Servers, Tools};
 
-/// Where cargo leaves this crate's copy of `zyris-mcp`'s probe server.
-///
-/// Declared as an example in this package's manifest, pointing at the one source file, rather
-/// than copied: a second copy of a foreign MCP server is a second thing to keep in step with the
-/// protocol, and the whole value of the probe is that it is not written by the code under test.
-fn probe_server() -> String {
-    let mut directory = std::env::current_exe().expect("the test binary knows its own path");
-    directory.pop();
-    if directory.ends_with("deps") {
-        directory.pop();
-    }
-    let path: PathBuf = directory
-        .join("examples")
-        .join(format!("mcp_probe_server{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.is_file(),
-        "the `mcp_probe_server` example is not at {}. `cargo test` builds examples; a narrower \
-         selection such as `cargo test --test servers_come_and_go` does not. Run \
-         `cargo test -p zyris-tools`.",
-        path.display()
-    );
-    path.into_os_string().into_string().expect("a path cargo produced is UTF-8")
-}
+#[path = "support/probe.rs"]
+mod probe;
+
+use probe::probe_server;
 
 /// A command spelled so that no machine could accidentally have one.
 const MISSING_COMMAND: &str = "zyris-no-such-mcp-server-anywhere";
