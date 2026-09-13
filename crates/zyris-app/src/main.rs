@@ -142,11 +142,8 @@ fn main() -> anyhow::Result<()> {
     // `block_on` rather than an async main: the GUI runtime owns the main thread synchronously,
     // and the endpoint's background work keeps running on the runtime's worker threads after
     // this returns.
-    let transfers = match runtime.block_on(zyris_tools::Transfers::bind(
-        &data,
-        root.clone(),
-        peer_confirmer(mode, &pending, &bus),
-    )) {
+    let transfers = match runtime.block_on(bind_transfers(mode, &data, root.clone(), &pending, &bus))
+    {
         Ok(transfers) => Some(transfers),
         // How loudly this is said depends on *why* it failed, which is why it is not one line
         // here. See `report_no_peer_identity`.
@@ -394,6 +391,30 @@ fn report_no_peer_identity(error: &anyhow::Error) {
     }
 }
 
+/// File transfer, bound onto the confirmer this run is entitled to.
+///
+/// **One line of work, and it is a function so that the line is covered.** `Transfers::bind` is
+/// what hands a confirmer to `LocalFileTransfer`, and until this existed the only expression that
+/// decided *which* confirmer got there lived inside `main` — where nothing can reach it. Every
+/// test built its own `peer_confirmer` and passed, so replacing this argument with
+/// `Arc::new(DenyUnknown)` left the whole suite green while the windowed arm went dead: no
+/// question published, no window raised, every send to an unpinned name refused, and nothing
+/// anywhere to say so. `the_windowed_run_wires_its_own_confirmer_into_file_transfer` calls this
+/// and asks the bound value itself who it would ask, which is the assertion that revert now fails.
+///
+/// Everything else about binding — the key, the socket, the ledger, the inbox — is
+/// [`zyris_tools::Transfers::bind`]'s, and the caller still reports a failure through
+/// [`report_no_peer_identity`] rather than this swallowing it.
+async fn bind_transfers(
+    mode: cli::Mode,
+    data: &std::path::Path,
+    root: std::path::PathBuf,
+    pending: &confirm::Pending,
+    bus: &EventBus,
+) -> anyhow::Result<zyris_tools::Transfers> {
+    zyris_tools::Transfers::bind(data, root, peer_confirmer(mode, pending, bus)).await
+}
+
 /// Who answers when this machine is about to **send** a file to a peer it has never pinned.
 ///
 /// **Sending only, and that is the whole of its reach.** The confirmer goes to exactly one place
@@ -503,6 +524,86 @@ mod tests {
 
         assert!(pending.answer(id, true), "the id on the wire is the id an answer names");
         assert!(asked.await.unwrap(), "and the answer reaches the caller");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_windowed_run_wires_its_own_confirmer_into_file_transfer() {
+        // **The wiring, not the factory.** `a_windowed_run_asks_and_says_so_on_the_bus` above
+        // proves `peer_confirmer` builds the right thing; it says nothing about whether the value
+        // `file_transfer` actually holds came from there. That was one expression inside `main`,
+        // which no test could reach — so swapping it for `Arc::new(DenyUnknown)` killed the whole
+        // feature and broke not one assertion. This asks the bound `Transfers` itself.
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+
+        let transfers = bind_transfers(
+            cli::Mode::WindowHidden,
+            data.path(),
+            root.path().to_path_buf(),
+            &pending,
+            &bus,
+        )
+        .await
+        .expect("binding a peer identity in a temporary directory");
+
+        // Behaviour rather than a type check: there is no way to ask an `Arc<dyn PeerConfirmer>`
+        // what it is, and the thing that matters is what it *does* anyway. `DenyUnknown` answers
+        // no at once and parks nothing; the windowed confirmer parks a question where the window's
+        // commands can reach it and waits for a person.
+        let confirmer = transfers.peering().confirmer();
+        let asked = tokio::spawn(async move {
+            confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8").await
+        });
+
+        let mut waiting = None;
+        for _ in 0..2000 {
+            if let Some(question) = pending.question() {
+                waiting = Some(question);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let waiting = waiting.expect(
+            "the confirmer behind file_transfer refused without asking anybody, which is what a \
+             windowed run installing DenyUnknown looks like from the outside",
+        );
+        assert_eq!(waiting.label, "kitchen-pi");
+
+        assert!(pending.answer(waiting.id, true), "and the window's answer reaches it");
+        assert!(asked.await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_headless_run_wires_the_refusal_into_file_transfer() {
+        // The converse, so the test above cannot pass by asserting something true of both arms.
+        // `--headless` has nobody to ask, and a confirmer that parked a question there would
+        // block an agent's `send_to` for three quarters of a minute and refuse it anyway.
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+
+        let transfers = bind_transfers(
+            cli::Mode::Headless,
+            data.path(),
+            root.path().to_path_buf(),
+            &pending,
+            &bus,
+        )
+        .await
+        .expect("binding a peer identity in a temporary directory");
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            transfers.peering().confirmer().confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
+        )
+        .await
+        .expect("headless has to answer at once rather than wait for somebody");
+
+        assert!(!answer, "nobody is there, so nothing may be approved");
+        assert!(pending.question().is_none(), "headless must not park a question anywhere");
     }
 
     #[test]

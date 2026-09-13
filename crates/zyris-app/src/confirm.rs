@@ -311,6 +311,19 @@ mod tests {
         panic!("no question was ever asked");
     }
 
+    /// The same, for a caller that reads the ledger off a real disk before it asks. A spin on
+    /// `yield_now` can run out of patience while a file read is in flight and nothing is ready to
+    /// poll; this waits in wall-clock time instead, for up to two seconds.
+    async fn wait_for_question_patiently(pending: &Pending) -> Question {
+        for _ in 0..2000 {
+            if let Some(question) = pending.question() {
+                return question;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("no question was ever asked");
+    }
+
     #[tokio::test]
     async fn an_answer_of_yes_reaches_the_caller() {
         let pending = Pending::new();
@@ -517,6 +530,98 @@ mod tests {
         assert_ne!(after.id, question.id, "the next question is a new one");
         pending.answer(after.id, false);
         let _ = next.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_approval_pins_the_key_that_was_on_the_screen_and_a_refusal_pins_nothing() {
+        // **The half of TOFU nothing else in this repository covers.** Everywhere else asserts
+        // that a refusal refuses; this drives the real `TofuStore::authorize` — the one call
+        // `LocalFileTransfer::send_to` makes — through a person saying yes and a person saying no,
+        // and looks at the ledger afterwards. An approval that quietly pinned nothing would leave
+        // every send asking again forever, and a refusal that pinned anyway would read as working
+        // right up until the same peer sailed through as already known.
+        //
+        // One ledger and two slots. The slot is plumbing — two questions through one would run
+        // into `ASK_COOL_OFF`, which is a different test's subject — while the ledger is what this
+        // is about, so both answers are measured against the same one. `authorize` takes its
+        // confirmer as an argument, which is how `send_to` reaches it too, so the one `Peering`
+        // binds with a `DenyUnknown` that is never consulted.
+        let here = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+
+        // A real peer with a real key, because `authorize` canonicalizes and fingerprints what it
+        // is given before it consults anybody: a string that merely looks like an endpoint id is
+        // turned away for that reason and never reaches the decision this test is about.
+        let stranger =
+            zyris_tools::Peering::bind(elsewhere.path(), Arc::new(zyris_tools::DenyUnknown))
+                .await
+                .unwrap();
+        let stranger_id = stranger.endpoint().id().to_string();
+
+        let ledger = zyris_tools::Peering::bind(here.path(), Arc::new(zyris_tools::DenyUnknown))
+            .await
+            .unwrap();
+
+        // No, first: it has to leave the ledger exactly as it found it, and running it second
+        // would be measuring it against a slug that is already pinned.
+        let refusing = Pending::new();
+        let (show, refused) = recorder();
+        let answering = tokio::spawn({
+            let refusing = refusing.clone();
+            async move {
+                let question = wait_for_question_patiently(&refusing).await;
+                assert!(refusing.answer(question.id, false), "the question was still waiting");
+            }
+        });
+        let outcome = ledger
+            .tofu()
+            .authorize(&WindowConfirmer::new(refusing.clone(), show), "laptop", &stranger_id)
+            .await;
+        answering.await.unwrap();
+
+        assert!(outcome.is_err(), "a person said no, so the send must fail: {outcome:?}");
+        assert!(
+            ledger.tofu().pins().await.unwrap().is_empty(),
+            "a refusal pinned a key anyway, which is this whole module failing open"
+        );
+        assert_eq!(refused.lock().unwrap().len(), 1, "and somebody was asked exactly once");
+
+        // Yes, on the same ledger and the same name.
+        let approving = Pending::new();
+        let (show, approved) = recorder();
+        let answering = tokio::spawn({
+            let approving = approving.clone();
+            async move {
+                let question = wait_for_question_patiently(&approving).await;
+                assert!(approving.answer(question.id, true), "the question was still waiting");
+            }
+        });
+        let outcome = ledger
+            .tofu()
+            .authorize(&WindowConfirmer::new(approving.clone(), show), "laptop", &stranger_id)
+            .await;
+        answering.await.unwrap();
+
+        assert!(outcome.is_ok(), "a person said yes, so the send must be allowed: {outcome:?}");
+        assert_eq!(
+            ledger.tofu().pins().await.unwrap(),
+            vec![("laptop".to_string(), stranger_id.clone())],
+            "an approval has to pin exactly the key that was offered, under the name it was \
+             offered as, and nothing else"
+        );
+
+        // **And it is the key the person actually read.** A pin is only worth what the comparison
+        // in front of it was worth, so the fingerprint on the screen has to be the one that
+        // machine reports for itself — the same string `Peering::fingerprint` hands its own Status
+        // screen. Anything that re-derived it from somewhere else would pin a key nobody compared.
+        let shown = approved.lock().unwrap().clone();
+        assert_eq!(shown.len(), 1, "one question should have been shown: {shown:?}");
+        assert_eq!(shown[0].label, "laptop");
+        assert_eq!(
+            shown[0].fingerprint,
+            stranger.fingerprint(),
+            "the person was shown a fingerprint the other machine does not report for itself"
+        );
     }
 
     #[test]

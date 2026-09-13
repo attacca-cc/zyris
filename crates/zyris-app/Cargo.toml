@@ -30,6 +30,10 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 # The wire shape of what the Settings screen reads, pinned by a test in `bridge.rs`.
 serde_json = { workspace = true }
+# A directory per peer identity, for the tests in `confirm.rs` and `main.rs` that bind a real
+# `Peering` and read the ledger an approval writes. Nothing in this crate writes to disk outside
+# a test.
+tempfile = { workspace = true }
 # `macros` for `#[tokio::test]`, which `confirm.rs` needs: every assertion there is about what a
 # waiting `async fn` does, and `test-util` is what lets the deadline test move the clock instead of
 # sitting out the real 45 seconds.
