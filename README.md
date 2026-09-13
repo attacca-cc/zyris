@@ -55,7 +55,9 @@ reconstructs one just as well, so neither the text nor its length is written dow
 
 `file_transfer` moves a file straight between two of your computers rather than through Attacca.
 The bytes travel over [iroh](https://iroh.computer), and what arrives lands in an inbox under a
-folder named after the machine that sent it.
+folder named after the machine that sent it — `~/.local/share/zyris/inbox` on Linux,
+`%APPDATA%\attacca\zyris\data\inbox` on Windows. The Tools tab lists what is in there, newest
+first, with each file's full path.
 
 **The two directions are not gated the same way, and it is worth knowing which is which.**
 
@@ -67,10 +69,30 @@ nothing else can. Zyris does not ask you first, there is no per-machine approval
 the window will not add one — what stops a machine of your own sending here is revoking that node
 on your account.
 
-*Sending* is gated on a pin. Before this machine sends to a name for the first time, someone has
-to confirm the key behind that name, and **there is no way to confirm one from the window yet** —
-that is the next piece of work. Until it lands a peer has to have been pinned already, so sending
-is useful between machines you have set up and not yet useful for a machine you just added.
+*Sending* is gated on a pin, and that is the one you are asked about. The first time this machine
+sends to a name, the window comes up with the fingerprint of the key answering to that name and
+waits for you. Compare it against what the other machine says about itself — open Zyris on that
+machine and read its Status screen, under **This computer's fingerprint** — and approve only if
+the two match character for character. Approving pins that key under that name: this machine sends
+there without asking from then on, and a *different* key under the same name is refused outright
+rather than asked about a second time. Refusing pins nothing and fails that one send; an agent can
+try again, and you will be asked again.
+
+A machine running `--headless` has no window to read that off. Every Zyris writes the same value
+to its log when it starts, on the line reading `peer identity ready`, so on a headless machine
+that is where you look. It is not worth relying on anywhere else: Zyris logs to standard output,
+and a copy started by the autostart entry has no console for that output to reach.
+
+**A question cannot be replaced under your hand.** Only one machine is ever waiting to be
+approved: a second one asking while you are being asked is refused outright rather than queued
+behind you, and it stays refused for a moment after you answer, so that nothing can take the
+screen in the instant your click is landing. Both answers are also dead for the first three
+quarters of a second a question is on the screen. The whole point of a fingerprint is that
+somebody read it, and a button you can be trained to click without looking is worth nothing.
+
+**Nobody at the screen is a refusal.** The question gives up after 45 seconds, because the agent's
+call is cut off at 55 and an answer after that reaches nobody. `--headless` refuses every unknown
+peer without asking at all — there is nobody to ask, and nobody being around is not consent.
 
 Once a name is pinned, the pin keeps working in both directions: a key that is not the one pinned
 for that name is refused, whether this machine is dialling it or it is dialling here. What that
@@ -211,8 +233,7 @@ lands in what order. Nothing here is ready to install yet.
 2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
-5. File transfer — peer endpoint, inbox (done); confirming a new peer's key from the window, so
-   this machine can send to one it has not pinned, still to come
+5. File transfer — peer endpoint, inbox, approving a new machine's key from the window (done)
 6. MCP — local servers promoted to capabilities
 7. Voice in — audio, echo cancellation, wake word, transcription
 8. Voice out — streaming speech, interruption
@@ -231,9 +252,13 @@ side of the connection regardless of what the server says:
 A file can only arrive from a machine enrolled on your own Attacca account: a peer whose key is
 not on the account's node list is closed before the two ends have said anything to each other.
 That is the whole of the check on this side — **an incoming file is not something you are asked
-about**, and a machine of yours that you have never pinned can still send you one. The pin gates
-the other direction, and with no window to confirm a new key in, sending to a machine this one
-has not already pinned is refused.
+about**, and a machine of yours that you have never pinned can still send you one. Nor does the
+pause switch cover it: an arriving file asks this machine's agent surface for nothing, so there is
+no call for the switch to stop. What the Tools tab shows you is what arrived, after the fact.
+
+The pin gates the other direction, and that one you are asked about: before this machine sends to
+a name it has not sent to before, the window shows you the fingerprint of the key answering to
+that name and waits for you to approve it or refuse.
 
 ## License
 

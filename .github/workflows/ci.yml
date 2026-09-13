@@ -75,4 +75,10 @@ jobs:
       # with an error that never mentions the frontend.
       - run: pnpm --filter zyris-ui build
 
+      # The window's own half of the peer-approval guard lives in TypeScript and nothing in the
+      # Rust suite can reach it: which buttons are live in the instant a question is replaced is
+      # decided by a React effect. Run before the Rust suite, because it is seconds rather than
+      # minutes and a failure here should not wait behind one.
+      - run: pnpm --filter zyris-ui test
+
       - run: cargo test --workspace

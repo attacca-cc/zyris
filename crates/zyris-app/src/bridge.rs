@@ -20,13 +20,37 @@ use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
 use zyris_runtime::{CoreEvent, EventBus};
-use zyris_tools::{Announcement, AuditLog, Entry, Gate, Tools};
+use zyris_tools::{Announcement, AuditLog, Entry, Gate, InboxEntry, Tools, Transfers};
+
+use crate::confirm::{Pending, Question};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
 
+/// The one place a waiting question becomes an event.
+///
+/// Two callers, which is why it is a function rather than a struct literal written twice: `main`
+/// builds it when [`crate::confirm::WindowConfirmer`] asks, and [`forward`] rebuilds it for a
+/// window that fell behind. A second literal would be a second chance to drop a field, and the
+/// field most worth dropping is the one a person is meant to read.
+pub fn peer_question_event(question: &Question) -> CoreEvent {
+    CoreEvent::NeedsPeerApproval {
+        id: question.id,
+        label: question.label.clone(),
+        fingerprint: question.fingerprint.clone(),
+    }
+}
+
 /// Subscribes to the bus and republishes onto the webview for as long as the app lives.
-pub fn forward(app: AppHandle, bus: EventBus, gate: Gate, runtime: &tokio::runtime::Handle) {
+pub fn forward(
+    app: AppHandle,
+    bus: EventBus,
+    gate: Gate,
+    // For the lag path below, and for nothing else. A question is published transiently, so it is
+    // never in the catch-up slot — the only way to name it again is to ask the slot it lives in.
+    pending: Pending,
+    runtime: &tokio::runtime::Handle,
+) {
     let mut events = bus.subscribe();
     runtime.spawn(async move {
         loop {
@@ -55,6 +79,18 @@ pub fn forward(app: AppHandle, bus: EventBus, gate: Gate, runtime: &tokio::runti
                     let paused = CoreEvent::Paused { paused: gate.is_paused() };
                     if let Err(error) = app.emit(EVENT_NAME, &paused) {
                         tracing::warn!(%error, "could not resend the switch");
+                    }
+                    // And the question, for the same reason and read the same way: off the thing
+                    // that owns it rather than off the bus, because a transient publish leaves
+                    // nothing behind. Losing this one costs more than losing a tool call — an
+                    // agent's `send_to` is blocked on it, and it answers itself with a refusal
+                    // three quarters of a minute later if nobody is shown it. Absent is the
+                    // ordinary case and says nothing: `question()` is `None` whenever there is
+                    // no question, which is almost always.
+                    if let Some(question) = pending.question() {
+                        if let Err(error) = app.emit(EVENT_NAME, peer_question_event(&question)) {
+                            tracing::warn!(%error, "could not resend the waiting peer question");
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -118,6 +154,50 @@ pub fn is_paused(gate: State<Gate>) -> bool {
     gate.is_paused()
 }
 
+/// The peer question waiting for a person, if there is one.
+///
+/// The catch-up half of a pair, exactly as [`is_paused`] is to `Paused`: the event reaches a
+/// window that was already listening, and this reaches one that was not. A window raised *by* the
+/// question is the case that makes it necessary rather than tidy — `NeedsPeerApproval` is
+/// published the instant `confirm` is called, and on a run started `--minimized` the webview may
+/// not have finished registering its listener by then. An event alone would lose the question to
+/// exactly the run that most needs it.
+///
+/// It is also how the window learns a question **ended**, which no event reports. A question
+/// stops waiting three ways — answered, expired, or its caller cut off mid-`confirm` and the
+/// future dropped — and the last of those runs inside a `Drop`, on cancellation, with no place to
+/// publish from. So the screen re-asks while it is open, and `None` is the whole answer: a
+/// question that is not waiting is not a question, whichever of the three ended it.
+#[tauri::command]
+pub fn pending_peer(pending: State<Pending>) -> Option<Question> {
+    pending.question()
+}
+
+/// A person's answer to the peer question named by `id`.
+///
+/// **`false` is not a failure and must not be reported as one.** It means that question was no
+/// longer waiting — it expired, the machine that asked gave up, or this is the second click on a
+/// button that was never redrawn — and that nothing was pinned as a result. The window turns it
+/// into a line saying the question has gone, not into an error.
+///
+/// Nothing is decided here. `Pending::answer` checks the id against the question actually
+/// waiting and refuses an answer with nobody left to receive it; this command only carries.
+#[tauri::command]
+pub fn answer_peer(id: u64, approved: bool, pending: State<Pending>) -> bool {
+    let reached = pending.answer(id, approved);
+    // Written down because it is a decision a person made about what this machine will do, and
+    // the audit log does not cover it — that records what an agent called, and this is the answer
+    // underneath one such call. At `info` either way: "nobody was waiting" is as worth having in
+    // the log as the answer itself when somebody later asks why a send failed.
+    tracing::info!(
+        id,
+        approved,
+        reached,
+        "a person answered whether to send to a machine this one has not approved"
+    );
+    reached
+}
+
 /// What this machine announces, and the two paths that make the rest of the screen readable.
 ///
 /// A command rather than an event, and it breaks no rule about core state living behind one: the
@@ -139,6 +219,60 @@ pub fn announced_tools(tools: State<Tools>) -> Announcement {
 #[tauri::command]
 pub fn recent_tool_calls(limit: usize, log: State<AuditLog>) -> Result<Vec<Entry>, String> {
     log.recent(limit).map_err(|error| error.to_string())
+}
+
+/// What has arrived in this machine's inbox, newest first.
+///
+/// **Three answers, and the window says something different for each.** `Err` is a read that
+/// failed. `Ok(None)` is a machine with no peer identity: `file_transfer` is not announced, no
+/// file can arrive, and there is no inbox to read. `Ok(Some(entries))` is the list, and an empty
+/// one there is the only case that means nothing has arrived — the same distinction
+/// [`recent_tool_calls`] draws, made with an `Option` rather than an empty vector because
+/// "nothing can arrive here" and "nothing has" are two different sentences.
+///
+/// **Read through the capability rather than off the filesystem.** The layout under the inbox is
+/// `zyris-transfer`'s — a directory per sending peer, `.part` for a transfer still in flight —
+/// and a walker written on this side would be a second copy of those rules for upstream to drift
+/// away from. `Transfers::inbox_list` is the same call an agent's `inbox_list` makes.
+///
+/// `async`, and deliberately **not** through [`off_the_ui_thread`]. Tauri runs a blocking command
+/// inline on the IPC handler — the GTK main loop on Linux, the WebView2 UI thread on Windows —
+/// and walking a directory there is the window not repainting while the disk is slow. The walk
+/// underneath is `tokio::fs`, which yields to the runtime rather than occupying a thread, so this
+/// belongs on the async runtime and not in the blocking pool the autostart commands need.
+///
+/// The clone out of state is for the borrow rather than the cost: `State<'_, T>` hands out a
+/// reference tied to one call, and every clone of a `Transfers` is the same wiring anyway.
+#[tauri::command]
+pub async fn inbox(
+    transfers: State<'_, Option<Transfers>>,
+) -> Result<Option<Vec<InboxEntry>>, String> {
+    let Some(transfers) = transfers.inner().clone() else {
+        return Ok(None);
+    };
+
+    transfers.inbox_list().await.map(Some).map_err(|error| error.to_string())
+}
+
+/// This machine's own peer fingerprint, or `None` when it has no peer identity.
+///
+/// **The other half of [`pending_peer`], and the window had no way to show it.** The approval
+/// screen tells a person to compare eight groups of four against what the *other* machine reports
+/// for itself, and until this command existed the only place that value appeared was a
+/// `tracing::info!` line at startup — which on an autostarted Windows node goes to a stdout nobody
+/// is attached to. Following the instruction dead-ended, and a person who cannot find the other
+/// side of a comparison approves blind, which is the one thing this whole module argues against.
+///
+/// Computed once at `Peering::bind` and held, so this is a clone of a `String` rather than a walk
+/// of anything. It cannot fail and it never changes while the process runs: the same key means the
+/// same fingerprint, which is the property `Peering` exists for.
+///
+/// `None` is the machine with no peer identity — the same one [`inbox`] answers `Ok(None)` for,
+/// and for the same reason: there is no key, `file_transfer` is not announced, and an empty string
+/// would read as a fingerprint made of nothing.
+#[tauri::command]
+pub fn peer_fingerprint(transfers: State<'_, Option<Transfers>>) -> Option<String> {
+    transfers.inner().as_ref().map(|transfers| transfers.peering().fingerprint())
 }
 
 /// Everything the Settings screen needs to draw the autostart switch, read off the machine in
@@ -305,6 +439,77 @@ mod tests {
             Some(connected),
             "the switch took the catch-up slot; a cold window would strand on its starting screen"
         );
+    }
+
+    #[test]
+    fn a_question_reaches_the_window_with_both_strings_untouched() {
+        // The one thing this conversion can get wrong, and the way it would be got wrong: an
+        // event built field by field in two places, one of which trims or re-cases the string a
+        // person is about to compare against another machine's screen. Both surfaces the window
+        // has — this event and the `pending_peer` command's `Question` — must hand over the same
+        // characters, so both are asserted against the same constant.
+        const FINGERPRINT: &str = "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8";
+        let question =
+            Question { id: 3, label: "Kitchen-Pi".into(), fingerprint: FINGERPRINT.into() };
+
+        assert_eq!(
+            peer_question_event(&question),
+            CoreEvent::NeedsPeerApproval {
+                id: 3,
+                label: "Kitchen-Pi".into(),
+                fingerprint: FINGERPRINT.into(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&question).unwrap(),
+            serde_json::json!({
+                "id": 3,
+                "label": "Kitchen-Pi",
+                "fingerprint": FINGERPRINT,
+            }),
+            "ui/src/PeerConfirm.tsx transcribes these field names; nothing checks that at build time"
+        );
+    }
+
+    #[test]
+    fn the_inbox_rows_the_tools_screen_reads_are_snake_case_and_absent_is_not_empty() {
+        // Two agreements with `ui/src/Tools.tsx`, neither of which anything checks at build time.
+        //
+        // The field names are the first, and they are the exception on this boundary.
+        // `InboxEntry` comes from the protocol stack and derives a plain `Serialize` with no
+        // `rename_all`, so the time the window renders is at `received_unix_ms` — snake_case,
+        // unlike every structure this workspace writes and serializes camelCase. A screen that
+        // reached for `receivedUnixMs` would get `undefined` and render every arrival at the
+        // epoch.
+        let entry = InboxEntry {
+            from: "kitchen-pi".into(),
+            name: "notes.txt".into(),
+            bytes: 12,
+            path: "/home/ada/.local/share/zyris/inbox/kitchen-pi/notes.txt".into(),
+            received_unix_ms: 1_757_000_000_000,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap(),
+            serde_json::json!({
+                "from": "kitchen-pi",
+                "name": "notes.txt",
+                "bytes": 12,
+                "path": "/home/ada/.local/share/zyris/inbox/kitchen-pi/notes.txt",
+                "received_unix_ms": 1_757_000_000_000u64,
+            })
+        );
+
+        // The second is that `None` and an empty list do not arrive looking the same. `null` is
+        // a machine with no peer identity, where nothing can arrive at all; `[]` is an inbox that
+        // was read and is empty. The screen says a different sentence for each, and only the
+        // second one is "Nothing has arrived yet."
+        let nothing_can_arrive = serde_json::to_value(None::<Vec<InboxEntry>>).unwrap();
+        let nothing_has = serde_json::to_value(Some(Vec::<InboxEntry>::new())).unwrap();
+
+        assert_eq!(nothing_can_arrive, serde_json::json!(null));
+        assert_eq!(nothing_has, serde_json::json!([]));
+        assert_ne!(nothing_can_arrive, nothing_has);
     }
 
     #[test]

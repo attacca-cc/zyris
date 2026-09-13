@@ -1,10 +1,12 @@
 import { useEffect, useReducer } from "react";
 import { Onboarding } from "./Onboarding";
+import { PeerConfirm } from "./PeerConfirm";
 import { Settings } from "./Settings";
 import { Status } from "./Status";
 import { Tools } from "./Tools";
 import {
   fetchLatestEvent,
+  fetchPendingPeer,
   initialState,
   reduce,
   subscribe,
@@ -64,6 +66,20 @@ export function App() {
       void fetchLatestEvent().then((event) => {
         if (!cancelled && event) dispatch(event);
       });
+      // And the other thing a window can arrive too late for. A peer question is published
+      // transiently, so it is never in the one-slot value above — and this window may well have
+      // been *raised by* that question, which means the core published it while the webview was
+      // still starting. An event alone would lose it to exactly the case it exists for.
+      //
+      // Only a question is folded in, never the absence of one. `null` is what the command says
+      // whenever nothing is waiting, which is almost always, and it is already the initial state
+      // — so applying it would buy nothing and would cost a race: a question arriving live in the
+      // gap between this call and its answer would be wiped out by an answer that predates it.
+      // `Action` now says so as well: `peerQuestion` cannot carry an absence, and the one action
+      // that clears a question has to name which one it is clearing.
+      void fetchPendingPeer().then((question) => {
+        if (!cancelled && question) dispatch({ kind: "peerQuestion", question });
+      });
     });
     return () => {
       cancelled = true;
@@ -71,6 +87,12 @@ export function App() {
     };
   }, []);
 
+  // Over everything, including onboarding, and it does not touch `screen`: the screen underneath
+  // is handed back untouched the moment the question is answered. First because it is the only
+  // thing here with a deadline — an agent's send is blocked on it and refuses itself if nobody
+  // answers — and because it cannot collide with onboarding in practice anyway: a question comes
+  // from an agent, an agent needs a connection, and a connection needs this machine enrolled.
+  if (state.question) return <PeerConfirm question={state.question} dispatch={dispatch} />;
   if (state.screen === "onboarding") return <Onboarding state={state} />;
   // The sidebar appears only once this machine is enrolled: before that there is nothing to
   // navigate to, and offering a choice of screens to someone who has not authorized the computer

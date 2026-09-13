@@ -64,6 +64,24 @@ pub enum CoreEvent {
     /// The switch moved. Published on every change so the tray and the window agree without
     /// either of them asking.
     Paused { paused: bool },
+    /// This machine is about to **send** a file to a peer nobody here has approved, and is
+    /// waiting for a person to compare `fingerprint` against what that machine shows on its own
+    /// screen. `id` names the question an answer has to name back.
+    ///
+    /// **Sending only.** Approving makes this computer willing to send to `label`; it is not a
+    /// door on files arriving, and nothing on the receiving side consults it. `zyris-app`'s
+    /// `confirm` module records why.
+    ///
+    /// Published through [`EventBus::publish_transient`], never [`EventBus::publish`], for a
+    /// reason narrower than the tool call's: a question is state a late window *does* have to
+    /// catch up on, but it is state that stops being true the moment it is answered, expires or
+    /// its caller gives up. Left in the one-slot catch-up value it would outlive all three and
+    /// hand a window that opened an hour later a live-looking Approve button reaching nobody —
+    /// and it would displace the `Connected` that window needs to leave its starting screen.
+    /// The catch-up path is a command that reads the waiting question itself, which answers
+    /// `None` the instant there is not one.
+    #[serde(rename_all = "camelCase")]
+    NeedsPeerApproval { id: u64, label: String, fingerprint: String },
     /// A tool call happened. The window shows a tail of these; the durable record is the audit
     /// log on disk, which outlives the process.
     ///
@@ -288,6 +306,51 @@ mod tests {
         let json = serde_json::to_string(&CoreEvent::Paused { paused: true }).unwrap();
 
         assert_eq!(json, r#"{"kind":"paused","paused":true}"#);
+    }
+
+    #[test]
+    fn a_peer_question_pins_its_wire_shape() {
+        // The fingerprint crosses this wire on its way to a person who will compare it, group by
+        // group, against another machine's screen. Pinned as a whole string, spaces and case
+        // included: upstream renders 128 bits as eight space-separated groups of four uppercase
+        // hex digits, and a serialization that trimmed, split or lowercased it would break that
+        // comparison for a reason that has nothing to do with the keys.
+        let json = serde_json::to_string(&CoreEvent::NeedsPeerApproval {
+            id: 7,
+            label: "kitchen-pi".into(),
+            fingerprint: "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8".into(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            json,
+            r#"{"kind":"needsPeerApproval","id":7,"label":"kitchen-pi","fingerprint":"9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"}"#
+        );
+    }
+
+    #[test]
+    fn a_peer_question_stays_out_of_the_catch_up_slot() {
+        // The one thing this event must not do. A question answered a minute ago left sitting in
+        // the slot is handed to every window that opens afterwards, which would draw an Approve
+        // button for a send that has long since finished — and it would push out the `Connected`
+        // that window reads to leave its starting screen. The catch-up path for a question is
+        // `pending_peer`, which reads the waiting question itself and answers `None` when there
+        // is none.
+        let bus = EventBus::new(8);
+        let connected = CoreEvent::Connected { node_id: "n_1".into(), node_name: "laptop".into() };
+        bus.publish(connected.clone());
+
+        bus.publish_transient(CoreEvent::NeedsPeerApproval {
+            id: 1,
+            label: "kitchen-pi".into(),
+            fingerprint: "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8".into(),
+        });
+
+        assert_eq!(
+            bus.latest(),
+            Some(connected),
+            "a question in the catch-up slot outlives the question itself"
+        );
     }
 
     #[test]

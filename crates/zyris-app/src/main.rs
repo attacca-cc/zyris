@@ -9,6 +9,7 @@
 
 mod bridge;
 mod cli;
+mod confirm;
 mod gui;
 mod headless;
 mod tray;
@@ -128,15 +129,21 @@ fn main() -> anyhow::Result<()> {
     // `terminal`, and the one directory `file_transfer` will read a file out of.
     let root = zyris_tools::default_root();
 
+    // The slot a question about an unapproved peer waits in, built here because both ends of it
+    // are built here: `peer_confirmer` below fills it from a tokio worker, and `gui::run` hands
+    // the very same handle to the two commands the window answers through. A second `Pending`
+    // would be a question nobody could answer.
+    //
+    // Built in both modes. Headless never installs the confirmer that fills it, so it stays empty
+    // for that run — which costs an `Arc` and keeps this line out of the branch.
+    let pending = confirm::Pending::new();
+
     // **Bound before the `Tools`, because what is announced depends on whether it bound.**
     // `block_on` rather than an async main: the GUI runtime owns the main thread synchronously,
     // and the endpoint's background work keeps running on the runtime's worker threads after
     // this returns.
-    let transfers = match runtime.block_on(zyris_tools::Transfers::bind(
-        &data,
-        root.clone(),
-        peer_confirmer(mode),
-    )) {
+    let transfers = match runtime.block_on(bind_transfers(mode, &data, root.clone(), &pending, &bus))
+    {
         Ok(transfers) => Some(transfers),
         // How loudly this is said depends on *why* it failed, which is why it is not one line
         // here. See `report_no_peer_identity`.
@@ -186,6 +193,15 @@ fn main() -> anyhow::Result<()> {
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(capabilities);
 
+    // The window's handle on file transfer, taken before the hook below consumes the value.
+    //
+    // A clone rather than a second `Transfers`: every clone is the same wiring — the same
+    // endpoint, the same ledger, the same inbox — so what the Tools screen lists is the
+    // capability's own answer rather than a second reader's idea of where files land. `None` is
+    // the machine that has no peer identity, where there is no inbox to read and nothing can
+    // arrive; the window says that rather than showing an empty list.
+    let window_transfers = transfers.clone();
+
     // The other half of file transfer, and the reason `Connector` has a hook at all. There is
     // room for exactly one, which is why everything per-connection happens inside this one call:
     // replacing the rendezvous client, republishing where this machine can be reached, and — the
@@ -217,6 +233,12 @@ fn main() -> anyhow::Result<()> {
             runtime.handle().clone(),
             connector,
             tools,
+            // The other end of the slot `peer_confirmer` fills. The window reads and answers
+            // through this handle; it is not a copy.
+            pending,
+            // What the Tools screen lists the inbox from, and the only reason the window has any
+            // handle on transfer at all.
+            window_transfers,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether
@@ -369,6 +391,30 @@ fn report_no_peer_identity(error: &anyhow::Error) {
     }
 }
 
+/// File transfer, bound onto the confirmer this run is entitled to.
+///
+/// **One line of work, and it is a function so that the line is covered.** `Transfers::bind` is
+/// what hands a confirmer to `LocalFileTransfer`, and until this existed the only expression that
+/// decided *which* confirmer got there lived inside `main` — where nothing can reach it. Every
+/// test built its own `peer_confirmer` and passed, so replacing this argument with
+/// `Arc::new(DenyUnknown)` left the whole suite green while the windowed arm went dead: no
+/// question published, no window raised, every send to an unpinned name refused, and nothing
+/// anywhere to say so. `the_windowed_run_wires_its_own_confirmer_into_file_transfer` calls this
+/// and asks the bound value itself who it would ask, which is the assertion that revert now fails.
+///
+/// Everything else about binding — the key, the socket, the ledger, the inbox — is
+/// [`zyris_tools::Transfers::bind`]'s, and the caller still reports a failure through
+/// [`report_no_peer_identity`] rather than this swallowing it.
+async fn bind_transfers(
+    mode: cli::Mode,
+    data: &std::path::Path,
+    root: std::path::PathBuf,
+    pending: &confirm::Pending,
+    bus: &EventBus,
+) -> anyhow::Result<zyris_tools::Transfers> {
+    zyris_tools::Transfers::bind(data, root, peer_confirmer(mode, pending, bus)).await
+}
+
 /// Who answers when this machine is about to **send** a file to a peer it has never pinned.
 ///
 /// **Sending only, and that is the whole of its reach.** The confirmer goes to exactly one place
@@ -379,21 +425,39 @@ fn report_no_peer_identity(error: &anyhow::Error) {
 /// incoming files, and replacing `DenyUnknown` here will not make it one — a file from another
 /// node of this account arrives whether or not that node has ever been pinned.
 ///
-/// **`DenyUnknown` in both modes today, and that is a real limitation rather than a placeholder
-/// in the headless arm.** With nobody to ask, refusing is the only safe answer: a peer must not
-/// become trusted merely because no one was around to say no. With a window there *is* someone to
-/// ask, and step 5b replaces the second arm with a confirmer that raises the tray notification
-/// and shows the peer's fingerprint for a person to compare — the whole of that change is the one
-/// expression below. Until then a windowed run refuses to send to an unpinned peer exactly as a
-/// headless one does.
+/// **`DenyUnknown` in headless, and that is a real limitation rather than a gap.** With nobody to
+/// ask, refusing is the only safe answer: a peer must not become trusted merely because no one was
+/// around to say no. A `--headless` run therefore cannot send a file to a machine it has not
+/// already pinned, and no amount of waiting changes that.
 ///
-/// The two arms are written out rather than collapsed for that reason: this is where the two
-/// modes are about to differ, and the seam is worth more than the line it costs.
-fn peer_confirmer(mode: cli::Mode) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
+/// With a window there *is* somebody to ask. The windowed arm installs [`confirm::WindowConfirmer`]
+/// instead, which parks the question in `pending` and publishes it; `gui.rs` is what puts the
+/// window on the screen when that event goes past, and the window answers back through
+/// [`bridge::answer_peer`] into the same slot.
+///
+/// **The question travels on the bus rather than through an `AppHandle`, and that is not
+/// incidental.** This function runs before Tauri exists — `Transfers::bind` needs a confirmer, and
+/// the app is not built until `gui::run` — so there is no window to hold onto here. The bus is
+/// already the one thing both halves of this program can reach, and publishing on it gets the
+/// question to the webview through the forwarder that is already running, for nothing.
+///
+/// Transiently, for the reason [`zyris_runtime::CoreEvent::NeedsPeerApproval`] gives: a question
+/// answered a minute ago must not be handed to every window that opens afterwards.
+fn peer_confirmer(
+    mode: cli::Mode,
+    pending: &confirm::Pending,
+    bus: &EventBus,
+) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
     match mode {
         cli::Mode::Headless => std::sync::Arc::new(zyris_tools::DenyUnknown),
         cli::Mode::Window | cli::Mode::WindowHidden => {
-            std::sync::Arc::new(zyris_tools::DenyUnknown)
+            let bus = bus.clone();
+            std::sync::Arc::new(confirm::WindowConfirmer::new(
+                pending.clone(),
+                std::sync::Arc::new(move |question: &confirm::Question| {
+                    bus.publish_transient(bridge::peer_question_event(question));
+                }),
+            ))
         }
     }
 }
@@ -401,6 +465,146 @@ fn peer_confirmer(mode: cli::Mode) -> std::sync::Arc<dyn zyris_tools::PeerConfir
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn headless_refuses_an_unknown_peer_without_asking_anybody() {
+        // The arm that must never grow a window. There is nobody at a `--headless` run to read a
+        // fingerprint, so the answer is no — and it has to be *immediately* no: a headless
+        // confirmer that parked the question somewhere would block an agent's `send_to` for three
+        // quarters of a minute and then refuse it anyway.
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+        let mut watching = bus.subscribe();
+
+        let confirmer = peer_confirmer(cli::Mode::Headless, &pending, &bus);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
+        )
+        .await
+        .expect("headless has to answer at once rather than wait for somebody");
+
+        assert!(!answer, "nobody is there, so nothing may be approved");
+        assert!(pending.question().is_none(), "headless must not park a question anywhere");
+        assert!(
+            watching.try_recv().is_err(),
+            "there is no window to publish a question to, and a tray-less run has no surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_windowed_run_asks_and_says_so_on_the_bus() {
+        // The seam this step opens. Both halves are asserted because either alone is useless: a
+        // question parked where the commands can reach it, and an event so that something raises
+        // the window and draws it.
+        const FINGERPRINT: &str = "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8";
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+        let mut watching = bus.subscribe();
+
+        let confirmer = peer_confirmer(cli::Mode::WindowHidden, &pending, &bus);
+        let asked = tokio::spawn(async move { confirmer.confirm("kitchen-pi", FINGERPRINT).await });
+
+        let published = tokio::time::timeout(std::time::Duration::from_secs(1), watching.recv())
+            .await
+            .expect("a windowed run publishes the question rather than refusing it")
+            .unwrap();
+        let zyris_runtime::CoreEvent::NeedsPeerApproval { id, label, fingerprint } = published
+        else {
+            panic!("a question must be published as one: {published:?}");
+        };
+        assert_eq!(label, "kitchen-pi");
+        assert_eq!(fingerprint, FINGERPRINT, "the person compares this character by character");
+
+        // And the same question is reachable by the command a window that opened late calls, at
+        // the same id the answer will name.
+        let waiting = pending.question().expect("the question is parked for a late window");
+        assert_eq!(waiting.id, id);
+        assert_eq!(waiting.fingerprint, FINGERPRINT);
+
+        assert!(pending.answer(id, true), "the id on the wire is the id an answer names");
+        assert!(asked.await.unwrap(), "and the answer reaches the caller");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_windowed_run_wires_its_own_confirmer_into_file_transfer() {
+        // **The wiring, not the factory.** `a_windowed_run_asks_and_says_so_on_the_bus` above
+        // proves `peer_confirmer` builds the right thing; it says nothing about whether the value
+        // `file_transfer` actually holds came from there. That was one expression inside `main`,
+        // which no test could reach — so swapping it for `Arc::new(DenyUnknown)` killed the whole
+        // feature and broke not one assertion. This asks the bound `Transfers` itself.
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+
+        let transfers = bind_transfers(
+            cli::Mode::WindowHidden,
+            data.path(),
+            root.path().to_path_buf(),
+            &pending,
+            &bus,
+        )
+        .await
+        .expect("binding a peer identity in a temporary directory");
+
+        // Behaviour rather than a type check: there is no way to ask an `Arc<dyn PeerConfirmer>`
+        // what it is, and the thing that matters is what it *does* anyway. `DenyUnknown` answers
+        // no at once and parks nothing; the windowed confirmer parks a question where the window's
+        // commands can reach it and waits for a person.
+        let confirmer = transfers.peering().confirmer();
+        let asked = tokio::spawn(async move {
+            confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8").await
+        });
+
+        let mut waiting = None;
+        for _ in 0..2000 {
+            if let Some(question) = pending.question() {
+                waiting = Some(question);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let waiting = waiting.expect(
+            "the confirmer behind file_transfer refused without asking anybody, which is what a \
+             windowed run installing DenyUnknown looks like from the outside",
+        );
+        assert_eq!(waiting.label, "kitchen-pi");
+
+        assert!(pending.answer(waiting.id, true), "and the window's answer reaches it");
+        assert!(asked.await.unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_headless_run_wires_the_refusal_into_file_transfer() {
+        // The converse, so the test above cannot pass by asserting something true of both arms.
+        // `--headless` has nobody to ask, and a confirmer that parked a question there would
+        // block an agent's `send_to` for three quarters of a minute and refuse it anyway.
+        let data = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+
+        let transfers = bind_transfers(
+            cli::Mode::Headless,
+            data.path(),
+            root.path().to_path_buf(),
+            &pending,
+            &bus,
+        )
+        .await
+        .expect("binding a peer identity in a temporary directory");
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            transfers.peering().confirmer().confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
+        )
+        .await
+        .expect("headless has to answer at once rather than wait for somebody");
+
+        assert!(!answer, "nobody is there, so nothing may be approved");
+        assert!(pending.question().is_none(), "headless must not park a question anywhere");
+    }
 
     #[test]
     fn the_default_instance_keeps_the_name_an_existing_install_already_uses() {

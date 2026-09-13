@@ -55,6 +55,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+// The trait, for its `inbox_list`. In scope rather than re-exported: nothing outside this crate
+// calls a capability method directly, and [`Transfers::inbox_list`] is what the window uses.
+use zyris::caps::FileTransfer;
 use zyris::p2p::fingerprint::fingerprint;
 use zyris::p2p::tofu::TofuStore;
 use zyris::p2p::transport::ALPN;
@@ -71,6 +74,44 @@ use zyris_transfer::{
 ///
 /// **The sending side only.** See this module's "What gates a transfer, in each direction".
 pub use zyris::p2p::fingerprint::{DenyUnknown, PeerConfirmer};
+
+/// One file that has arrived, as [`Transfers::inbox_list`] reports it.
+///
+/// Re-exported so `zyris-app` can name what the window lists without a dependency on the protocol
+/// stack of its own, the same reason [`PeerConfirmer`] is.
+///
+/// **Its fields serialize snake_case.** It derives a plain `Serialize` upstream with no
+/// `rename_all`, so the window reads `received_unix_ms` rather than the camelCase every structure
+/// written in this workspace crosses the IPC boundary as. A test in `zyris-app`'s `bridge.rs`
+/// pins that, because nothing else would catch it.
+///
+/// `received_unix_ms` is the file's modification time on this machine, read with
+/// `Metadata::modified` and **zero when the platform will not give one** — not a delivery time
+/// recorded when the bytes landed. Nothing in `zyris-transfer` carries the sender's timestamps
+/// over, so for a file nobody has touched since it arrived the two are the same moment.
+pub use zyris::caps::InboxEntry;
+
+/// The attribute [`PeerConfirmer`] is declared with, without which it cannot be implemented.
+///
+/// Re-exported for the same reason the trait is, and it is the half that makes the other one
+/// useful: the trait has an `async fn` in it, so upstream declares it under `#[async_trait]` and
+/// every implementation has to be written under the same attribute. Naming the trait without
+/// being able to name that macro leaves `main` no way to write a confirmer of its own except by
+/// depending on the protocol stack — which is exactly what re-exporting the trait was for.
+pub use zyris::async_trait;
+
+/// How long `file_transfer.send_to` gives the whole of one call — the file hash, the peer lookup,
+/// [`PeerConfirmer::confirm`] and the dial together — before it answers `pending` instead of
+/// finishing. Upstream's `DEFAULT_WIRE_DEADLINE`, and the value [`Transfers`] configures.
+///
+/// Re-exported because a [`PeerConfirmer`] that waits for a person has to fit inside it and has no
+/// other way to know what "inside" is. Past this point the caller's future is dropped mid-`confirm`
+/// and an answer given afterwards reaches nobody, so a confirmer whose own deadline is longer than
+/// this one has no deadline at all — it only ever ends by being cut off, which is reported to the
+/// agent as "the peer had not been reached yet" rather than as "nobody approved this".
+///
+/// Upstream's reason for 55: "Attacca cuts a node call off at 60 seconds with a `Timeout` error."
+pub use zyris_transfer::DEFAULT_WIRE_DEADLINE as WIRE_DEADLINE;
 
 /// Why loading this machine's key failed, for a caller that has to say something different about
 /// each one.
@@ -337,6 +378,36 @@ impl Transfers {
     /// Where received files land.
     pub fn inbox(&self) -> &Path {
         &self.inbox
+    }
+
+    /// What has arrived, newest first — the capability's own answer, for the window.
+    ///
+    /// **The same read an agent's `inbox_list` does, rather than a second one.** The layout under
+    /// [`Self::inbox`] belongs to `zyris-transfer`: one directory per sending peer, a `.part` for
+    /// a transfer still in flight and so not something that has arrived, the undo stash
+    /// deliberately outside. A walker written here would be a second copy of those rules, free to
+    /// drift from the first the day upstream changes one — and the drift would show as a window
+    /// quietly listing something different from what an agent sees.
+    ///
+    /// Not behind [`Guarded`](crate::Guarded), and it does not belong there. The gate and the
+    /// audit log are about what an agent asks *of* this machine; this is a person looking at
+    /// their own inbox, which pausing has never stopped and which no agent called.
+    ///
+    /// **A read that fails is an error here and must stay one.** Upstream is careful about this —
+    /// it returns `Err` rather than the short list it has so far when a directory stops half way
+    /// — and a caller that turned that into `Vec::new()` would tell a person nothing has ever
+    /// arrived on the strength of a permission error. An inbox nothing has been written to yet
+    /// does not exist, and that one really is empty.
+    pub async fn inbox_list(&self) -> anyhow::Result<Vec<InboxEntry>> {
+        self.file_transfer.inbox_list().await.map_err(|error| {
+            // One self-contained sentence rather than a `with_context` chain, because the window
+            // renders this with `Display` and no `#` — which prints the outermost link alone, so
+            // a context line here would show the path and drop the reason. `error.code` is
+            // `Internal` for every failure on this path and says nothing a person could act on;
+            // `message` is upstream's own sentence, which names what it was reading when it
+            // stopped.
+            anyhow!("{} could not be read: {}", self.inbox.display(), error.message)
+        })
     }
 
     /// The capability [`Tools`](crate::Tools) announces. The clone shares this one's rendezvous
@@ -775,6 +846,64 @@ mod tests {
         let transfers = transfers(dir.path()).await;
 
         assert!(!transfers.receiving.undo.starts_with(transfers.inbox()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_is_shown_what_arrived_in_the_inbox_this_machine_receives_into() {
+        // The window's list and an agent's `inbox_list` have to be the same read of the same
+        // directory. This is what would break if someone gave the capability one inbox and the
+        // window another — two paths are set from one local in `bind`, and nothing but this
+        // notices the day they stop being.
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = transfers(dir.path()).await;
+        let from = transfers.inbox().join("kitchen-pi");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("notes.txt"), b"twelve bytes").unwrap();
+
+        let arrived = transfers.inbox_list().await.unwrap();
+
+        assert_eq!(arrived.len(), 1, "{arrived:?}");
+        let entry = &arrived[0];
+        // The sender's directory name, the file's own name, and its size as the disk reports it.
+        assert_eq!(entry.from, "kitchen-pi");
+        assert_eq!(entry.name, "notes.txt");
+        assert_eq!(entry.bytes, 12);
+        // Absolute, and under the inbox: it is what a person opens the file by.
+        assert_eq!(entry.path, from.join("notes.txt").display().to_string());
+        assert!(std::path::Path::new(&entry.path).starts_with(transfers.inbox()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbox_nothing_has_been_written_to_is_empty_rather_than_a_failure() {
+        // Nothing creates the inbox until the first file lands in it, so this is what every
+        // machine answers until one does — and "Nothing has arrived yet." is only the honest
+        // thing to show because this is an `Ok`.
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = transfers(dir.path()).await;
+
+        assert!(!transfers.inbox().exists(), "the inbox is made on delivery, not on bind");
+        assert_eq!(transfers.inbox_list().await.unwrap(), Vec::new());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_inbox_that_cannot_be_read_is_an_error_rather_than_an_empty_list() {
+        // The defect this half of the step exists to avoid, at the layer it would be introduced
+        // in: a caller that turned a failed read into an empty list would have the window state
+        // that nothing has ever arrived on the strength of an unreadable directory. A file where
+        // the inbox should be is the portable way to make the read fail without making it
+        // *absent* — absent is the case above, and really is empty.
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = transfers(dir.path()).await;
+        std::fs::write(transfers.inbox(), b"not a directory").unwrap();
+
+        let error = transfers.inbox_list().await.expect_err("a file is not an empty inbox");
+
+        // The path is in the message because the message is the whole of what the window shows:
+        // it renders this with `Display` and no `#`, so anything left in a cause is not shown.
+        assert!(
+            error.to_string().contains(&transfers.inbox().display().to_string()),
+            "{error}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

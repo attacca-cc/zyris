@@ -10,4 +10,7 @@ pub use announce::{Announced, Announcement, Tools, default_root};
 pub use audit::{AuditLog, Entry, Outcome};
 pub use gate::Gate;
 pub use guarded::Guarded;
-pub use transfer::{DenyUnknown, KeyError, PeerConfirmer, Peering, Transfers};
+pub use transfer::{
+    DenyUnknown, InboxEntry, KeyError, PeerConfirmer, Peering, Transfers, WIRE_DEADLINE,
+    async_trait,
+};
