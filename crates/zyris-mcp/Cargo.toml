@@ -1,0 +1,30 @@
+[package]
+name = "zyris-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+rmcp = { workspace = true }
+serde_json = { workspace = true }
+# `process` for the command a server is, `time` for the deadline `Server::spawn` puts on the
+# handshake. `rmcp`'s `transport-child-process` turns on `tokio/process` too; naming it here as
+# well is the convention in this workspace — a crate declares what it uses rather than relying on
+# somebody else's feature to supply it.
+tokio = { workspace = true, features = ["process", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `rt-multi-thread`: `TokioChildProcess`'s `Drop` reaps the child with `tokio::spawn`, and a
+# current-thread runtime only gets to that at an await point of its own.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The server the tests talk to. An example rather than a `[[bin]]`, so `cargo build` does not
+# produce it and nothing ships it; the source sits under `tests/` because that is what it is for.
+# `cargo test` builds examples, which is what puts it on disk where `tests/one_server.rs` looks.
+[[example]]
+name = "probe_server"
+path = "tests/support/probe_server.rs"
