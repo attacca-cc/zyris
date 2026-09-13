@@ -8577,6 +8577,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "zyris",
 ]
 
 [[package]]

@@ -16,6 +16,10 @@ serde_json = { workspace = true }
 # somebody else's feature to supply it.
 tokio = { workspace = true, features = ["process", "time"] }
 tracing = { workspace = true }
+# The protocol side of the translation `promote.rs` performs: `ServeCapability`, the descriptor
+# types it answers with, and `WireError`. Nothing here dials or announces — that is `zyris-app`'s
+# job — so this is the wire vocabulary and not a node.
+zyris = { workspace = true }
 
 [dev-dependencies]
 # `rt-multi-thread`: `TokioChildProcess`'s `Drop` reaps the child with `tokio::spawn`, and a

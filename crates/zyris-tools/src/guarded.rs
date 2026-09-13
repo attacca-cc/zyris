@@ -30,7 +30,38 @@ pub struct Guarded<C> {
     /// without one still refuses, still runs and still writes every line to disk. The crate's
     /// own tests use that shape.
     bus: Option<EventBus>,
+    /// Whether [`summarize`] runs at all, decided once from the capability's name.
+    ///
+    /// See [`MCP_CAPABILITY_PREFIX`]. False for a promoted MCP server, whose arguments this
+    /// workspace has never seen and must not write down.
+    summarize_params: bool,
 }
+
+/// The prefix `zyris-mcp` gives every capability it promotes from a local MCP server.
+///
+/// **A capability whose name starts with this writes no argument detail into the audit log at
+/// all**, and that is the whole reason this constant is here rather than in the crate that
+/// produces it.
+///
+/// [`LOGGED_FIELDS`] is an allowlist whose entries were each chosen by reasoning about what a
+/// parameter *means* in one of this machine's own five capabilities — `path` is a file this node
+/// resolved, `command` is a shell command line, `pty` is a terminal. **None of that reasoning
+/// transfers to a server somebody installed.** A promoted tool's arguments are arbitrary JSON
+/// written by a third party, and a field spelled `path` or `command` in one of them is a
+/// coincidence of spelling and not the same fact — it could as easily be a password. The
+/// allowlist matches on spelling alone, so without this rule those two names would be written
+/// down for every MCP server on the machine.
+///
+/// Widening the allowlist to *catch* MCP arguments would be the same mistake pointing the other
+/// way, and is ruled out for the same reason. The tool call is still recorded — when, which
+/// capability, which tool, and whether the switch let it through — and that is the record. What
+/// is not recorded is what was asked, and anything telling a person about this log has to say so
+/// rather than let them assume otherwise.
+///
+/// Matched on the name rather than set by whoever builds the `Guarded`, so it cannot be forgotten
+/// at a call site added later; `zyris_mcp::CAPABILITY_PREFIX` is the same string, and the two
+/// become one constant when `announce.rs` starts naming that crate.
+pub const MCP_CAPABILITY_PREFIX: &str = "mcp_";
 
 impl<C: ServeCapability> Guarded<C> {
     pub fn new(inner: C, gate: Gate, log: AuditLog) -> Guarded<C> {
@@ -38,7 +69,8 @@ impl<C: ServeCapability> Guarded<C> {
         // in the capability on each call — about a millisecond for `file_io` — so the name is
         // taken once here rather than on the request path.
         let capability = inner.descriptor().name;
-        Guarded { inner, capability, gate, log, bus: None }
+        let summarize_params = !capability.starts_with(MCP_CAPABILITY_PREFIX);
+        Guarded { inner, capability, gate, log, bus: None, summarize_params }
     }
 
     /// Also tell everything watching, as each call happens.
@@ -90,7 +122,9 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
     async fn dispatch(&self, call: IncomingCall) -> zyris::Result<Outgoing> {
         // Both of these are read before the call is handed on, because `dispatch` consumes it.
         let tool = call.tool.clone();
-        let detail = summarize(&call);
+        // An empty detail rather than a summary for a promoted MCP capability — see
+        // [`MCP_CAPABILITY_PREFIX`]. The line itself is still written.
+        let detail = if self.summarize_params { summarize(&call) } else { String::new() };
 
         if let Err(refusal) = self.gate.check() {
             self.record(&tool, detail, Outcome::Refused);
@@ -164,6 +198,11 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// trait's parameter list with no `rename_all`, so they stay snake_case. `exec` carries its
 /// command line in `command` **or** `argv`, never both, and `pty` identifies the target of every
 /// `read`/`screen`/`write`/`resize`/`close`.
+///
+/// **None of this reasoning reaches a promoted MCP capability, and it must not be made to.** Every
+/// entry below is a judgement about what a name *means* in one of this machine's own five
+/// capabilities, and a server somebody installed shares none of those meanings — only, sometimes,
+/// the spelling. See [`MCP_CAPABILITY_PREFIX`], where that is settled.
 ///
 /// The array's order is the line's order, so `path=` stays first.
 const LOGGED_FIELDS: &[&str] = &[
@@ -385,6 +424,115 @@ mod tests {
         let log = crate::AuditLog::new(dir.join("audit.jsonl"));
         let cap = Guarded::new(FileTransferServer(FakeTransfer), gate.clone(), log.clone());
         (gate, log, cap)
+    }
+
+    /// A capability built at runtime, under whatever name it is given, with one tool that takes
+    /// anything and always succeeds.
+    ///
+    /// This is the shape `zyris-mcp`'s `Promoted` has: not produced by the capability macro, with
+    /// a name chosen from a configuration file, and with a request schema that says nothing.
+    /// Written here rather than depended on, because `zyris-tools` does not name `zyris-mcp` yet
+    /// and what is under test is this file's rule and not that crate's.
+    struct RuntimeCapability(&'static str);
+
+    #[zyris::async_trait]
+    impl ServeCapability for RuntimeCapability {
+        fn descriptor(&self) -> CapabilityDescriptor {
+            CapabilityDescriptor {
+                name: self.0.to_string(),
+                version: 1,
+                tools: vec![zyris::ToolDescriptor {
+                    name: "search".to_string(),
+                    description: "Somebody else's tool.".to_string(),
+                    transfer: zyris::Transfer::Unary,
+                    request_schema: serde_json::json!({}),
+                    response_schema: None,
+                    item_schema: None,
+                    call_limit: None,
+                }],
+            }
+        }
+
+        async fn dispatch(&self, _call: IncomingCall) -> zyris::Result<Outgoing> {
+            zyris::encode_response(&serde_json::json!({ "ok": true }))
+        }
+    }
+
+    fn guarded_runtime(
+        dir: &std::path::Path,
+        name: &'static str,
+    ) -> (crate::AuditLog, Guarded<RuntimeCapability>) {
+        let log = crate::AuditLog::new(dir.join("audit.jsonl"));
+        let cap = Guarded::new(RuntimeCapability(name), crate::Gate::running(), log.clone());
+        (log, cap)
+    }
+
+    /// Arguments belonging to somebody else's tool, spelled the way this file's allowlist
+    /// happens to spell four of its own.
+    fn foreign_arguments() -> serde_json::Value {
+        serde_json::json!({
+            "path": "/etc/shadow",
+            "command": "psql -c 'select * from customers'",
+            "name": "quarterly numbers",
+            "recursive": true,
+            "passphrase": "hunter2-do-not-log-me",
+            "query": "everything about alice",
+        })
+    }
+
+    #[tokio::test]
+    async fn a_promoted_capability_writes_no_arguments_into_the_log() {
+        // The MCP decision, by test rather than by assumption. A promoted tool's arguments are
+        // arbitrary JSON from a third party; four of the names below collide with the allowlist
+        // by spelling alone, and none of them means what the allowlist's reasoning assumed.
+        let dir = tempfile::tempdir().unwrap();
+        let (log, cap) = guarded_runtime(dir.path(), "mcp_desk-notes");
+
+        cap.dispatch(call("search", foreign_arguments()))
+            .await
+            .expect("the call runs");
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the call has to have actually run, or this test proves nothing"
+        );
+        // The line is still written, and it still says what happened. What is missing is what was
+        // asked, and anything telling a person about this log has to say so.
+        assert_eq!(entry.capability, "mcp_desk-notes");
+        assert_eq!(entry.tool, "search");
+        assert_eq!(
+            entry.detail, "",
+            "a promoted tool's arguments reached the audit log: {}",
+            entry.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn the_allowlist_matches_on_spelling_alone_which_is_why_promoted_tools_are_exempt() {
+        // The hazard the rule above exists to close, pinned so it cannot be rediscovered by
+        // accident. The same arguments, under a name outside the promoted space: `summarize`
+        // walks names and knows nothing about meaning, so four of them are written down.
+        let dir = tempfile::tempdir().unwrap();
+        let (log, cap) = guarded_runtime(dir.path(), "notes");
+
+        cap.dispatch(call("search", foreign_arguments()))
+            .await
+            .expect("the call runs");
+
+        let detail = &log.recent(1).unwrap()[0].detail;
+        for spelled in ["path=/etc/shadow", "name=quarterly numbers", "recursive=true"] {
+            assert!(
+                detail.contains(spelled),
+                "expected the allowlist to write `{spelled}`: {detail}"
+            );
+        }
+        assert!(detail.contains("command=psql"), "{detail}");
+        // The default is still "log nothing": a field nobody put on the list is not written down,
+        // whatever it is called and whichever capability it arrived at.
+        assert!(!detail.contains("hunter2"), "an unknown field was written down: {detail}");
+        assert!(!detail.contains("alice"), "an unknown field was written down: {detail}");
     }
 
     #[test]

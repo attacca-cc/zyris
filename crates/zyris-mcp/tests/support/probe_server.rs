@@ -28,6 +28,16 @@
 //! the MCP way — `isError: true` in a perfectly successful response, not a JSON-RPC error. They
 //! come back over two pages of `tools/list`, because one page is the shape that hides a client
 //! which ignores `nextCursor`.
+//!
+//! Two more flags exist for `promote.rs`, which has to decide what a tool list that is legal MCP
+//! but awkward here becomes:
+//!
+//! - `--odd-tools` replaces the list with exactly those shapes: a name repeated, a tool with no
+//!   description, a tool whose only human wording is a `title`, an empty input schema, and a name
+//!   with a dot in it.
+//! - `--bad-schema` sends `"inputSchema": true` — *valid* JSON Schema, meaning "anything", and a
+//!   shape `rmcp`'s `Arc<JsonObject>` cannot hold. It establishes where that failure actually
+//!   lands, which is not where the plan expected it.
 
 use std::io::{BufRead, Write};
 
@@ -88,8 +98,79 @@ fn tools_page_two() -> Value {
     ])
 }
 
+/// The shapes `promote.rs` has to have an answer for, all of them legal MCP.
+///
+/// Every one is something a real server can send: MCP's `description` is optional, an empty input
+/// schema is the JSON Schema that accepts anything, and nothing in the protocol forbids a dot in
+/// a tool name or the same name twice.
+fn odd_tools() -> Value {
+    json!([
+        {
+            "name": "search",
+            "description": "The first tool called `search`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"],
+            },
+        },
+        {
+            // The same name again, with a different schema, so a test can tell which of the two
+            // an announcement kept.
+            "name": "search",
+            "description": "The second tool called `search`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "other": { "type": "boolean" } },
+            },
+        },
+        {
+            // No `description` and no `title`: MCP makes both optional, `ToolDescriptor` makes
+            // neither.
+            "name": "untitled",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            // A `title` and no `description` — the half that is still worth saying to an agent.
+            "name": "titled",
+            "title": "Say something about this tool",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            // `{}` is valid JSON Schema and means "anything", which is what a tool with no
+            // arguments and an unfussy author sends. It is not a failure and must not become one.
+            "name": "anything",
+            "description": "Takes whatever it is given.",
+            "inputSchema": {},
+        },
+        {
+            // The protocol's method is `capability.tool` split at the *first* dot, so a dot here
+            // is carried and a dot in the capability name would not be. Both halves are asserted.
+            "name": "nested.tool",
+            "description": "A name with a dot in it.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+    ])
+}
+
+/// A tool list `rmcp` cannot deserialize, for establishing where that lands.
+///
+/// `true` is valid JSON Schema — it is the schema that accepts anything — and `rmcp`'s
+/// `Tool::input_schema` is an `Arc<JsonObject>`, which can only hold an object.
+fn bad_schema_tools() -> Value {
+    json!([
+        {
+            "name": "loose",
+            "description": "Its input schema is `true`.",
+            "inputSchema": true,
+        },
+    ])
+}
+
 fn main() {
     let mute = std::env::args().any(|arg| arg == "--mute");
+    let odd = std::env::args().any(|arg| arg == "--odd-tools");
+    let bad_schema = std::env::args().any(|arg| arg == "--bad-schema");
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -116,6 +197,8 @@ fn main() {
 
         let response = match method {
             "initialize" => ok(id, initialize()),
+            "tools/list" if bad_schema => ok(id, json!({ "tools": bad_schema_tools() })),
+            "tools/list" if odd => ok(id, json!({ "tools": odd_tools() })),
             "tools/list" => list(id, params),
             "tools/call" => call(id, params, &mut stdout),
             other => error(id, -32601, &format!("no method `{other}`")),
@@ -192,6 +275,19 @@ fn call(id: Value, params: Option<&Value>, stdout: &mut std::io::Stdout) -> Valu
             // truncated frame it could mistake for a protocol fault.
             let _ = stdout.flush();
             std::process::exit(9);
+        }
+        // The `--odd-tools` names. Each answers something only it could have said, so a test can
+        // tell which of two tools sharing a name was actually reached.
+        "search" => {
+            let query = arguments
+                .and_then(|a| a.get("query"))
+                .and_then(Value::as_str)
+                .unwrap_or("<nothing>");
+            ok(id, json!({ "content": [text_block(&format!("searched for {query}"))] }))
+        }
+        "nested.tool" => ok(id, json!({ "content": [text_block("the dotted tool ran")] })),
+        "anything" | "untitled" | "titled" => {
+            ok(id, json!({ "content": [text_block(&format!("{name} ran"))] }))
         }
         other => error(id, -32602, &format!("no tool `{other}`")),
     }
