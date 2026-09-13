@@ -251,9 +251,9 @@ impl Transfers {
     /// use — and for `send_to` it is a real boundary rather than a default: `zyris-transfer`
     /// canonicalizes the source path and refuses anything that lands outside it.
     ///
-    /// Fails when the key will not load or the socket will not bind. That is not a fault of this
-    /// machine and the caller is expected to carry on without transfer; see `Tools::screen_pair`
-    /// for the same shape.
+    /// Fails when the key will not load, the socket will not bind, or [`RELAY_URL_ENV`] is set to
+    /// something that is not a relay URL. That is not a fault of this machine and the caller is
+    /// expected to carry on without transfer; see `Tools::screen_pair` for the same shape.
     pub async fn bind(
         dir: &Path,
         root: PathBuf,
@@ -452,13 +452,33 @@ fn ledger_path(dir: &Path) -> PathBuf {
 /// fallback to the public relays: a person who set this to point at their own relay and got the
 /// public ones anyway would have no way to tell, and the whole reason to set it is not to use
 /// them.
+///
+/// # Parsing is not enough, and the gap is the obvious spelling
+///
+/// `RelayUrl`'s `FromStr` is a bare `Url::from_str` with nothing checked after it, and a URL
+/// scheme may contain `.` — so `relay.corp.example:3340`, written without a scheme the way a
+/// person writes a host and a port, parses happily as scheme `relay.corp.example` with a path of
+/// `3340` and **no host at all**. iroh then has nowhere to dial, silently, on the one setting
+/// whose entire purpose is to keep traffic off the public relays. `localhost:3340` goes the same
+/// way. So the host and the scheme are checked here, and a value that fails either is refused
+/// with the same message as a value that is not a URL — the remedy is the same in every case:
+/// write the whole URL, `https://relay.corp.example:3340`.
 fn custom_relay(value: Option<&str>) -> anyhow::Result<Option<iroh::RelayMode>> {
-    let Some(url) = value.map(str::trim).filter(|url| !url.is_empty()) else {
+    let Some(value) = value.map(str::trim).filter(|url| !url.is_empty()) else {
         return Ok(None);
     };
-    let url = url
-        .parse::<iroh::RelayUrl>()
-        .with_context(|| format!("{RELAY_URL_ENV} is set to {url:?}, which is not a relay URL"))?;
+    let refused = || {
+        anyhow!(
+            "{RELAY_URL_ENV} is set to {value:?}, which is not a relay URL; \
+             it has to be a whole http or https URL with a host, like \
+             \"https://relay.corp.example:3340\""
+        )
+    };
+    let url = value.parse::<iroh::RelayUrl>().map_err(|_| refused())?;
+    // `RelayUrl` derefs to `url::Url`, so both of these are the parsed URL's own answers.
+    if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https") {
+        return Err(refused());
+    }
     Ok(Some(iroh::RelayMode::custom([url])))
 }
 
@@ -590,6 +610,44 @@ mod tests {
         // Falling back to the public relays here would send this machine's traffic through
         // exactly the servers the person was trying to avoid, and say nothing about it.
         assert!(custom_relay(Some("this is not a url")).is_err());
+
+        // The two that *parse*, and are the reason this checks more than parsing. A URL scheme
+        // may contain `.`, so a host and port written without a scheme — which is how a person
+        // writes one, and what the README used to leave them to guess at — comes out as scheme
+        // `relay.corp.example` with no host. iroh would have had nowhere to dial and would not
+        // have said so.
+        for host_and_port in ["relay.corp.example:3340", "localhost:3340"] {
+            let parsed = host_and_port.parse::<iroh::RelayUrl>();
+            assert!(
+                parsed.is_ok(),
+                "{host_and_port} no longer parses, so this test is no longer about anything: \
+                 {parsed:?}"
+            );
+            assert!(
+                parsed.as_ref().unwrap().host_str().is_none(),
+                "{host_and_port} now has a host, so the gap this guards closed upstream"
+            );
+
+            assert!(
+                custom_relay(Some(host_and_port)).is_err(),
+                "{host_and_port} was accepted, and a relay with no host is a relay this machine \
+                 silently never reaches"
+            );
+        }
+
+        // A scheme that is a scheme and a host that is a host, but not one iroh talks over.
+        assert!(custom_relay(Some("ftp://relay.corp.example")).is_err());
+    }
+
+    #[test]
+    fn the_refusal_says_how_to_spell_it() {
+        // The whole point of refusing rather than ignoring is that the person fixes it, and they
+        // cannot fix it from "not a relay URL". The message carries a working example.
+        let error = custom_relay(Some("relay.corp.example:3340")).unwrap_err().to_string();
+
+        assert!(error.contains(RELAY_URL_ENV), "{error}");
+        assert!(error.contains("relay.corp.example:3340"), "the value they set is not named: {error}");
+        assert!(error.contains("https://"), "no example of the right shape: {error}");
     }
 
     async fn transfers(dir: &Path) -> Transfers {

@@ -84,7 +84,17 @@ a pin is a pin *of*; lose it and every machine that pinned this one refuses to s
 Without a relay of your own, the connection rides the public ones run by the iroh project. **A
 relay cannot read what is transferred** — it is encrypted end to end — but it does see which of
 your machines talked to which, and when. Set `ZYRIS_RELAY_URL` to point at your own relay
-instead.
+instead. It takes a whole URL, scheme and all:
+
+```bash
+ZYRIS_RELAY_URL=https://relay.corp.example:3340
+```
+
+A value that is not an `http` or `https` URL with a host in it is refused outright rather than
+quietly falling back to the public relays: Zyris says so in the log, `file_transfer` is not
+announced, and the rest of the machine carries on. `relay.corp.example:3340` — the same thing
+without the scheme — is the spelling to avoid, and the one that used to be accepted and then
+ignored.
 
 The first time it runs, the window shows a short code and a link. Open the link, approve the code
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
