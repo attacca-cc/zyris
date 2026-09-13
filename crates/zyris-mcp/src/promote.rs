@@ -265,7 +265,11 @@ impl ServeCapability for Promoted {
 }
 
 /// A server's name as a capability name, or why it cannot be one.
-fn capability_name(server: &str) -> anyhow::Result<String> {
+///
+/// Public because it is knowable without a process: [`crate::config`] asks it before running a
+/// command, so a server that could never be announced is refused without one of its processes
+/// having been started and dropped on the way to the same error.
+pub fn capability_name(server: &str) -> anyhow::Result<String> {
     if server.is_empty() {
         anyhow::bail!(
             "an MCP server with no name cannot be announced: its capability would be \

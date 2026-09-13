@@ -13,10 +13,16 @@
 //! [`Server::spawn`] fails and the server is absent. What [`Promoted`] actually has to decide
 //! about is a server whose name will not make an addressable capability and a tool name offered
 //! twice. Both are written up on [`promote`].
+//!
+//! **Which servers there are is a third question, and [`config`] is where it is answered.** It
+//! reads the file a person edits, and [`config::start`] is the one call a host makes to turn that
+//! file into running, promoted servers — never failing, whatever the file says.
 
+pub mod config;
 pub mod promote;
 pub mod server;
 
-pub use promote::{CAPABILITY_PREFIX, DroppedTool, PROMOTED_VERSION, Promoted};
+pub use config::{CONFIG_FILE, Config, ServerConfig};
+pub use promote::{CAPABILITY_PREFIX, DroppedTool, PROMOTED_VERSION, Promoted, capability_name};
 pub use rmcp::model::Tool;
 pub use server::{STARTUP_DEADLINE, Server, is_disconnected};

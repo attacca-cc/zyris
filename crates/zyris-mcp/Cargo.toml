@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 rmcp = { workspace = true }
+# The server list on disk is JSON a person wrote, and `derive` is what refuses a field nobody
+# defined rather than dropping it — which is the mistake that file actually collects.
+serde = { workspace = true }
 serde_json = { workspace = true }
 # `process` for the command a server is, `time` for the deadline `Server::spawn` puts on the
 # handshake. `rmcp`'s `transport-child-process` turns on `tokio/process` too; naming it here as
@@ -22,6 +25,9 @@ tracing = { workspace = true }
 zyris = { workspace = true }
 
 [dev-dependencies]
+# A directory to put a server list in, for the tests that read one. Nothing in this crate writes
+# to disk outside a test.
+tempfile = { workspace = true }
 # `rt-multi-thread`: `TokioChildProcess`'s `Drop` reaps the child with `tokio::spawn`, and a
 # current-thread runtime only gets to that at an await point of its own.
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }

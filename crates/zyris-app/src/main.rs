@@ -153,6 +153,22 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // **Started before the `Tools`, for the same reason the endpoint is:** what is announced
+    // depends on which of them are actually running, and a `Tools` is a list rather than a place
+    // to start processes from. Nothing here can fail — a file that will not read and a command
+    // that will not start are both logged where they happen and cost only themselves — so there
+    // is no arm for it, and a machine with no MCP servers configured, which is most of them, gets
+    // an empty list in silence.
+    //
+    // **`data`, so the list is the instance's.** Everything else `instance_name` reaches — the
+    // keychain service, the lock, the audit log, the peer key — is scoped so that a `--server`
+    // run is a different node from the production one. A server list read from anywhere shared
+    // would put that back: a development run would start the machines the real account had
+    // configured and announce them to a development server, and the other way round. That is why
+    // `zyris_mcp::Config::path` takes a directory rather than finding one — the decision about
+    // what this instance is belongs on this line, with the others.
+    let promoted = runtime.block_on(zyris_mcp::config::start(&data));
+
     // Built here, once, for the same reason the connector is: the switch has to stop tools with
     // the window closed exactly as it does with it open, and a `Tools` per runtime would be two
     // switches and two logs that disagree.
@@ -163,7 +179,12 @@ fn main() -> anyhow::Result<()> {
     )
     // Every call is published as well as written down. The bus is the only way the window and
     // the tray hear about a call while it happens; the file is what outlives the process.
-    .with_bus(bus.clone());
+    .with_bus(bus.clone())
+    // Announced beside this machine's own, behind the same switch and the same log. Empty is the
+    // ordinary case and says nothing. `as _` widens each `Promoted` to the trait `Tools` keeps
+    // them by; what is dropped with the type — which tools a server did not announce, and why —
+    // is the window's to show and belongs to whatever holds the servers themselves.
+    .with_mcp(promoted.into_iter().map(|server| server as _).collect());
     if let Some(transfers) = &transfers {
         tools = tools.with_transfer(transfers);
     }
@@ -630,6 +651,23 @@ mod tests {
             instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws")),
             instance_name(Some("ws://127.0.0.1:9090/zyris/v1/ws"))
         );
+    }
+
+    #[test]
+    fn each_instance_reads_its_own_mcp_server_list() {
+        // The list of MCP servers is per-instance like everything else this run owns, and for the
+        // same reason: a `--server` run must not start the production machine's servers and
+        // announce them to a development server, nor the other way round. `Config::path` takes a
+        // directory rather than finding one so that this is decided once, where the instance is.
+        let production = zyris_mcp::Config::path(&data_dir(&instance_name(None)));
+        let development = zyris_mcp::Config::path(&data_dir(&instance_name(Some(
+            "ws://127.0.0.1:8080/zyris/v1/ws",
+        ))));
+
+        assert_ne!(production, development);
+        // And it lands beside the rest of that instance's state rather than beside the binary or
+        // in whatever directory Zyris happened to be started from.
+        assert_eq!(production.parent().unwrap(), data_dir("zyris"));
     }
 
     #[test]

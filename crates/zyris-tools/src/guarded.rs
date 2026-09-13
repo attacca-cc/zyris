@@ -59,9 +59,15 @@ pub struct Guarded<C> {
 /// rather than let them assume otherwise.
 ///
 /// Matched on the name rather than set by whoever builds the `Guarded`, so it cannot be forgotten
-/// at a call site added later; `zyris_mcp::CAPABILITY_PREFIX` is the same string, and the two
-/// become one constant when `announce.rs` starts naming that crate.
-pub const MCP_CAPABILITY_PREFIX: &str = "mcp_";
+/// at a call site added later.
+///
+/// **`zyris_mcp::CAPABILITY_PREFIX` itself, not a copy of it.** Two strings that have to agree,
+/// in two crates, with nothing that fails when they stop agreeing, is the shape this workspace
+/// keeps writing down as the quiet kind of bug: the day somebody renamed the prefix on one side,
+/// every promoted tool's arguments would start being written into the audit file and no test
+/// anywhere would go red. This alias is a second name for one value, and `announce.rs` names
+/// `zyris-mcp` for it.
+pub const MCP_CAPABILITY_PREFIX: &str = zyris_mcp::CAPABILITY_PREFIX;
 
 impl<C: ServeCapability> Guarded<C> {
     pub fn new(inner: C, gate: Gate, log: AuditLog) -> Guarded<C> {

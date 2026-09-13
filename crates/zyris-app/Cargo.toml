@@ -12,6 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 zyris-autostart = { path = "../zyris-autostart" }
+# The local MCP servers: which ones this instance has configured, and starting them. Here rather
+# than in `zyris-tools` because starting one is asynchronous and can fail, and a capability list
+# is neither.
+zyris-mcp = { path = "../zyris-mcp" }
 zyris-runtime = { path = "../zyris-runtime" }
 zyris-tools = { path = "../zyris-tools" }
 anyhow = { workspace = true }

@@ -8472,6 +8472,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zyris-autostart",
+ "zyris-mcp",
  "zyris-runtime",
  "zyris-tools",
 ]
@@ -8574,7 +8575,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rmcp",
+ "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "zyris",
@@ -8677,6 +8680,7 @@ dependencies = [
  "zyris-attacca",
  "zyris-fs",
  "zyris-input",
+ "zyris-mcp",
  "zyris-runtime",
  "zyris-screen",
  "zyris-terminal",

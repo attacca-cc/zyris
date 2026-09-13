@@ -20,6 +20,10 @@ zyris = { workspace = true }
 zyris-attacca = { workspace = true }
 zyris-fs = { workspace = true }
 zyris-input = { workspace = true }
+# For one constant: the prefix every promoted MCP capability is named with. `guarded.rs`'s audit
+# exemption keys on it, so the two must be the same string — and two copies of a string that must
+# agree is exactly the shape that fails quietly.
+zyris-mcp = { path = "../zyris-mcp" }
 zyris-runtime = { path = "../zyris-runtime" }
 zyris-screen = { workspace = true }
 zyris-terminal = { workspace = true }

@@ -71,6 +71,26 @@ pub struct Tools {
     /// announced; the other half — the connect hook and the accept loop — belongs to `main`, and
     /// a `Tools` is not the place to hide a background task.
     transfer: Option<LocalFileTransfer>,
+    /// The local MCP servers that started, already promoted, and empty on the ordinary machine
+    /// that has none configured.
+    ///
+    /// **Finished values, for the same reason [`Self::transfer`] holds one.** Starting a server
+    /// is asynchronous — a process, a handshake, a `tools/list` — and it fails in ways that are
+    /// about the outside world rather than about this type: a command that is not there, a
+    /// configuration file with a typo in it. `Tools::new` and [`Self::into_capabilities`] are
+    /// neither async nor fallible, and making either of them so in order to start processes
+    /// would put an outside-world failure in the one place that is supposed to be a list. So
+    /// `zyris_mcp::config::start` runs in `main`, says what went wrong there, and what arrives
+    /// here is whatever is actually running.
+    ///
+    /// `Arc<dyn ServeCapability>` rather than `Arc<zyris_mcp::Promoted>`, though this crate does
+    /// name that one. The trait is what [`Self::capabilities`] needs, nothing here reads anything
+    /// else about them — and a test can then put a capability behind this that records whether a
+    /// call arrived, which is the only way to assert that the gate stopped one before it reached
+    /// somebody else's process. The names are `Promoted`'s to choose and it prefixes every one of
+    /// them unconditionally; nothing here re-checks that, because the check would be a second
+    /// place the rule lives.
+    mcp: Vec<Arc<dyn ServeCapability>>,
     /// What `into_capabilities` handed the node, recorded as it happened.
     ///
     /// Shared across clones so the window and the connector agree, and written once: a node
@@ -87,6 +107,7 @@ impl Tools {
             root,
             bus: None,
             transfer: None,
+            mcp: Vec::new(),
             announced: Arc::new(OnceLock::new()),
         }
     }
@@ -106,6 +127,19 @@ impl Tools {
     /// nothing ever calls `set_api` on — which refuses every send while looking announced.
     pub fn with_transfer(mut self, transfers: &Transfers) -> Tools {
         self.transfer = Some(transfers.capability());
+        self
+    }
+
+    /// Also announce these promoted MCP servers, each behind the same switch and the same log as
+    /// everything else this machine offers.
+    ///
+    /// Takes what is already running rather than a configuration file. See [`Self::mcp`] for why
+    /// the starting happens outside — and note that nothing about this is conditional on the
+    /// *machine*: `input` and `file_transfer` are absent when a display server or an endpoint
+    /// will not answer, whereas a promoted server is absent only because nobody configured it or
+    /// because it would not start, and either way it was said at the time.
+    pub fn with_mcp(mut self, promoted: Vec<Arc<dyn ServeCapability>>) -> Tools {
+        self.mcp = promoted;
         self
     }
 
@@ -183,6 +217,16 @@ impl Tools {
         if let Some(transfer) = self.transfer.clone() {
             capabilities.push(self.guard(FileTransferServer(transfer)));
         }
+        // Last, so the five this machine is stay first and in the order they have always been in
+        // — the window lists what it is given, and a machine's own tools moving down the screen
+        // because somebody installed a notes server would be a surprising way to learn that.
+        //
+        // **Through `self.guard`, exactly like the rest.** A promoted capability is somebody
+        // else's code reached over a pipe, which makes it the one that most needs the switch in
+        // front of it; and `Guarded` is also where the audit log's argument allowlist is turned
+        // *off* for a promoted name, so one that reached the node unwrapped would quietly start
+        // writing a third party's tool arguments into the file.
+        capabilities.extend(self.mcp.iter().map(|promoted| self.guard(Shared(promoted.clone()))));
         capabilities
     }
 
@@ -252,6 +296,29 @@ impl Tools {
             None => guarded,
         }
         .into_arc()
+    }
+}
+
+/// A capability that is already shared, made guardable.
+///
+/// [`Guarded`] takes a capability by value, and a promoted MCP server cannot be handed over by
+/// value: [`Tools`] is `Clone` — the connector gets one copy and the window another — and the
+/// thing behind a promoted capability is a running process, which there is exactly one of. So it
+/// lives in an `Arc` and this carries a clone of the handle.
+///
+/// A newtype rather than an implementation of [`ServeCapability`] for `Arc<dyn ServeCapability>`,
+/// because that would have to be written where the trait or the `Arc` is and is neither's to
+/// write. It adds one virtual call in front of another and nothing else.
+struct Shared(Arc<dyn ServeCapability>);
+
+#[zyris::async_trait]
+impl ServeCapability for Shared {
+    fn descriptor(&self) -> zyris::CapabilityDescriptor {
+        self.0.descriptor()
+    }
+
+    async fn dispatch(&self, call: zyris::IncomingCall) -> zyris::Result<zyris::Outgoing> {
+        self.0.dispatch(call).await
     }
 }
 
@@ -417,6 +484,196 @@ mod tests {
             !announced.iter().any(|capability| capability.name == "peer_transfer"),
             "peer_transfer is announced on the peer link, never on this one: {announced:?}"
         );
+    }
+
+    /// A capability built at runtime under a name of its own, which records whether a call ever
+    /// got to it.
+    ///
+    /// This is the shape `zyris-mcp`'s `Promoted` has — assembled from a tool list rather than by
+    /// the capability macro, named from a configuration file — and it is a fake here rather than
+    /// a real promoted server for one reason: **the assertions below are about calls that must
+    /// not arrive.** A live MCP server cannot prove that the gate stopped a call before it
+    /// reached the process; a capability that writes down every call it receives can.
+    struct Promotable {
+        name: String,
+        reached: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Promotable {
+        fn new(name: &str) -> (Promotable, Arc<std::sync::atomic::AtomicBool>) {
+            let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            (Promotable { name: name.to_string(), reached: reached.clone() }, reached)
+        }
+    }
+
+    #[zyris::async_trait]
+    impl ServeCapability for Promotable {
+        fn descriptor(&self) -> zyris::CapabilityDescriptor {
+            zyris::CapabilityDescriptor {
+                name: self.name.clone(),
+                version: 1,
+                tools: vec![zyris::ToolDescriptor {
+                    name: "search".to_string(),
+                    description: "Somebody else's tool.".to_string(),
+                    transfer: zyris::Transfer::Unary,
+                    request_schema: serde_json::json!({}),
+                    response_schema: None,
+                    item_schema: None,
+                    call_limit: None,
+                }],
+            }
+        }
+
+        async fn dispatch(&self, _call: zyris::IncomingCall) -> zyris::Result<zyris::Outgoing> {
+            self.reached.store(true, std::sync::atomic::Ordering::SeqCst);
+            zyris::encode_response(&serde_json::json!({ "ok": true }))
+        }
+    }
+
+    /// The one MCP server's name used below. Hyphenated and nothing like a built-in, so a
+    /// capability list that hardcoded a plausible name would not satisfy these.
+    const PROMOTED: &str = "mcp_desk-notes";
+
+    fn call(tool: &str, params: serde_json::Value) -> zyris::IncomingCall {
+        zyris::IncomingCall {
+            tool: tool.to_string(),
+            params: zyris::Payload::from_json(params),
+            serialization: zyris::Serialization::Json,
+            meta: zyris::Payload::default(),
+        }
+    }
+
+    /// Arguments belonging to somebody else's tool, two of them spelled the way this machine's own
+    /// allowlist spells its own, and one that is plainly a secret.
+    fn foreign_arguments() -> serde_json::Value {
+        serde_json::json!({
+            "path": "/etc/shadow",
+            "command": "psql -c 'select * from customers'",
+            "passphrase": "hunter2-do-not-log-me",
+        })
+    }
+
+    /// The announced capability under `name`, as the node would have it.
+    fn announced_capability(
+        capabilities: &[Arc<dyn ServeCapability>],
+        name: &str,
+    ) -> Arc<dyn ServeCapability> {
+        capabilities
+            .iter()
+            .find(|capability| capability.descriptor().name == name)
+            .unwrap_or_else(|| panic!("`{name}` was not announced"))
+            .clone()
+    }
+
+    #[test]
+    fn a_promoted_capability_is_announced_beside_the_built_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let (promotable, _) = Promotable::new(PROMOTED);
+        let tools = tools(dir.path()).with_mcp(vec![Arc::new(promotable)]);
+
+        let _ = tools.clone().into_capabilities();
+
+        let announced = tools.announced();
+        let promoted = announced
+            .iter()
+            .find(|capability| capability.name == PROMOTED)
+            .expect("a configured MCP server is announced like anything else");
+        assert_eq!(promoted.tools, ["search"]);
+        // And it is an addition rather than a replacement: the window lists one machine.
+        let names: Vec<&str> = announced.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"file_io") && names.contains(&"terminal"), "{names:?}");
+    }
+
+    #[test]
+    fn a_machine_with_no_mcp_servers_announces_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let announced = announced_tools(dir.path()).announced();
+
+        assert!(
+            !announced.iter().any(|c| c.name.starts_with(crate::guarded::MCP_CAPABILITY_PREFIX)),
+            "{announced:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promoted_capability_is_behind_the_pause_switch() {
+        // The claim that makes promotion safe: an MCP server is somebody else's code, and the
+        // switch that stops this machine's own tools has to stop it too. Asserted by what the
+        // capability *never saw* — a promoted capability announced without `guard` would answer
+        // this call itself and nothing else would differ.
+        let dir = tempfile::tempdir().unwrap();
+        let (promotable, reached) = Promotable::new(PROMOTED);
+        let tools = tools(dir.path()).with_mcp(vec![Arc::new(promotable)]);
+        tools.gate().set_paused(true);
+
+        let capabilities = tools.clone().into_capabilities();
+        let refused = announced_capability(&capabilities, PROMOTED)
+            .dispatch(call("search", foreign_arguments()))
+            .await;
+
+        assert!(refused.is_err(), "a paused machine ran somebody else's tool");
+        assert!(
+            !reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the call reached the MCP server while this machine was paused"
+        );
+        // And the refusal is on the record, which is what a person reads afterwards.
+        let entry = &tools.log().recent(1).unwrap()[0];
+        assert_eq!(entry.capability, PROMOTED);
+        assert_eq!(entry.outcome, crate::Outcome::Refused);
+    }
+
+    #[tokio::test]
+    async fn a_promoted_capabilitys_call_is_logged_without_its_arguments() {
+        // Two halves of one decision, and both have to be asserted here rather than only in
+        // `guarded.rs`: that a promoted capability is wrapped at all, and that being wrapped
+        // writes no arguments down. `Guarded::new` decides the second from the capability's name,
+        // so a promoted capability that reached the node unwrapped would take the audit exemption
+        // with it and a third party's arguments would start landing in the file.
+        let dir = tempfile::tempdir().unwrap();
+        let (promotable, reached) = Promotable::new(PROMOTED);
+        let tools = tools(dir.path()).with_mcp(vec![Arc::new(promotable)]);
+
+        let capabilities = tools.clone().into_capabilities();
+        announced_capability(&capabilities, PROMOTED)
+            .dispatch(call("search", foreign_arguments()))
+            .await
+            .expect("the call runs");
+
+        assert!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the call has to have actually run, or the assertions below prove nothing"
+        );
+        let entry = &tools.log().recent(1).unwrap()[0];
+        assert_eq!(entry.capability, PROMOTED);
+        assert_eq!(entry.tool, "search");
+        assert_eq!(entry.outcome, crate::Outcome::Allowed);
+        assert_eq!(
+            entry.detail, "",
+            "a promoted tool's arguments reached the audit log: {}",
+            entry.detail
+        );
+        let written = std::fs::read_to_string(tools.log().path()).unwrap();
+        assert!(!written.contains("hunter2"), "{written}");
+        assert!(!written.contains("/etc/shadow"), "{written}");
+    }
+
+    #[test]
+    fn no_capability_this_machine_announces_itself_starts_with_the_promoted_prefix() {
+        // The one standing condition behind `zyris-mcp`'s always-prefix rule, checked against the
+        // real list rather than a copy of it. A sixth built-in called `mcp_anything` would put a
+        // promoted server's name space inside this machine's own — and, through `Guarded`, would
+        // silently stop its arguments being written to the audit log.
+        let dir = tempfile::tempdir().unwrap();
+
+        for capability in announced_tools(dir.path()).announced() {
+            assert!(
+                !capability.name.starts_with(zyris_mcp::CAPABILITY_PREFIX),
+                "the built-in `{}` starts with `{}`",
+                capability.name,
+                zyris_mcp::CAPABILITY_PREFIX
+            );
+        }
     }
 
     #[test]
