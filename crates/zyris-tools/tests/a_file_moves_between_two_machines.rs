@@ -63,7 +63,7 @@ use zyris_tools::{AuditLog, DenyUnknown, Gate, Tools, Transfers};
 const ARRIVAL_DEADLINE: Duration = Duration::from_secs(20);
 
 // -------------------------------------------------------------------------------------------
-// The four things this file claims
+// The five things this file claims
 // -------------------------------------------------------------------------------------------
 
 /// The receipt names the file that appeared — whatever spelling of it the platform hands back.
@@ -199,6 +199,61 @@ async fn a_peer_that_was_never_pinned_is_refused_and_says_so() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_file_still_moves_after_both_machines_have_redialled() {
+    // **The step's centrepiece, and until now the one claim in it nothing exercised twice.**
+    // `Transfers::on_connect` runs on *every* established connection, and the work it has to redo
+    // on the second one is replacing the rendezvous client — a write-once slot leaves the client
+    // bound to the connection that is now dead, and every send afterwards fails with
+    // `connection lost` on a node that is connected and looks perfectly healthy. Upstream's own
+    // `Rendezvous` documentation records that as an observed bug rather than a hypothetical one.
+    //
+    // Nothing about it shows until a connection actually drops. Every other test here boots each
+    // machine once and holds that connection for the machine's life, so a one-line regression at
+    // the `set_api` call left all of them green — which is what this closes.
+    //
+    // The counterpart rule is asserted next door in `transfer.rs`: the accept loop must start
+    // exactly *once* however often this runs. The two pull in opposite directions inside one
+    // function, so neither is safe to check alone.
+    let account = Account::new();
+    let alpha_dirs = Dirs::new();
+    let beta_dirs = Dirs::new();
+    let mut alpha = Machine::boot(&alpha_dirs, "alpha", &account).await;
+    let mut beta = Machine::boot(&beta_dirs, "beta", &account).await;
+    beta.pin(&alpha).await;
+
+    // On the connection `boot` made, first — so a failure after the redial is about the redial
+    // and not about wiring that never worked.
+    beta.write_source("before.txt", b"on the first connection");
+    beta.send("alpha", "before.txt").await.expect("the send on the first connection was refused");
+    wait_for_file(
+        &alpha.inbox().join("beta").join("before.txt"),
+        "the file sent on the first connection",
+    )
+    .await;
+
+    // Both ends, because both use the slot: the sender asks it where alpha is, and the receiver's
+    // accept loop asks it for the account's node list.
+    beta.reconnect(&account).await;
+    alpha.reconnect(&account).await;
+
+    beta.write_source("after.txt", b"on the second connection");
+    let receipt = match beta.send("alpha", "after.txt").await {
+        Ok(receipt) => receipt,
+        Err(error) => panic!(
+            "the send on the second connection was refused with {:?}: {}. A `connection lost` \
+             here is `on_connect` having kept the first connection's client rather than replacing \
+             it — the node is connected, and file transfer alone cannot see that.",
+            error.code, error.message
+        ),
+    };
+
+    let landed = alpha.inbox().join("beta").join("after.txt");
+    let arrived = wait_for_file(&landed, "the file sent on the second connection").await;
+    assert_eq!(arrived, b"on the second connection");
+    assert_same_file(&receipt.written, &landed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn both_logs_record_the_transfer_and_neither_records_its_contents() {
     // `transfers.jsonl` is the receiving side's record — a delivery never passes through `Guarded`,
     // because it does not arrive on the Attacca connection at all — and the tool audit line is the
@@ -276,9 +331,10 @@ struct Machine {
     root: PathBuf,
     /// Both ends of the duplex to the stub rendezvous. Dropping either closes the connection, and
     /// a closed connection takes the `AttaccaApiClient` inside `Rendezvous` down with it — so they
-    /// are held for as long as the machine is.
-    _to_attacca: zyris::Connection,
-    _at_attacca: zyris::Connection,
+    /// are held for as long as the machine is, and replaced rather than dropped by
+    /// [`Machine::reconnect`].
+    to_attacca: zyris::Connection,
+    at_attacca: zyris::Connection,
 }
 
 impl Machine {
@@ -319,9 +375,31 @@ impl Machine {
             file_transfer,
             audit_log,
             root,
-            _to_attacca: to_attacca,
-            _at_attacca: at_attacca,
+            to_attacca,
+            at_attacca,
         }
+    }
+
+    /// Closes this machine's connection to the rendezvous, waits for it to be closed at both ends,
+    /// and brings up a fresh one — the redial `main` makes after a socket reset, a laptop waking
+    /// up, or a server restart.
+    ///
+    /// `on_connect` runs again, on a *different* connection, which is the whole of what this
+    /// exists to arrange. Every other test in this file boots a machine once and holds that one
+    /// connection for its life, so without this nothing here ever calls `on_connect` twice.
+    ///
+    /// The old connection is closed rather than merely dropped, and awaited, so that a send after
+    /// this cannot pass by racing a socket that is still half alive: what the next send finds has
+    /// to be the client `on_connect` installed, not the previous one still limping.
+    async fn reconnect(&mut self, account: &Arc<Account>) {
+        self.to_attacca.close("the test is redialling");
+        self.to_attacca.closed().await;
+        self.at_attacca.closed().await;
+
+        let (to_attacca, at_attacca) = account.connect().await;
+        self.transfers.on_connect(to_attacca.clone()).await;
+        self.to_attacca = to_attacca;
+        self.at_attacca = at_attacca;
     }
 
     /// The pin a person makes by reading a fingerprint aloud — the one step of this that still has
@@ -452,7 +530,7 @@ struct Enrolled {
 /// The account's node list, shared by every stub connection in one test.
 ///
 /// It is deliberately credulous — it answers for every machine enrolled on it and refuses none —
-/// because none of the four claims above is about what Attacca decides. What it does not fake is
+/// because none of the five claims above is about what Attacca decides. What it does not fake is
 /// the addresses: those arrive through `peer_publish`, from the connect hook, so a machine that
 /// never published is a machine this directory cannot say where to find.
 struct Account {
