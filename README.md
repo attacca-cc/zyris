@@ -30,8 +30,8 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 read off a screenshot goes straight into `move_to`. Neither is announced when there is no display
 server to reach, because a tool that is always going to fail is worse than a tool that is absent.
 
-**Today `terminal`, `file_io`, `screen_capture` and `input` are live; file transfer and MCP are
-still being written.** Between them that is twenty-three tools, and a capability is all or
+**Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live; MCP is
+still being written.** Between them that is twenty-five tools, and a capability is all or
 nothing — announcing `file_io` announces `remove`, and announcing `terminal` announces `exec`
 with whatever command an agent chooses. A path an agent sends without a leading slash starts in
 your home directory. That is where relative paths start rather than a fence around them: an
@@ -50,6 +50,26 @@ into `move_to` with nothing applied to it.
 The audit log records which display and where the pointer went. It does not record what was
 typed: `type_text` is how a password reaches an application, and a run of single-key presses
 reconstructs one just as well, so neither the text nor its length is written down.
+
+## Sending a file to another of your machines
+
+`file_transfer` moves a file straight between two of your computers rather than through Attacca.
+The bytes travel over [iroh](https://iroh.computer), and what arrives lands in an inbox under a
+folder named after the machine that sent it.
+
+**A machine you have not approved cannot send you anything, and right now there is no way to
+approve one from the window** — that is the next piece of work. Until it lands, a peer has to
+have been pinned already, so this is useful between machines you have set up and not yet useful
+for a machine you just added.
+
+Each computer keeps a long-lived key so it stays the same peer across restarts. That key is what
+an approval is an approval *of*; lose it and every machine that approved this one stops
+accepting from it.
+
+Without a relay of your own, the connection rides the public ones run by the iroh project. **A
+relay cannot read what is transferred** — it is encrypted end to end — but it does see which of
+your machines talked to which, and when. Set `ZYRIS_RELAY_URL` to point at your own relay
+instead.
 
 The first time it runs, the window shows a short code and a link. Open the link, approve the code
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
@@ -166,7 +186,7 @@ lands in what order. Nothing here is ready to install yet.
 2. Connection — enrollment, credential storage, reconnect (done)
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
-5. File transfer — peer endpoint, fingerprint confirmation, inbox
+5. File transfer — peer endpoint, inbox (done); approving a new machine from the window still to come
 6. MCP — local servers promoted to capabilities
 7. Voice in — audio, echo cancellation, wake word, transcription
 8. Voice out — streaming speech, interruption
