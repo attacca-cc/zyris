@@ -141,11 +141,15 @@ pub enum VoiceSupport {
     /// The audio stack is compiled in and this machine can be listened to. Events arrive on
     /// [`Voice::events`].
     ///
-    /// **Not yet what [`start`] answers.** Capture exists as of task 3 of step 7 and
-    /// `capture::support()` returns this on a machine with a microphone — but a session that
-    /// turns audio into [`VoiceEvent`]s is task 6, and until there is one, [`start`] would be
-    /// claiming a stream that nothing publishes to. So it still answers
-    /// [`VoiceSupport::Unavailable`] on both builds, with different reasons.
+    /// **This is what [`start`] answers on a `voice` build with a microphone**, as of task 7:
+    /// it is `capture::support()`, which asks the host for a default input configuration and
+    /// reports what it said. An earlier version of this comment said `start` still answered
+    /// [`VoiceSupport::Unavailable`] on both builds — true while nothing turned audio into
+    /// events, and false since task 6's session and task 7's switch.
+    ///
+    /// It says this machine **could** be listened to, not that anything is: whether a
+    /// microphone is open is [`view::ListeningState`], and the Voice screen shows both because
+    /// a machine that can and is not has to read differently from one that never could.
     Ready,
     /// Nothing will ever arrive on the stream, and this is why.
     Unavailable { reason: String },

@@ -273,11 +273,12 @@ it.
 ### The model
 
 **The speech model is 141 MB and is downloaded once**, into this computer's cache directory
-(`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\zyris\cache\models` on Windows) rather than
-into the installer. It is checked against a published SHA-256 before it is put in place, so an
-interrupted or intercepted download leaves nothing behind and the next run simply offers to fetch
-it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it and no download
-happens at all — Zyris then takes that file as given, and will neither replace it nor delete it.
+(`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\attacca\zyris\cache\models` on Windows)
+rather than into the installer. It is checked against a published SHA-256 before it is put in
+place, so an interrupted or intercepted download leaves nothing behind and the next run simply
+offers to fetch it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it
+and no download happens at all — Zyris then takes that file as given, and will neither replace it
+nor delete it.
 
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such

@@ -167,6 +167,22 @@ pub enum ModelState {
     Nowhere { reason: String },
 }
 
+// The names the platform directory is assembled from, as constants rather than as three
+// literals inside the call below — **because the README spells this directory out on two
+// platforms and one of the two was wrong.** `directories` 6.0.0 builds a Windows project path
+// as `{organization}\{application}` and puts `cache` under it, so the model lives at
+// `%LOCALAPPDATA%\attacca\zyris\cache\models`: the same `attacca\zyris` every other Windows path
+// on that page already carries, and the segment that one was missing. On Linux the qualifier and
+// the organization are ignored and it is `~/.cache/zyris/models`.
+//
+// Nothing on this machine can produce a Windows path, so what checks the page is
+// `the_readme_names_the_directory_the_model_is_kept_in`: a test over the words, with both
+// spellings assembled from these four rather than typed a second time.
+const QUALIFIER: &str = "cc";
+const ORGANIZATION: &str = "attacca";
+const APPLICATION: &str = "zyris";
+const MODELS: &str = "models";
+
 /// Where models live: the platform cache directory, shared by every instance.
 ///
 /// **Not `data_dir(instance)`.** `zyris-app` scopes its data directory by instance so a
@@ -178,13 +194,13 @@ pub enum ModelState {
 /// a platform's "clear caches" is allowed to delete, and losing it costs a download, not a
 /// setting. Task 7's delete button lives on this directory.
 pub fn cache_dir() -> Option<PathBuf> {
-    if let Some(dirs) = directories::ProjectDirs::from("cc", "attacca", "zyris") {
-        return Some(dirs.cache_dir().join("models"));
+    if let Some(dirs) = directories::ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION) {
+        return Some(dirs.cache_dir().join(MODELS));
     }
     // `ProjectDirs` failed to name one, which on Linux means neither `XDG_CACHE_HOME` nor
     // `HOME` is set. `BaseDirs` is the same question asked with fewer requirements.
     if let Some(dirs) = directories::BaseDirs::new() {
-        return Some(dirs.cache_dir().join("zyris").join("models"));
+        return Some(dirs.cache_dir().join(APPLICATION).join(MODELS));
     }
     // Deliberately **not** `std::env::temp_dir()`. `data_dir` falls back to it because an
     // audit log that cannot be written is survivable; a 141 MB download into a directory the
@@ -740,6 +756,60 @@ mod tests {
 
     fn seconds(s: f64) -> usize {
         (s * SAMPLE_RATE as f64) as usize
+    }
+
+    /// **The README names this directory on two platforms and one of the two was wrong.**
+    ///
+    /// It said `%LOCALAPPDATA%\zyris\cache\models`, dropping the organization segment that every
+    /// other Windows path on that page carries: `directories` 6.0.0's Windows project path is
+    /// `{organization}\{application}` with `cache` under it, so it is
+    /// `%LOCALAPPDATA%\attacca\zyris\cache\models`. A person following that page would have
+    /// looked for 141 MB in a directory that does not exist, concluded nothing had downloaded,
+    /// and had no way to tell that from a download that had failed.
+    ///
+    /// Nothing here can produce a Windows path — this machine is Linux and `directories` reads
+    /// the platform, not a parameter — so the Windows half is checked as **words assembled from
+    /// the same four constants `cache_dir` is written in terms of**, which is what makes the two
+    /// unable to drift apart. The Linux half is checked against what this machine actually
+    /// answers, which is the half a spelling test on its own could not reach.
+    ///
+    /// The same shape `announce.rs` uses over the tool count, and for the same reason: nothing
+    /// else in this project ever reads that page again.
+    #[test]
+    fn the_readme_names_the_directory_the_model_is_kept_in() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )
+        .expect("the README is readable from this crate");
+
+        let windows = format!("%LOCALAPPDATA%\\{ORGANIZATION}\\{APPLICATION}\\cache\\{MODELS}");
+        assert!(
+            readme.contains(&windows),
+            "the README does not name `{windows}`, which is where `directories` puts the model \
+             on Windows. Every other Windows path on that page carries `{ORGANIZATION}\\\
+             {APPLICATION}`, and this one did not."
+        );
+
+        let linux = format!("~/.cache/{APPLICATION}/{MODELS}");
+        assert!(readme.contains(&linux), "the README does not name `{linux}`");
+
+        // And the Linux spelling is what this machine really answers, so the sentence above is
+        // pinned to the code rather than only to itself. `HOME` is set wherever `cargo test`
+        // runs; a machine that names no cache directory at all is `ModelState::Nowhere` and has
+        // nothing for this to check.
+        if let Some(dir) = cache_dir() {
+            assert!(
+                dir.ends_with(std::path::Path::new(APPLICATION).join(MODELS)),
+                "this machine keeps models at {}, which is not the `{linux}` the README promises",
+                dir.display()
+            );
+        }
+
+        // The qualifier is the one of the four the README never shows: `directories` ignores it
+        // on Linux and on Windows and uses it only in a macOS bundle identifier. Named here so
+        // that deleting it from `cache_dir` is a compile error rather than a silent move of
+        // every model on a platform this project does not ship to.
+        assert_eq!(QUALIFIER, "cc");
     }
 
     /// The values every timing in this module was taken at. If either moves, the tables in the
