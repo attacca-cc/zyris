@@ -54,6 +54,10 @@ struct Machine {
     started: Vec<Arc<zyris_mcp::Promoted>>,
     live: LiveCapabilities,
     bus: EventBus,
+    /// The window's handle. Kept so a test can ask what the Tools screen would list, which is a
+    /// different question from what the supervisor thinks and from what the peer can see — and
+    /// was, for one commit, a different *answer*.
+    tools: Tools,
     /// What this machine announces of its own, read off the announcement rather than written down
     /// here. **Not a constant**: `input` and `screen_capture` are announced only where a display
     /// server answers and `file_transfer` only where an endpoint bound, so a fixed list would make
@@ -111,7 +115,7 @@ impl Machine {
             .filter(|name| !name.starts_with(zyris_mcp::CAPABILITY_PREFIX))
             .collect();
 
-        Machine { servers, live, bus, gate, started: running, builtin, _log: log }
+        Machine { servers, live, bus, gate, tools, started: running, builtin, _log: log }
     }
 
     /// What the peer can see, waited for rather than read once — a re-announce crosses a wire.
@@ -138,6 +142,20 @@ impl Machine {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// What the window's Tools screen would list, through the command that feeds it.
+    ///
+    /// Not `live.names()`: the point is the path a person actually sees, which goes through
+    /// [`Tools::announcement`].
+    async fn window_lists(&self) -> Vec<String> {
+        self.tools
+            .announcement(&self.live)
+            .await
+            .capabilities
+            .into_iter()
+            .map(|capability| capability.name)
+            .collect()
     }
 
     async fn state(&self, name: &str) -> ServerState {
@@ -583,4 +601,68 @@ async fn a_server_the_file_never_mentioned_cannot_be_switched() {
 
     assert!(error.contains("calendar"), "{error}");
     assert_eq!(machine.servers.list().await.len(), 1, "nothing was invented");
+}
+
+#[tokio::test]
+async fn the_tools_screen_lists_what_is_announced_now_and_not_what_was_announced_at_startup() {
+    // **The screen half of everything above, and the half that was wrong.** A peer stops seeing a
+    // withdrawn capability because the node re-announces; the window has no wire to watch, and for
+    // one commit it read a snapshot taken when the process started. So this walks the three ways
+    // the announcement moves — off, on, and a death nobody asked for — and asserts each of them
+    // against what a person would be looking at, not against what the supervisor believes.
+    //
+    // A screen that goes on advertising a capability this machine has withdrawn is worse than one
+    // that is merely behind: it tells somebody their agents can reach a process that is gone.
+    let machine = Machine::with(vec![
+        entry("desk-notes", &[]),
+        disabled(entry("calendar", &[])),
+        entry("clock", &["--exit-after", "150"]),
+    ])
+    .await;
+    let (agent, _node) = agent_connected_to(&machine.live).await;
+    machine.peer_sees(&agent, &["mcp_desk-notes", "mcp_clock"]).await;
+
+    let listed = machine.window_lists().await;
+    assert!(listed.contains(&"mcp_desk-notes".to_string()), "{listed:?}");
+    assert!(!listed.contains(&"mcp_calendar".to_string()), "{listed:?}");
+
+    // Turned off from the window. The row it was clicked on is gone from the Tools screen too.
+    machine.servers.set_enabled("desk-notes", false).await.expect("it was running");
+    let listed = machine.window_lists().await;
+    assert!(
+        !listed.contains(&"mcp_desk-notes".to_string()),
+        "the Tools screen still offers a capability this machine has withdrawn: {listed:?}"
+    );
+
+    // Turned on from the window. A server the file disabled was announced to nobody and has to
+    // appear here the moment it is.
+    machine.servers.set_enabled("calendar", true).await.expect("the probe server starts");
+    let listed = machine.window_lists().await;
+    assert!(
+        listed.contains(&"mcp_calendar".to_string()),
+        "the Tools screen omits a capability this machine is announcing: {listed:?}"
+    );
+
+    // And the withdrawal nobody clicked.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(machine.servers.reap().await, 1, "the one that exits on a timer");
+    let listed = machine.window_lists().await;
+    assert!(
+        !listed.contains(&"mcp_clock".to_string()),
+        "the Tools screen still lists a server whose process is gone: {listed:?}"
+    );
+
+    // Throughout, this machine's own capabilities are exactly where they were. The screen is
+    // reporting one node, and a promoted server coming or going is about that server.
+    for builtin in &machine.builtin {
+        assert!(listed.contains(builtin), "`{builtin}` left the Tools screen: {listed:?}");
+    }
+    // The last word belongs to the peer: the screen and the wire agree.
+    machine.peer_sees(&agent, &["mcp_calendar"]).await;
+    let mut announced = machine.window_lists().await;
+    let mut on_the_wire: Vec<String> =
+        agent.peer_descriptors().into_iter().map(|d| d.name).collect();
+    announced.sort();
+    on_the_wire.sort();
+    assert_eq!(announced, on_the_wire);
 }

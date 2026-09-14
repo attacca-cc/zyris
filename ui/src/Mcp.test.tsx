@@ -55,8 +55,8 @@ function answers(list: { problem?: string | null; servers?: ServerView[] }) {
   });
 }
 
-function showing(mcpChange: McpServerEvent | null = null): State {
-  return { ...initialState, screen: "mcp", mcpChange };
+function showing(mcpChange: McpServerEvent | null = null, resyncs = 0): State {
+  return { ...initialState, screen: "mcp", mcpChange, resyncs };
 }
 
 // Everything a person can actually read on the screen, as one string. Deliberately the rendered
@@ -275,6 +275,26 @@ describe("Mcp", () => {
 
     answers({ servers: [server("desk-notes", { state: { state: "died" }, tools: [] })] });
     rerender(<Mcp state={showing({ server: "desk-notes", change: { change: "died" } })} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("listitem", { name: "desk-notes" }).textContent).toMatch(
+        /stopped on its own/i,
+      ),
+    );
+  });
+
+  it("re-reads the list when this window is told it fell behind", async () => {
+    // The half `mcpChange` cannot cover, and the one a reviewer found. The forwarder drops a
+    // contiguous range of events when the window falls behind on the bus; a server change is
+    // published transiently and nothing keeps the last one, so there is no way to say *which*
+    // server moved. Without a read on the resync alone, such a window goes on showing a dead
+    // server as running with nothing left to correct it.
+    answers({ servers: [server("desk-notes")] });
+    const { rerender } = render(<Mcp state={showing()} />);
+    await screen.findByRole("listitem", { name: "desk-notes" });
+
+    answers({ servers: [server("desk-notes", { state: { state: "died" }, tools: [] })] });
+    rerender(<Mcp state={showing(null, 1)} />);
 
     await waitFor(() =>
       expect(screen.getByRole("listitem", { name: "desk-notes" }).textContent).toMatch(

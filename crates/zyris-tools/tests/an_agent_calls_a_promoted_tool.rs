@@ -418,8 +418,9 @@ async fn a_server_list_that_will_not_parse_leaves_everything_else_announced_and_
         "the problem has to name what is wrong with the file: {problem}"
     );
     assert_eq!(view.path, zyris_mcp::Config::path(machine.dir.path()).display().to_string());
+    let announcement = machine.tools.announcement(&machine.live).await;
     assert!(
-        machine.tools.announced().iter().all(|c| !c.name.starts_with(CAPABILITY_PREFIX)),
+        announcement.capabilities.iter().all(|c| !c.name.starts_with(CAPABILITY_PREFIX)),
         "the Tools screen would list an MCP capability this machine never started"
     );
 }

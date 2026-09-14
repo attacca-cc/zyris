@@ -11,6 +11,7 @@ import {
   initialState,
   reduce,
   subscribe,
+  subscribeResync,
   TABS,
   type Screen,
   type Tab,
@@ -80,9 +81,22 @@ export function App() {
         if (!cancelled && question) dispatch({ kind: "peerQuestion", question });
       });
     });
+    // The other channel, and the reason it is a channel at all: when the forwarder finds it has
+    // fallen behind on the core's events it can name the catch-up value, the switch and a waiting
+    // peer question, because each of those is held somewhere it can read — but not the MCP server
+    // changes it dropped, which are published transiently and kept nowhere. This says only that
+    // the window's idea of things is no longer worth anything, and the screens that read through
+    // a command ask again.
+    let unlistenResync: (() => void) | undefined;
+    void subscribeResync(() => dispatch({ kind: "resync" })).then((fn) => {
+      if (cancelled) fn();
+      else unlistenResync = fn;
+    });
+
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenResync?.();
     };
   }, []);
 

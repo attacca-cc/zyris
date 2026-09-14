@@ -91,6 +91,29 @@ impl LiveCapabilities {
         self.0.lock().await.announced.iter().map(|c| c.descriptor().name).collect()
     }
 
+    /// Every announced capability, described as the node describes it, in announcement order.
+    ///
+    /// **This is what a window has to read, and reading anything else is how a screen goes
+    /// stale.** The list here is the same one the node is built from and the same one a promoted
+    /// MCP server joins and leaves, so a screen that asks this cannot advertise a capability that
+    /// was withdrawn or omit one that was added — not because something remembers to update a
+    /// second copy, but because there is no second copy.
+    ///
+    /// **It asks the outside world nothing, which is the property the snapshot it replaces
+    /// existed for.** `input` and `screen_capture` are announced only where a display server
+    /// answered, and that was decided once, when the capability values were built. Those values
+    /// are what this reads. A display server that goes away mid-session therefore changes nothing
+    /// here — the node is still serving `input`, and a window that reported otherwise would be
+    /// stating something false about what this machine is handing out. The distinction a reader
+    /// needs stays intact: "this machine cannot do that" is a capability that is not in this
+    /// list, and it never becomes "the display server answered differently just now".
+    ///
+    /// A descriptor carries every tool's JSON schema, so this is not a cheap call to make in a
+    /// loop; it is meant for a person asking a question, not for a request path.
+    pub async fn descriptors(&self) -> Vec<zyris::CapabilityDescriptor> {
+        self.0.lock().await.announced.iter().map(|c| c.descriptor()).collect()
+    }
+
     /// Announce one more thing.
     ///
     /// Refused, changing nothing, when something with the same `(name, version)` is already

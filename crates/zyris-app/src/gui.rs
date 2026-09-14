@@ -11,6 +11,7 @@
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus};
+use zyris_runtime::LiveCapabilities;
 use zyris_tools::{Servers, Tools, Transfers};
 
 use crate::cli::Mode;
@@ -22,6 +23,10 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     connector: Connector,
     tools: Tools,
+    // What this node announces, and the only authority on it. The window's Tools screen reads it
+    // through this handle rather than through a list `main` wrote down once, so a promoted MCP
+    // server turned off, turned on, or dead is off that screen as soon as it is off the node.
+    live: LiveCapabilities,
     // Where a question about an unapproved peer waits. The same handle `main` gave the confirmer,
     // so what the window reads and answers is the question an agent's `send_to` is blocked on.
     pending: Pending,
@@ -91,12 +96,14 @@ pub fn run(
         .manage(tools.gate().clone())
         .manage(tools.log().clone())
         // And the `Tools` itself, for the one command that asks what is announced. Managed last
-        // because it moves; it is a handle too, holding that same gate and that same log, and it
-        // carries the snapshot `main` recorded when it handed the capabilities to the node, so
-        // the Tools screen reports what was actually announced rather than what a fresh look
-        // would say now. Two of the four need a display server, so those are not the same
-        // question.
+        // because it moves; it is a handle too, holding that same gate and that same log.
         .manage(tools)
+        // The list that command actually reads. A handle on the announcement itself, not a copy
+        // of it: what the Tools screen lists is what this node is serving at the moment it asks,
+        // including the promoted MCP servers that come and go while it runs. Two capabilities
+        // need a display server, and this does not re-ask it — the values that decision produced
+        // are what is in here. See `zyris_runtime::LiveCapabilities::descriptors`.
+        .manage(live)
         // Built here rather than in `main`: it holds nothing, remembers nothing and reads the
         // machine on every call, so there is no state for the two runtimes to share. Headless
         // has no switch to move, and the CLI flags build their own — before the instance lock,

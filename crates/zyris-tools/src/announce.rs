@@ -5,13 +5,13 @@
 //! something a capability has to remember to ask for.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use zyris::ServeCapability;
 use zyris::caps::{
     FileIoServer, FileTransferServer, InputServer, ScreenCaptureServer, TerminalServer,
 };
-use zyris_runtime::EventBus;
+use zyris::{CapabilityDescriptor, ServeCapability};
+use zyris_runtime::{EventBus, LiveCapabilities};
 use zyris_transfer::LocalFileTransfer;
 
 use crate::guarded::Guarded;
@@ -91,25 +91,11 @@ pub struct Tools {
     /// them unconditionally; nothing here re-checks that, because the check would be a second
     /// place the rule lives.
     mcp: Vec<Arc<dyn ServeCapability>>,
-    /// What `into_capabilities` handed the node, recorded as it happened.
-    ///
-    /// Shared across clones so the window and the connector agree, and written once: a node
-    /// rebuilt on a later dial announces the same list, and if it somehow could not, the first
-    /// answer is still the one the user was told.
-    announced: Arc<OnceLock<Vec<Announced>>>,
 }
 
 impl Tools {
     pub fn new(gate: Gate, log: AuditLog, root: PathBuf) -> Tools {
-        Tools {
-            gate,
-            log,
-            root,
-            bus: None,
-            transfer: None,
-            mcp: Vec::new(),
-            announced: Arc::new(OnceLock::new()),
-        }
+        Tools { gate, log, root, bus: None, transfer: None, mcp: Vec::new() }
     }
 
     /// Also publish every call, so the window and the tray see what is happening rather than
@@ -162,34 +148,35 @@ impl Tools {
     /// `Arc<dyn ServeCapability>` does not itself implement `ServeCapability`, so these do not go
     /// through `NodeBuilder::capability`.
     pub fn into_capabilities(self) -> Vec<Arc<dyn ServeCapability>> {
-        let capabilities = self.capabilities();
-        // Remember what went out, so the window reports the node's answer rather than its own.
-        // `OnceLock` rather than a plain field because `Tools` is `Clone` and this has to be the
-        // same record in every clone; a second call leaves the first record standing, which is
-        // what a node rebuilt on a later dial should see.
-        let _ = self.announced.set(describe(&capabilities));
-        capabilities
+        self.capabilities()
     }
 
-    /// What was announced, for the window.
+    /// What is announced **right now**, and the two paths that make it readable, for the window.
     ///
-    /// **The snapshot taken when the capabilities were handed to the node, not a fresh look.**
-    /// Two capabilities depend on a display server, and asking again can answer differently from
-    /// what the node is actually serving: a display that went away mid-session would have the
-    /// window report no `input` while every agent on the connection can still drive the pointer.
-    /// A screen that states something false about what this machine is handing out is worse than
-    /// a stale one, and rebuilding also reconnects to the display server on every ask.
+    /// **The capability list is read out of `live` and is not this type's to remember.** It was a
+    /// snapshot taken here as the capabilities were handed to the node, and that was right for
+    /// exactly as long as an announcement could not change. Once a promoted MCP server could be
+    /// turned off, turned on, or die mid-run, the snapshot meant the Tools screen went on
+    /// offering agents a capability this node had withdrawn — and hid one it had added. A screen
+    /// that states something false about what this machine is handing out is worse than a stale
+    /// one, and a snapshot of a list that moves is *both*.
     ///
-    /// Empty before [`Self::into_capabilities`] has run, which is honest: nothing is announced
-    /// until the node has them.
-    pub fn announced(&self) -> Vec<Announced> {
-        self.announced.get().cloned().unwrap_or_default()
-    }
-
-    /// [`Self::announced`] and the two paths that make it readable, for the window.
-    pub fn announcement(&self) -> Announcement {
+    /// Taking a [`LiveCapabilities`] as an argument rather than holding one is what stops that
+    /// coming back: there is no second copy to update, so there is nothing to forget to update.
+    /// The only thing that can answer this question is the list every node is built from.
+    ///
+    /// **It is still not a fresh look at the machine**, which is what the snapshot was really
+    /// protecting and what [`LiveCapabilities::descriptors`] keeps: whether this host has a
+    /// display server was decided once, by [`Self::screen_pair`], and the capability values that
+    /// decision produced are what `live` holds. A display server that goes away mid-session does
+    /// not take `input` out of this answer, because it does not take it off the node — every
+    /// agent on the connection can still drive the pointer.
+    ///
+    /// Empty before the capabilities have reached a [`LiveCapabilities`], which is honest:
+    /// nothing is announced until the node has them.
+    pub async fn announcement(&self, live: &LiveCapabilities) -> Announcement {
         Announcement {
-            capabilities: self.announced(),
+            capabilities: describe(&live.descriptors().await),
             root: self.root.display().to_string(),
             audit_log: self.log.path().display().to_string(),
         }
@@ -264,7 +251,8 @@ impl Tools {
     ///
     /// Called once per [`Self::capabilities`], which is once per `into_capabilities()` — so this
     /// connects to the display server when the node is built and not again. The window reads the
-    /// snapshot [`Self::into_capabilities`] left rather than asking here a second time.
+    /// capability values that produced through [`Self::announcement`], rather than asking here a
+    /// second time and getting a second answer.
     fn screen_pair(&self) -> Vec<Arc<dyn ServeCapability>> {
         let capture = zyris_screen::HostScreenCapture::default();
         let backend = capture.backend();
@@ -356,16 +344,13 @@ pub fn default_root() -> PathBuf {
 }
 
 /// A capability list as the window reads it.
-fn describe(capabilities: &[Arc<dyn ServeCapability>]) -> Vec<Announced> {
-    capabilities
+fn describe(descriptors: &[CapabilityDescriptor]) -> Vec<Announced> {
+    descriptors
         .iter()
-        .map(|capability| {
-            let descriptor = capability.descriptor();
-            Announced {
-                name: descriptor.name,
-                version: descriptor.version,
-                tools: descriptor.tools.into_iter().map(|tool| tool.name).collect(),
-            }
+        .map(|descriptor| Announced {
+            name: descriptor.name.clone(),
+            version: descriptor.version,
+            tools: descriptor.tools.iter().map(|tool| tool.name.clone()).collect(),
         })
         .collect()
 }
@@ -401,21 +386,26 @@ mod tests {
         Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
     }
 
-    /// A `Tools` that has handed its capabilities to a node, which is the only state in which
-    /// anything has been announced. `main` does this once at startup, before a window exists; a
-    /// test asking `announced()` without it is asking what was announced before anything was,
-    /// and the honest answer to that is nothing.
-    fn announced_tools(dir: &Path) -> Tools {
-        let tools = tools(dir);
-        let _ = tools.clone().into_capabilities();
-        tools
+    /// What the node is serving, built the way `main` builds it: the capabilities go into a
+    /// [`LiveCapabilities`], and that is the only thing anything asks afterwards.
+    fn live(tools: &Tools) -> LiveCapabilities {
+        LiveCapabilities::new(tools.clone().into_capabilities())
     }
 
-    #[test]
-    fn the_two_that_need_no_display_are_announced_with_their_tools() {
+    /// What the window's Tools screen would list for a machine with nothing but its own
+    /// capabilities. `main` hands them to a [`LiveCapabilities`] once at startup, before a window
+    /// exists; a test asking without that is asking what was announced before anything was, and
+    /// the honest answer to that is nothing.
+    async fn announced(dir: &Path) -> Vec<Announced> {
+        let tools = tools(dir);
+        tools.announcement(&live(&tools)).await.capabilities
+    }
+
+    #[tokio::test]
+    async fn the_two_that_need_no_display_are_announced_with_their_tools() {
         let dir = tempfile::tempdir().unwrap();
 
-        let announced = announced_tools(dir.path()).announced();
+        let announced = announced(dir.path()).await;
 
         let names: Vec<&str> = announced.iter().map(|c| c.name.as_str()).collect();
         // Not an equality any more: `screen_capture` and `input` follow these two on a host with
@@ -431,12 +421,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_announcement_is_shaped_the_way_the_window_reads_it() {
+    #[tokio::test]
+    async fn the_announcement_is_shaped_the_way_the_window_reads_it() {
         // `ui/src/Tools.tsx` transcribes this rather than parsing it, so the field names are the
         // contract. Nothing else catches a rename on either side.
         let dir = tempfile::tempdir().unwrap();
-        let announcement = announced_tools(dir.path()).announcement();
+        let tools = tools(dir.path());
+        let announcement = tools.announcement(&live(&tools)).await;
 
         let json = serde_json::to_value(&announcement).unwrap();
 
@@ -447,15 +438,15 @@ mod tests {
         assert!(json["auditLog"].as_str().unwrap().ends_with("audit.jsonl"));
     }
 
-    #[test]
-    fn the_screen_and_the_pointer_are_announced_together_or_not_at_all() {
+    #[tokio::test]
+    async fn the_screen_and_the_pointer_are_announced_together_or_not_at_all() {
         // Not a display test: it asserts the shape of the answer on whatever host runs it.
         // An agent that can see the screen but not act on it is half useful, and one that can
         // act but not see is guessing coordinates.
         let dir = tempfile::tempdir().unwrap();
 
         let names: Vec<String> =
-            announced_tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
+            announced(dir.path()).await.into_iter().map(|a| a.name).collect();
 
         assert!(names.contains(&"terminal".to_string()));
         assert!(names.contains(&"file_io".to_string()));
@@ -466,27 +457,58 @@ mod tests {
         );
     }
 
-    #[test]
-    fn nothing_is_announced_until_the_node_has_the_capabilities() {
+    #[tokio::test]
+    async fn nothing_is_announced_until_the_node_has_the_capabilities() {
         // The window asks this, and before the node was built the true answer is an empty list.
         // It matters that this is not "go and look": two of the four need a display server, so a
         // fresh look can answer differently from what the node is actually serving, and a screen
         // reporting no pointer while every agent on the connection can still drive one states
         // something false about what this machine is handing out.
         let dir = tempfile::tempdir().unwrap();
+        let tools = tools(dir.path());
 
-        assert!(tools(dir.path()).announced().is_empty());
+        let empty = LiveCapabilities::default();
+
+        assert!(tools.announcement(&empty).await.capabilities.is_empty());
     }
 
-    #[test]
-    fn a_machine_with_no_peer_identity_announces_no_file_transfer() {
+    #[tokio::test]
+    async fn the_window_reads_what_the_node_announces_rather_than_looking_again() {
+        // **The defect this replaced a snapshot to fix, in its smallest form.** What the Tools
+        // screen lists has to be what the node is serving at the moment it is asked — not what it
+        // was serving when the process started, and not what a fresh look at this machine would
+        // say. A promoted MCP server turned off, one turned on, and one whose process fell over
+        // all move that list while the node is up; `servers_come_and_go.rs` drives the whole of
+        // that path, and this pins the property it rests on.
+        //
+        // Removing a built-in is how it is asserted rather than adding a promoted server,
+        // because it is the assertion a re-look cannot pass: anything that answered by rebuilding
+        // this machine's capabilities would hand `file_io` straight back.
+        let dir = tempfile::tempdir().unwrap();
+        let tools = tools(dir.path());
+        let live = live(&tools);
+        assert!(names(&tools.announcement(&live).await).contains(&"file_io".to_string()));
+
+        assert!(live.remove("file_io").await, "it was announced");
+
+        let after = names(&tools.announcement(&live).await);
+        assert!(!after.contains(&"file_io".to_string()), "{after:?}");
+        assert!(after.contains(&"terminal".to_string()), "only the one named goes: {after:?}");
+    }
+
+    fn names(announcement: &Announcement) -> Vec<String> {
+        announcement.capabilities.iter().map(|c| c.name.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_machine_with_no_peer_identity_announces_no_file_transfer() {
         // The honest answer when the endpoint would not bind. `send_to` needs somewhere to send
         // from, and one announced without it would refuse every call — which an agent reads as a
         // broken machine rather than as a machine that does not do this.
         let dir = tempfile::tempdir().unwrap();
 
         let names: Vec<String> =
-            announced_tools(dir.path()).announced().into_iter().map(|a| a.name).collect();
+            announced(dir.path()).await.into_iter().map(|a| a.name).collect();
 
         assert!(!names.contains(&"file_transfer".to_string()), "{names:?}");
     }
@@ -507,9 +529,8 @@ mod tests {
         .unwrap();
         let tools = tools(dir.path()).with_transfer(&transfers);
 
-        let _ = tools.clone().into_capabilities();
+        let announced = tools.announcement(&live(&tools)).await.capabilities;
 
-        let announced = tools.announced();
         let transfer = announced
             .iter()
             .find(|capability| capability.name == "file_transfer")
@@ -540,9 +561,9 @@ mod tests {
         .await
         .unwrap();
         let tools = tools(dir.path()).with_transfer(&transfers);
-        let _ = tools.clone().into_capabilities();
+        let announced = tools.announcement(&live(&tools)).await.capabilities;
 
-        for capability in tools.announced() {
+        for capability in announced {
             let (_, expected) = TOOLS_PER_CAPABILITY
                 .iter()
                 .find(|(name, _)| *name == capability.name)
@@ -658,15 +679,14 @@ mod tests {
             .clone()
     }
 
-    #[test]
-    fn a_promoted_capability_is_announced_beside_the_built_ins() {
+    #[tokio::test]
+    async fn a_promoted_capability_is_announced_beside_the_built_ins() {
         let dir = tempfile::tempdir().unwrap();
         let (promotable, _) = Promotable::new(PROMOTED);
         let tools = tools(dir.path()).with_mcp(vec![Arc::new(promotable)]);
 
-        let _ = tools.clone().into_capabilities();
+        let announced = tools.announcement(&live(&tools)).await.capabilities;
 
-        let announced = tools.announced();
         let promoted = announced
             .iter()
             .find(|capability| capability.name == PROMOTED)
@@ -677,11 +697,11 @@ mod tests {
         assert!(names.contains(&"file_io") && names.contains(&"terminal"), "{names:?}");
     }
 
-    #[test]
-    fn a_machine_with_no_mcp_servers_announces_none() {
+    #[tokio::test]
+    async fn a_machine_with_no_mcp_servers_announces_none() {
         let dir = tempfile::tempdir().unwrap();
 
-        let announced = announced_tools(dir.path()).announced();
+        let announced = announced(dir.path()).await;
 
         assert!(
             !announced.iter().any(|c| c.name.starts_with(crate::guarded::MCP_CAPABILITY_PREFIX)),
@@ -751,15 +771,15 @@ mod tests {
         assert!(!written.contains("/etc/shadow"), "{written}");
     }
 
-    #[test]
-    fn no_capability_this_machine_announces_itself_starts_with_the_promoted_prefix() {
+    #[tokio::test]
+    async fn no_capability_this_machine_announces_itself_starts_with_the_promoted_prefix() {
         // The one standing condition behind `zyris-mcp`'s always-prefix rule, checked against the
         // real list rather than a copy of it. A sixth built-in called `mcp_anything` would put a
         // promoted server's name space inside this machine's own — and, through `Guarded`, would
         // silently stop its arguments being written to the audit log.
         let dir = tempfile::tempdir().unwrap();
 
-        for capability in announced_tools(dir.path()).announced() {
+        for capability in announced(dir.path()).await {
             assert!(
                 !capability.name.starts_with(zyris_mcp::CAPABILITY_PREFIX),
                 "the built-in `{}` starts with `{}`",
@@ -769,18 +789,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_record_is_shared_with_every_clone() {
-        // The connector is handed a clone and the window reads another. If the record were not
-        // shared, the window would report nothing for the whole run.
+    #[tokio::test]
+    async fn the_window_and_the_connector_read_one_announcement() {
+        // The connector is handed a clone of the `Tools` and the window keeps another, and what
+        // each of them reports has to be the same list. It is, because neither of them holds a
+        // list: the capabilities the connector's clone produced are the ones the window's clone
+        // describes, through the [`LiveCapabilities`] between them.
         let dir = tempfile::tempdir().unwrap();
         let tools = tools(dir.path());
         let connector_copy = tools.clone();
 
-        let _ = connector_copy.into_capabilities();
+        let live = LiveCapabilities::new(connector_copy.into_capabilities());
 
         assert!(
-            !tools.announced().is_empty(),
+            !tools.announcement(&live).await.capabilities.is_empty(),
             "the window's handle did not see what the connector's handle announced"
         );
     }

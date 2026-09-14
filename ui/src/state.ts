@@ -100,7 +100,8 @@ export type Action =
   | CoreEvent
   | { kind: "navigate"; to: Tab }
   | { kind: "peerQuestion"; question: PeerQuestion }
-  | { kind: "peerQuestionEnded"; id: number };
+  | { kind: "peerQuestionEnded"; id: number }
+  | { kind: "resync" };
 
 // How many calls the window keeps and how many it asks the audit file for. This is a tail, not a
 // record: the whole history is the file on disk, and an unbounded list would grow for as long as
@@ -141,6 +142,16 @@ export type State = {
   // clicked anything and the row would otherwise go on saying "running" until the window was
   // reopened.
   mcpChange: McpServerEvent | null;
+  // How many times this window has been told it fell behind. A counter and nothing else: what it
+  // is for is being a value that changes, so an effect watching it runs again.
+  //
+  // **The half `mcpChange` cannot cover.** A server change is published transiently, so a window
+  // that fell behind on the event bus has no way to learn which server moved — the core keeps no
+  // last one to hand back. Without this, such a window would go on showing a dead MCP server as
+  // running, and the Tools screen would go on listing a capability this computer has withdrawn,
+  // until somebody navigated away and back. See `RESYNC_EVENT_NAME` in
+  // crates/zyris-app/src/bridge.rs.
+  resyncs: number;
 };
 
 export const initialState: State = {
@@ -154,6 +165,7 @@ export const initialState: State = {
   toolCalls: [],
   question: null,
   mcpChange: null,
+  resyncs: 0,
 };
 
 // Where a core event that means "past enrolment" leaves the window.
@@ -276,6 +288,13 @@ export function reduce(state: State, action: Action): State {
           ...state.toolCalls,
         ].slice(0, MAX_TOOL_CALLS),
       };
+    case "resync":
+      // The one arm that is deliberately **not** idempotent, and it is not reachable by the route
+      // that makes idempotence necessary: this is never in the bus's one-slot catch-up value —
+      // it is not a core event at all — so it arrives once per time the window actually fell
+      // behind. Being told twice means falling behind twice, and each of those is a reason to
+      // read again.
+      return { ...state, resyncs: state.resyncs + 1 };
     case "mcpServer":
       // Replaces rather than appends, so applying the same event twice leaves the same value —
       // the rule every arm here follows. Two changes that are equal in content do produce two
@@ -295,6 +314,18 @@ const EVENT_NAME = "core-event";
 
 export function subscribe(onEvent: (event: CoreEvent) => void): Promise<() => void> {
   return listen<CoreEvent>(EVENT_NAME, (message) => onEvent(message.payload));
+}
+
+// "You fell behind; ask your questions again." Has to match RESYNC_EVENT_NAME in
+// crates/zyris-app/src/bridge.rs exactly; nothing checks that at build time.
+//
+// A second subscription rather than a `CoreEvent`, because it is not one: every variant of that
+// union is something the core did, and this is something this window did. The Rust side says the
+// same thing from its own end.
+const RESYNC_EVENT_NAME = "core-resync";
+
+export function subscribeResync(onResync: () => void): Promise<() => void> {
+  return listen(RESYNC_EVENT_NAME, () => onResync());
 }
 
 // What the core published before this window's listener was registered — see the module comment

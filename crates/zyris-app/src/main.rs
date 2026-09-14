@@ -203,9 +203,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(transfers) = &transfers {
         tools = tools.with_transfer(transfers);
     }
-    // Built once and named from that same list. `announced()` answers from what this call
-    // records, so it has to run before `gui::run` takes the `Tools` or the window would have
-    // nothing to report.
+    // Built once, and the list below is named from it.
     let capabilities = tools.clone().into_capabilities();
     // Which ones actually made it, said out loud. `input` and `screen_capture` are absent on a
     // machine with no display server, and this line plus the one `zyris-tools` logs when it is
@@ -239,6 +237,11 @@ fn main() -> anyhow::Result<()> {
     // that is gone is worse there than anywhere.
     let servers = zyris_tools::Servers::new(&tools, live.clone(), bus.clone(), started);
     runtime.spawn(servers.clone().watch());
+
+    // The window's handle on the same list, taken before the connector takes its own. What the
+    // Tools screen lists is read through this, so it cannot go on advertising a capability the
+    // node has withdrawn.
+    let window_live = live.clone();
 
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(live);
@@ -283,6 +286,9 @@ fn main() -> anyhow::Result<()> {
             runtime.handle().clone(),
             connector,
             tools,
+            // What that `Tools` describes when the window asks. The same handle the supervisor
+            // and the connector hold, so the screen and the node cannot disagree.
+            window_live,
             // The other end of the slot `peer_confirmer` fills. The window reads and answers
             // through this handle; it is not a copy.
             pending,

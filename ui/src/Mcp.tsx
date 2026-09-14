@@ -137,7 +137,11 @@ export function Mcp({ state }: { state: State }) {
     return () => {
       cancelled = true;
     };
-  }, [state.mcpChange]);
+    // `state.resyncs` is the other half, and it covers the case `mcpChange` cannot: a window that
+    // fell behind on the event bus was never told which server moved, because a server change is
+    // published transiently and nothing keeps the last one. Without it such a window goes on
+    // showing a dead server as running.
+  }, [state.mcpChange, state.resyncs]);
 
   function toggle(server: ServerView) {
     const enabled = server.state.state !== "running";
