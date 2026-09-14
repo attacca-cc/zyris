@@ -286,6 +286,25 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // The voice's half of the same thing, and the second caller `add_connect_hook` exists for.
+    //
+    // **No `#[cfg(feature = "voice")]` here, and there cannot be one**: `Voice::on_connect` has
+    // one signature in both builds and does nothing in the one without an audio stack, exactly
+    // as `Voice::push` and `Voice::describe` do. It is installed unconditionally for the same
+    // reason the hotkey loop is — a hook taken and dropped as a switch moves is a race with
+    // nothing to gain — and it runs on **every** connection, because the turn stream dies with
+    // the socket and `turn_events` replays nothing.
+    //
+    // It is installed in the headless branch too. A node with no window still has a session to
+    // listen to, and the thing it cannot do is hear a key.
+    {
+        let voice = voice.clone();
+        connector = connector.add_connect_hook(move |connection| {
+            let voice = voice.clone();
+            async move { voice.on_connect(connection).await }
+        });
+    }
+
     // Announced further up, beside the instance name the same flag changes.
     if let Some(server) = cli.server() {
         connector = connector.with_server(server.to_string());

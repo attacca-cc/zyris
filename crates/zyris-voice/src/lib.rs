@@ -83,6 +83,10 @@ pub mod playback;
 #[cfg(feature = "voice")]
 pub mod turn;
 
+// The recordings the tests measure against, and the one reader for them.
+#[cfg(all(test, feature = "voice"))]
+mod fixture;
+
 // The state machine: Idle -> Listening -> Thinking, and what a push-to-talk key does to it.
 // Everything above is a piece; this is the only thing that publishes a `VoiceEvent`.
 #[cfg(feature = "voice")]
@@ -116,8 +120,9 @@ pub const NOT_COMPILED_IN: &str =
 /// bus is about the node's connection to Attacca, this is about a microphone, and a build with
 /// no audio stack must still be able to name the type.
 ///
-/// These are the step 7 half of the spec's state machine — `Idle -> Listening -> Thinking`.
-/// Step 8 owns `Speaking` and barge-in and will add to this; nothing here predicts their shape.
+/// The spec's state machine, as far as it is built: `Idle -> Listening -> Thinking` from step 7,
+/// and `Speaking` with its barge-in arrow back to `Listening` from step 8. `AwaitingInput` needs
+/// a second entry into a turn that nothing has yet.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum VoiceEvent {
@@ -137,6 +142,21 @@ pub enum VoiceEvent {
     /// The turn ended because something failed, and this is what to tell the person.
     #[serde(rename_all = "camelCase")]
     Failed { reason: String },
+    /// The answer is being read aloud. Published when the first fragment of it reaches the
+    /// speaker, which is seconds after the first words of it reach the screen.
+    Speaking,
+    /// The answer finished being read aloud.
+    ///
+    /// **Not "the answer finished"** — the agent stops writing well before the speaker stops
+    /// talking, because synthesis on this machine runs at 1.2 to 1.9 times real time. This is
+    /// the one that says the room is quiet again, and a window without it would show `Speaking`
+    /// over a speaker that stopped a minute ago.
+    Spoke,
+    /// Speech was stopped part way because the person started a turn.
+    ///
+    /// Its own variant rather than [`VoiceEvent::Spoke`]: they read differently to a person, and
+    /// exactly one of them means the answer was not all heard.
+    Interrupted,
 }
 
 /// What the push-to-talk key did.
@@ -257,6 +277,29 @@ impl Voice {
             engine.push(push);
         }
         let _ = push;
+    }
+
+    /// A connection to Attacca has come up. Listen to the turn on it.
+    ///
+    /// **The one method here that takes a protocol type, and the reason `zyris` is not an
+    /// optional dependency of this crate.** `zyris-app` may contain no
+    /// `#[cfg(feature = "voice")]` anywhere — a test enforces it — so the connect hook it
+    /// installs cannot name `turn::Feed`, which exists only with the feature. The seam has to be
+    /// a method on `Voice` with one signature in both builds, like [`Voice::describe`], and this
+    /// is it.
+    ///
+    /// Runs on **every** connection, including every redial: the turn stream dies with the
+    /// socket, and `after: None` does not replay what was missed, so re-subscribing is the whole
+    /// of what keeps a voice working across a reconnect.
+    ///
+    /// On a build with no audio stack this is a no-op, and on one with it but nothing listening
+    /// it is still worth doing: the subscription belongs to the connection, not to the switch.
+    pub async fn on_connect(&self, connection: zyris::Connection) {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.on_connect(connection.clone()).await;
+        }
+        let _ = connection;
     }
 
     /// Start listening if a person has already said to, on some earlier run.

@@ -92,6 +92,15 @@ pub trait TurnApi: Send + Sync + 'static {
 
     /// Post a message, starting a turn.
     async fn send_message(&self, session_id: String, message: String) -> zyris::Result<()>;
+
+    /// Stop the turn that is running, if one is.
+    ///
+    /// **It takes a session and nothing else.** There is no way to tell the server *where* the
+    /// answer stopped being useful, and no `Cancelled` frame comes back — from the stream alone
+    /// a cancel and an ordinary finish are the same thing. That is why barge-in posts a message
+    /// saying where speech was cut off rather than the transcript recording it: see
+    /// [`crate::session::Interruption`]. An upstream issue asks for a delivery point.
+    async fn cancel_turn(&self, session_id: String) -> zyris::Result<()>;
 }
 
 #[zyris::async_trait]
@@ -108,6 +117,10 @@ impl TurnApi for AttaccaApiClient {
         // No attachments: this node speaks, it does not upload. `Datum` is the protocol's shape
         // for a file riding along with a message and nothing in the voice path produces one.
         AttaccaApi::send_message(self, session_id, message, Vec::new()).await
+    }
+
+    async fn cancel_turn(&self, session_id: String) -> zyris::Result<()> {
+        AttaccaApi::cancel_turn(self, session_id).await
     }
 }
 
@@ -183,6 +196,16 @@ impl Feed {
     /// A new subscription to what the turn is producing. Each caller gets its own.
     pub fn events(&self) -> broadcast::Receiver<TurnEvent> {
         self.events.subscribe()
+    }
+
+    /// Take the subscription down without ending the connection, the way a chunk gap does.
+    ///
+    /// Test-only. The gap between a stream failing and the next one opening is a real window
+    /// with real behaviour in it — a cancel is accepted there and a message is not — and there
+    /// is no way to reach it from outside without a server that produces a `StreamLagged`.
+    #[cfg(test)]
+    pub(crate) fn take_the_subscription_down(&self) {
+        self.state.lock().expect("the feed state is not poisoned").live = false;
     }
 
     /// Whether a turn subscription is open right now.
@@ -263,6 +286,25 @@ impl Feed {
             return Err(WireError::new(ErrorCode::ConnectionLost, "no connection"));
         };
         api.send_message(self.session_id.clone(), message.into()).await
+    }
+
+    /// Stop the turn that is running.
+    ///
+    /// **Not refused while the subscription is down**, unlike [`Feed::say`], and the asymmetry
+    /// is deliberate: `say` is refused because a message sent into an unwatched session loses
+    /// its answer, whereas a cancel has no answer to lose. What it needs is a client, which
+    /// outlives the subscription — a stream failed by `StreamLagged` is re-opened on the same
+    /// connection, and cancelling in that window is exactly the case where speech has been
+    /// stopped and the agent is still generating.
+    pub async fn cancel(&self) -> zyris::Result<()> {
+        let api = self.state.lock().expect("the feed state is not poisoned").api.clone();
+        let Some(api) = api else {
+            return Err(WireError::new(
+                ErrorCode::ConnectionLost,
+                "this node is not connected, so there is no turn it can stop",
+            ));
+        };
+        api.cancel_turn(self.session_id.clone()).await
     }
 
     /// Open one subscription, and hand back its items. `None` means give up on this generation.
@@ -509,9 +551,10 @@ mod tests {
     /// timing: a test that waited and then looked would pass for an implementation that
     /// subscribed late but quickly.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    enum Call {
+    pub(super) enum Call {
         Subscribe { after: Option<i64> },
         Send { message: String },
+        Cancel,
     }
 
     #[derive(Default)]
@@ -536,16 +579,16 @@ mod tests {
     /// `Some(Err(..))` and then ends. Both are how `zyris-core` builds one — `StreamEvent::Failed`
     /// is delivered to the same receiver the data went to, and the entry is removed — but no test
     /// anywhere exercises it, so this double is the specification and would be wrong with it.
-    struct Fake {
+    pub(super) struct Fake {
         script: Arc<Mutex<Script>>,
     }
 
     impl Fake {
-        fn new() -> Arc<Fake> {
+        pub(super) fn new() -> Arc<Fake> {
             Arc::new(Fake { script: Arc::new(Mutex::new(Script::default())) })
         }
 
-        fn calls(&self) -> Vec<Call> {
+        pub(super) fn calls(&self) -> Vec<Call> {
             self.script.lock().unwrap().calls.clone()
         }
 
@@ -610,6 +653,11 @@ mod tests {
 
         async fn send_message(&self, _session_id: String, message: String) -> zyris::Result<()> {
             self.script.lock().unwrap().calls.push(Call::Send { message });
+            Ok(())
+        }
+
+        async fn cancel_turn(&self, _session_id: String) -> zyris::Result<()> {
+            self.script.lock().unwrap().calls.push(Call::Cancel);
             Ok(())
         }
     }
@@ -971,5 +1019,53 @@ mod tests {
         feed.attach(api.clone()).await;
 
         assert_eq!(next_event(&mut events).await, TurnEvent::Running(true));
+    }
+}
+
+#[cfg(test)]
+mod stopping_a_turn {
+    use super::*;
+    use super::tests::{Call, Fake};
+
+    /// **A cancel reaches Attacca**, which is the half of barge-in that leaves this machine.
+    #[tokio::test]
+    async fn cancelling_a_turn_reaches_the_session_it_is_for() {
+        let api = Fake::new();
+        let feed = Feed::new("s");
+        feed.attach(api.clone()).await;
+
+        feed.cancel().await.expect("a live connection takes a cancel");
+
+        assert!(api.calls().contains(&Call::Cancel));
+    }
+
+    /// **A cancel is not refused while the subscription is down, and [`Feed::say`] is** — the
+    /// asymmetry is the point.
+    ///
+    /// `say` is refused because a message sent into a session nobody is watching loses its
+    /// answer: `after: None` replays nothing. A cancel has no answer to lose, and the window
+    /// where it is most wanted is exactly the one where the subscription has just failed — a
+    /// chunk gap between the stream dying and the next one opening, with speech already stopped
+    /// and an agent still generating.
+    #[tokio::test]
+    async fn a_cancel_is_not_refused_in_the_window_where_a_message_would_be() {
+        let api = Fake::new();
+        let feed = Feed::new("s");
+        feed.attach(api.clone()).await;
+        feed.take_the_subscription_down();
+
+        assert!(feed.say("hello").await.is_err(), "a message has an answer to lose");
+        feed.cancel().await.expect("a cancel does not");
+    }
+
+    /// A machine that has never connected has no turn to stop, and says so rather than
+    /// pretending it did.
+    #[tokio::test]
+    async fn a_node_that_never_connected_cannot_cancel_anything() {
+        let feed = Feed::new("s");
+
+        let refused = feed.cancel().await.expect_err("there is no connection");
+
+        assert_eq!(refused.code, ErrorCode::ConnectionLost);
     }
 }

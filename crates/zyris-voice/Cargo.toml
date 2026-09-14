@@ -94,13 +94,24 @@ optional = true
 workspace = true
 optional = true
 
-# The turn feed: `turn_events`, `send_message`, and the frames they carry. **Optional, and that
-# is the point** -- the off build of this crate has no protocol stack in it, which is why
-# `speak::Kind` mirrors `ZDeltaKind` rather than re-exporting it. With `voice` on, `turn.rs` is
-# the one place the two are mapped, in one line that stops compiling if the protocol grows an arm.
+# The turn feed: `turn_events`, `send_message`, and the frames they carry. `speak::Kind` still
+# mirrors `ZDeltaKind` rather than re-exporting it, and `turn.rs` is the one place the two are
+# mapped -- one line that stops compiling if the protocol grows an arm.
+#
+# **Not optional, from task 4 of step 8, and it is the first thing in step 8 that costs the off
+# build anything.** `zyris-app` may contain no `#[cfg(feature = "voice")]`, so the connect hook
+# it installs cannot name `turn::Feed`, which exists only with the feature. The seam is therefore
+# a method on `Voice` -- `Voice::on_connect` -- and it has to have one signature in both builds,
+# which means naming `zyris::Connection` in both. There is no cheaper shape: a generic parameter
+# would need a bound, and a bound is the same dependency.
+#
+# What the off build now pulls in is **nothing the workspace was not already building**:
+# `zyris-runtime`, `zyris-tools` and `zyris-app` all depend on `zyris` unconditionally, so
+# `cargo test --workspace` compiles the same set either way. What changes is a crate outside this
+# workspace taking `zyris-voice` with default features: it used to get `tokio/sync` and `serde`,
+# and now gets the protocol stack with them.
 [dependencies.zyris]
 workspace = true
-optional = true
 
 [dependencies.zyris-attacca]
 workspace = true
@@ -147,7 +158,6 @@ voice = [
     "dep:sha2",
     "dep:serde_json",
     "dep:tracing",
-    "dep:zyris",
     "dep:zyris-attacca",
     "dep:futures-util",
     "tokio/rt",

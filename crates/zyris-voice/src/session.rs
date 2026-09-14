@@ -246,6 +246,11 @@ pub struct Session {
     /// Reused across callbacks so the steady state allocates nothing.
     staged: Vec<f32>,
     ready: Vec<f32>,
+
+    /// What is reading the answer aloud, if anything is. `None` is a session with no speaker —
+    /// which is every one step 7 built, and every one on a machine whose output device would not
+    /// open. A key pressed then starts a turn and interrupts nothing.
+    speaking: Option<Arc<Speaking>>,
 }
 
 impl Session {
@@ -278,7 +283,19 @@ impl Session {
             queued: None,
             staged: Vec::new(),
             ready: Vec::new(),
+            speaking: None,
         }
+    }
+
+    /// Give this session something to interrupt.
+    ///
+    /// **A builder rather than a seventh argument to [`Session::new`]**, because a speaker is
+    /// genuinely optional: a machine with no output device, or a build whose text-to-speech
+    /// models have not been downloaded, listens exactly as well without one. Every ending this
+    /// module already had is unchanged by its absence.
+    pub fn speaking(mut self, speaking: Arc<Speaking>) -> Session {
+        self.speaking = Some(speaking);
+        self
     }
 
     /// Run until the key stream or the microphone goes away.
@@ -434,6 +451,14 @@ impl Session {
     fn pressed(&mut self) {
         // Before anything else: what is already in the channel is not part of this turn.
         self.drain();
+        // **Barge-in, and it happens before the repeat guard.** A second press inside a hold
+        // must not restart the recording, but it also cannot un-interrupt anything: by then the
+        // queue is already gone. Putting it here rather than after the guard costs a lock on a
+        // repeat and keeps the stopping unconditional, which is the property that matters —
+        // there is no key press that leaves the speaker talking over the person.
+        if let Some(speaking) = &self.speaking {
+            speaking.interrupt();
+        }
         if self.turn.is_some() {
             // A repeat inside one hold. Starting again here would discard everything said
             // before it, which is the one thing a recorder may not do.
@@ -551,6 +576,460 @@ impl Session {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Speaking, and stopping
+// ---------------------------------------------------------------------------------------------
+
+/// Turning one fragment into audio. Blocking, for seconds.
+///
+/// A trait rather than [`crate::tts::Tts`] for the reason [`Transcribe`] is one: every ending
+/// this half has to get right — a fragment cut off, a queue thrown away, a message that says
+/// where speech stopped — is an ending the model is not part of, and a test that had to load
+/// 401 MB of graphs to reach one would be a test nobody runs.
+pub trait Synthesise: Send + Sync + 'static {
+    /// 44.1 kHz mono, in `[-1, 1]`. `&self`, so this is behind a lock: there is exactly one
+    /// model and one thread may use it at a time.
+    fn say(&self, text: &str) -> Result<Vec<f32>, String>;
+}
+
+impl Synthesise for std::sync::Mutex<crate::tts::Tts> {
+    fn say(&self, text: &str) -> Result<Vec<f32>, String> {
+        let mut tts = self.lock().map_err(|_| "the voice is not usable".to_string())?;
+        tts.say(text).map(|said| said.samples).map_err(|fault| fault.to_string())
+    }
+}
+
+/// Handing audio to a speaker, and taking back what it has not played yet.
+///
+/// The half of [`crate::playback::Playback`] that barge-in uses, as a trait so that the rules
+/// below can be decided without a sound card. Everything in it is a counter the real callback
+/// keeps; none of it is a clock.
+pub trait Play: Send + Sync + 'static {
+    /// Queue one fragment; answer where in the stream it starts, or `None` if the stream is gone.
+    fn speak(&self, samples: Vec<f32>) -> Option<u64>;
+    /// Samples written to the device, ever. **How far playback got.**
+    fn played(&self) -> u64;
+    /// Samples queued and not yet written to the device.
+    fn pending(&self) -> u64;
+    /// Throw away everything queued and not yet written.
+    fn silence(&self);
+}
+
+impl Play for crate::playback::Speaker {
+    fn speak(&self, samples: Vec<f32>) -> Option<u64> {
+        crate::playback::Speaker::speak(self, samples)
+    }
+    fn played(&self) -> u64 {
+        crate::playback::Speaker::played(self)
+    }
+    fn pending(&self) -> u64 {
+        crate::playback::Speaker::pending(self)
+    }
+    fn silence(&self) {
+        crate::playback::Speaker::silence(self)
+    }
+}
+
+/// The two things barge-in asks of the conversation: stop generating, and record what happened.
+///
+/// Implemented for [`crate::turn::Feed`]; a trait here so that the order of the two calls is
+/// decidable by a test, which is the only thing about them that can be got wrong silently.
+#[zyris::async_trait]
+pub trait Says: Send + Sync + 'static {
+    /// Stop the turn that is running.
+    async fn cancel(&self) -> Result<(), String>;
+    /// Post a message, starting a new turn.
+    async fn say(&self, message: String) -> Result<(), String>;
+}
+
+#[zyris::async_trait]
+impl Says for crate::turn::Feed {
+    async fn cancel(&self) -> Result<(), String> {
+        crate::turn::Feed::cancel(self).await.map_err(|error| error.to_string())
+    }
+    async fn say(&self, message: String) -> Result<(), String> {
+        crate::turn::Feed::say(self, message).await.map_err(|error| error.to_string())
+    }
+}
+
+/// How often the drain watch looks, once a turn has stopped producing fragments.
+///
+/// Only ever reached when there is audio still queued, so the cost is one atomic read every
+/// 50 ms of somebody being spoken to. It is a poll rather than a notification because the thing
+/// being waited on is an audio callback, which may not signal anything.
+const DRAIN_POLL: Duration = Duration::from_millis(50);
+
+/// One fragment that was queued, and where in the stream it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Queued {
+    text: String,
+    /// Samples handed to the speaker before this fragment. [`Play::speak`]'s own answer, never a
+    /// second running total — see its documentation.
+    start: u64,
+    samples: u64,
+}
+
+/// What was queued for this turn, in order, so that an interruption can say where it stopped.
+#[derive(Debug, Default)]
+struct Ledger {
+    queued: Vec<Queued>,
+}
+
+impl Ledger {
+    fn add(&mut self, text: &str, start: u64, samples: u64) {
+        self.queued.push(Queued { text: text.to_string(), start, samples });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.queued.clear();
+    }
+
+    /// Read the ledger against how far the speaker got.
+    ///
+    /// `played` is samples **written to the device**, which is not the same as samples a person
+    /// has heard: the device holds another `stream_delay` — 42.67 ms on this machine — that it
+    /// will go on to emit whatever happens here. So this is the upper bound, by a fraction of
+    /// one frame, and it is a measurement rather than an estimate from a clock.
+    fn at(&self, played: u64) -> Interruption {
+        let mut interruption = Interruption::default();
+        for entry in &self.queued {
+            let end = entry.start + entry.samples;
+            if played >= end {
+                interruption.heard.push(entry.text.clone());
+            } else if played > entry.start {
+                interruption.cut = Some(Cut {
+                    text: entry.text.clone(),
+                    at: played_for(played - entry.start),
+                    of: played_for(entry.samples),
+                });
+            } else {
+                interruption.unheard.push(entry.text.clone());
+            }
+        }
+        interruption
+    }
+}
+
+/// The silence put between one fragment and the next, in samples of the speaker.s stream.
+///
+/// **A subtraction rather than a number**, which is task 2.s decision and not this one.s: the
+/// model already leaves a lead-in and a tail on every fragment, together 677 ms to 1.19 ms wide,
+/// and [`crate::split::GAP`] is what is *missing* from the pause they make between them. It is
+/// zero today and stops being zero the moment those pads are trimmed before a fragment is
+/// queued — which is worth doing and is not done here.
+///
+/// A function rather than a constant so that the arithmetic has somewhere to be wrong and a
+/// test has something to decide.
+fn gap_samples() -> usize {
+    (crate::split::GAP.as_secs_f64() * f64::from(crate::tts::SAMPLE_RATE)).round() as usize
+}
+
+/// How long a number of samples of the speaker.s stream lasts.
+fn played_for(samples: u64) -> Duration {
+    Duration::from_secs_f64(samples as f64 / f64::from(crate::tts::SAMPLE_RATE))
+}
+
+/// The fragment speech stopped in the middle of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cut {
+    /// The fragment, as it was sent to the voice.
+    pub text: String,
+    /// How much of it reached the speaker.
+    pub at: Duration,
+    /// How long the whole of it was.
+    pub of: Duration,
+}
+
+/// Where a spoken answer was cut off.
+///
+/// # What this node knows, and what it cannot tell anybody
+///
+/// It knows this **precisely**: it has the samples it handed to the device and the timestamp the
+/// backend attached to each callback. What it has no way to say is any of it to the server —
+/// `cancel_turn` takes a session id and nothing else, and there is no `Cancelled` frame, so from
+/// the stream alone a cancel and an ordinary finish are the same event. The spec's "record only
+/// what actually reached the speaker" is therefore not implementable as written.
+///
+/// So the decision taken is to **post a message saying where the speech was cut off**, which is
+/// [`Interruption::message`], and to ask upstream for `cancel_turn` to take a delivery point.
+///
+/// **The agent's own record is not truncated by any of this**, and the copy may not say it is.
+/// Generation runs ahead of speech — synthesis on this machine is 1.2 to 1.9 times slower than
+/// real time — so by the time somebody interrupts, most of the answer has usually been written
+/// already. What was cut short is the reading aloud.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Interruption {
+    /// Fragments the speaker played to the end, in order.
+    pub heard: Vec<String>,
+    /// The fragment it stopped in the middle of, if it stopped in the middle of one.
+    pub cut: Option<Cut>,
+    /// Fragments that were queued and never started.
+    pub unheard: Vec<String>,
+}
+
+impl Interruption {
+    /// Whether any of what was queued went unheard. `false` is a speaker that had finished.
+    pub fn anything_missed(&self) -> bool {
+        self.cut.is_some() || !self.unheard.is_empty()
+    }
+
+    /// The message posted into the session, written for the agent reading it.
+    ///
+    /// Bracketed and named, because it is a message this node wrote and not something the person
+    /// said — an agent that could not tell the two apart would answer it as if it had been asked
+    /// something.
+    pub fn message(&self) -> String {
+        let quoted = |texts: &[String]| {
+            texts.iter().map(|text| format!("\u{201c}{text}\u{201d}")).collect::<Vec<_>>().join(" ")
+        };
+        let mut lines = vec![
+            "[Zyris: the person started speaking, so reading this answer aloud was stopped part \
+             way through and the turn was cancelled.]"
+                .to_string(),
+        ];
+        if !self.heard.is_empty() {
+            lines.push(format!("Heard in full: {}", quoted(&self.heard)));
+        }
+        if let Some(cut) = &self.cut {
+            lines.push(format!(
+                "Heard {:.1}s of {:.1}s: \u{201c}{}\u{201d}",
+                cut.at.as_secs_f64(),
+                cut.of.as_secs_f64(),
+                cut.text
+            ));
+        }
+        if !self.unheard.is_empty() {
+            lines.push(format!("Not heard at all: {}", quoted(&self.unheard)));
+        }
+        if self.heard.is_empty() && self.cut.is_none() {
+            lines.push("None of it was heard.".to_string());
+        }
+        lines.push(
+            "Your own record of that answer is complete — only the speaking was cut short. \
+             Speech runs behind writing here, so most of what you wrote had already been written \
+             before anything was stopped."
+                .to_string(),
+        );
+        lines.join("\n")
+    }
+}
+
+/// Reading an answer aloud, and stopping when the person starts a turn.
+///
+/// # What barge-in is, here
+///
+/// It is the push-to-talk key going down, and **not** the microphone hearing a voice. That is a
+/// decision with a reason on each side:
+///
+/// - Wake-word matching is deferred to its own spike, so there is no other way into a turn: the
+///   only way a person speaks to this machine is by reaching for the key. "Stops the moment you
+///   speak" and "stops the moment you press" are the same moment.
+/// - A build **without the `aec` feature** — which is every build that ships, see
+///   `crates/zyris-voice/Cargo.toml` — has an echo canceller that cancels nothing. A session
+///   that barged in on detected speech there would hear its own loudspeaker and cut itself off
+///   after its first word, on every answer. The detector cannot be trusted over a speaker until
+///   [`crate::apm::Apm::erle_db`] says the canceller is real, and nothing in CI can compile the
+///   code that would make it real.
+///
+/// # What stopping does, in order
+///
+/// Throw the queue away, read how far the speaker got, cancel the turn, and post a message
+/// saying where it was cut off. The order matters twice: the queue is discarded **before**
+/// `played` is read, or the answer would include audio that never reached the device; and the
+/// turn is cancelled **before** the message is posted, or the message would arrive into a turn
+/// that is still generating.
+pub struct Speaking {
+    tts: Arc<dyn Synthesise>,
+    out: Arc<dyn Play>,
+    turn: Arc<dyn Says>,
+    events: broadcast::Sender<VoiceEvent>,
+    state: std::sync::Mutex<SpeakingState>,
+}
+
+#[derive(Default)]
+struct SpeakingState {
+    ledger: Ledger,
+    /// How many times speech has been stopped. A synthesis that finishes after a barge-in
+    /// carries the number it started with and is thrown away rather than queued behind the
+    /// person who just interrupted.
+    generation: u64,
+}
+
+impl Speaking {
+    /// The voice, the speaker, the conversation, and where events go.
+    pub fn new(
+        tts: Arc<dyn Synthesise>,
+        out: Arc<dyn Play>,
+        turn: Arc<dyn Says>,
+        events: broadcast::Sender<VoiceEvent>,
+    ) -> Arc<Speaking> {
+        Arc::new(Speaking { tts, out, turn, events, state: std::sync::Mutex::new(Default::default()) })
+    }
+
+    /// Synthesise and queue everything the feed says to, until the feed goes away.
+    ///
+    /// **One fragment at a time, deliberately.** There is one model, it is 451 MB resident, and
+    /// synthesis is slower than speech on this machine — a second one in flight would take a
+    /// core off the first and make the first sentence later, which is the only latency anybody
+    /// hears.
+    pub async fn run(self: Arc<Self>, mut turns: broadcast::Receiver<crate::turn::TurnEvent>) {
+        loop {
+            match turns.recv().await {
+                Ok(crate::turn::TurnEvent::Say(fragment)) => {
+                    self.synthesise(fragment.text()).await;
+                }
+                // The end of a turn. Everything sayable has been said; what is left is waiting
+                // for the speaker to get through it.
+                Ok(crate::turn::TurnEvent::Running(false)) => self.drained().await,
+                Ok(_) => {}
+                // A fragment was dropped before it was read, which is a sentence that will never
+                // be spoken. Nothing can recover it — a `Delta` is not durable and nothing
+                // replays one — so it is said out loud rather than swallowed.
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    self.publish(VoiceEvent::Failed {
+                        reason: format!(
+                            "speech fell too far behind the answer and {missed} pieces of it \
+                             were lost, so part of it was not read aloud"
+                        ),
+                    });
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    }
+
+    /// One fragment: say it, and queue it if nobody interrupted while it was being said.
+    async fn synthesise(&self, text: &str) {
+        let generation = self.generation();
+        let tts = self.tts.clone();
+        let owned = text.to_string();
+        let said = tokio::task::spawn_blocking(move || tts.say(&owned)).await;
+
+        // **Whether anybody interrupted while this was being made is decided in
+        // [`Speaking::queue`], under the lock, and nowhere else.** A check here as well would be
+        // a second copy of the rule that no test could tell from its absence — this module
+        // already carries two clauses like that from step 7 and does not want a third. A
+        // synthesis that *failed* is still reported either way: the voice really did stop
+        // working, and whoever interrupted is not the reason.
+        match said {
+            Ok(Ok(samples)) => self.queue(text, samples, generation),
+            Ok(Err(reason)) => self.publish(VoiceEvent::Failed { reason }),
+            Err(_) => self.publish(VoiceEvent::Failed {
+                reason: "making the answer into speech stopped before it finished".to_string(),
+            }),
+        }
+    }
+
+    /// Put one fragment.s audio on the speaker.s queue and write it into the ledger.
+    ///
+    /// **The generation is checked again here, under the lock**, and the check in
+    /// [`Speaking::synthesise`] is the cheap early-out rather than the rule. Between that check
+    /// and this line is a window — microseconds, but a real one — in which a key press would
+    /// discard the queue and then have this put a sentence back onto it, unledgered, to be
+    /// played over whoever pressed the key.
+    fn queue(&self, text: &str, samples: Vec<f32>, generation: u64) {
+        let mut state = self.state.lock().expect("the speaking state is not poisoned");
+        if state.generation != generation {
+            return;
+        }
+        let first = state.ledger.is_empty();
+        if !first && gap_samples() > 0 {
+            self.out.speak(vec![0.0; gap_samples()]);
+        }
+        let length = samples.len() as u64;
+        match self.out.speak(samples) {
+            Some(at) => {
+                state.ledger.add(text, at, length);
+                if first {
+                    drop(state);
+                    self.publish(VoiceEvent::Speaking);
+                }
+            }
+            None => self.publish(VoiceEvent::Failed {
+                reason: "the speaker stopped accepting audio, so the answer was not read aloud"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// Wait for the speaker to finish what it was given, then say so.
+    ///
+    /// Reached when a turn stops producing text. **Not the same as "the answer is finished"** —
+    /// generation ends well before speech does, which is the whole reason barge-in has anything
+    /// to say.
+    async fn drained(&self) {
+        let generation = self.generation();
+        while self.out.pending() > 0 {
+            tokio::time::sleep(DRAIN_POLL).await;
+            if self.generation() != generation {
+                // Somebody interrupted; they own the ending, not this.
+                return;
+            }
+        }
+        let mut state = self.state.lock().expect("the speaking state is not poisoned");
+        if state.generation != generation || state.ledger.is_empty() {
+            return;
+        }
+        state.ledger.clear();
+        drop(state);
+        self.publish(VoiceEvent::Spoke);
+    }
+
+    /// The person started a turn. Stop speaking, and answer with what they did not hear.
+    ///
+    /// `None` is a speaker that had already finished — every queued fragment written to the
+    /// device — which is the ordinary case for a key pressed between answers. **Derived from the
+    /// ledger and the device's own counter rather than from a flag**: a flag saying "still
+    /// speaking" is a second copy of that fact, and the copy is what goes stale.
+    pub fn stop(&self) -> Option<Interruption> {
+        let mut state = self.state.lock().expect("the speaking state is not poisoned");
+        state.generation += 1;
+        // Discard first: `played` must not include audio that was still on the queue.
+        self.out.silence();
+        let interruption = state.ledger.at(self.out.played());
+        state.ledger.clear();
+        interruption.anything_missed().then_some(interruption)
+    }
+
+    /// Cancel the turn and record where the speech stopped, in that order.
+    ///
+    /// Separate from [`Speaking::stop`] because the two halves belong to different places: the
+    /// stopping is synchronous and has to happen inside the key press, and this talks to a server
+    /// and may take as long as a round trip.
+    pub async fn record(&self, interruption: Interruption) {
+        if let Err(error) = self.turn.cancel().await {
+            tracing::warn!(%error, "the turn could not be cancelled after speech was interrupted");
+        }
+        if let Err(error) = self.turn.say(interruption.message()).await {
+            tracing::warn!(
+                %error,
+                "the session was not told where the spoken answer was cut off, so its record of \
+                 the answer does not say that only part of it was heard"
+            );
+        }
+    }
+
+    /// Both halves, as one call for a caller that is not async. Nothing if nothing was missed.
+    pub fn interrupt(self: &Arc<Self>) {
+        let Some(interruption) = self.stop() else { return };
+        self.publish(VoiceEvent::Interrupted);
+        let speaking = self.clone();
+        tokio::spawn(async move { speaking.record(interruption).await });
+    }
+
+    fn generation(&self) -> u64 {
+        self.state.lock().expect("the speaking state is not poisoned").generation
+    }
+
+    fn publish(&self, event: VoiceEvent) {
+        let _ = self.events.send(event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -613,41 +1092,7 @@ mod tests {
     /// a `[dev-dependencies]` entry on a crate whose whole feature layout exists to keep the
     /// dependency graph small.
     fn recorded() -> Vec<f32> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/audio/jfk.wav");
-        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert_eq!(&bytes[0..4], b"RIFF");
-        assert_eq!(&bytes[8..12], b"WAVE");
-
-        let (mut rate, mut channels, mut bits) = (0u32, 0u16, 0u16);
-        let mut samples = Vec::new();
-        let mut at = 12;
-        while at + 8 <= bytes.len() {
-            let id = &bytes[at..at + 4];
-            let size =
-                u32::from_le_bytes(bytes[at + 4..at + 8].try_into().expect("4 bytes")) as usize;
-            let body = &bytes[at + 8..(at + 8 + size).min(bytes.len())];
-            match id {
-                b"fmt " => {
-                    channels = u16::from_le_bytes(body[2..4].try_into().expect("2 bytes"));
-                    rate = u32::from_le_bytes(body[4..8].try_into().expect("4 bytes"));
-                    bits = u16::from_le_bytes(body[14..16].try_into().expect("2 bytes"));
-                }
-                b"data" => {
-                    samples = body
-                        .chunks_exact(2)
-                        .map(|s| {
-                            f32::from(i16::from_le_bytes(s.try_into().expect("2 bytes")))
-                                / 32768.0
-                        })
-                        .collect();
-                }
-                _ => {}
-            }
-            at += 8 + size + (size & 1);
-        }
-        assert_eq!((rate, channels, bits), (SAMPLE_RATE, 1, 16));
-        assert!(!samples.is_empty());
-        samples
+        crate::fixture::wav("jfk.wav")
     }
 
     /// A slice of the recording that is speech rather than the silence it opens with. The first
@@ -667,7 +1112,7 @@ mod tests {
     /// Every ending this module has to get right — a tap, a lost release, a device that goes
     /// away — is an ending whisper is not part of, and the two that whisper *is* part of care
     /// about what it answered rather than about what it is. Neither needs 141 MB on disk.
-    struct Scribe {
+    pub(super) struct Scribe {
         heard: Mutex<Vec<Vec<f32>>>,
         answers: Mutex<VecDeque<Result<String, stt::Fault>>>,
         /// When set, every call blocks until a token is put on it. This is how "a key pressed
@@ -676,7 +1121,9 @@ mod tests {
     }
 
     impl Scribe {
-        fn saying(answers: impl IntoIterator<Item = Result<String, stt::Fault>>) -> Arc<Scribe> {
+        pub(super) fn saying(
+            answers: impl IntoIterator<Item = Result<String, stt::Fault>>,
+        ) -> Arc<Scribe> {
             Arc::new(Scribe {
                 heard: Mutex::new(Vec::new()),
                 answers: Mutex::new(answers.into_iter().collect()),
@@ -684,7 +1131,7 @@ mod tests {
             })
         }
 
-        fn always(text: &str) -> Arc<Scribe> {
+        pub(super) fn always(text: &str) -> Arc<Scribe> {
             Scribe::saying(std::iter::repeat_n(Ok(text.to_string()), 8))
         }
 
@@ -1495,4 +1942,578 @@ mod tests {
         assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "said".into() });
         zyris.stops().await;
     }
+}
+
+#[cfg(test)]
+mod barge_in {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use crate::playback::{Fill, Speaker, offline};
+
+    /// The deadline every waiting assertion in here carries, for `session::tests`' reason: a
+    /// `#[tokio::test]` has no timeout of its own, so a state machine that never leaves a state
+    /// is a suite that hangs rather than a test that fails.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// Samples per character, so that a fragment's length in the ledger is arithmetic a test can
+    /// read rather than a number to look up.
+    const PER_CHAR: usize = 1000;
+
+    // -----------------------------------------------------------------------------------------
+    // Doubles
+    // -----------------------------------------------------------------------------------------
+
+    /// A voice that makes a fragment's length out of its text and nothing else.
+    struct Voicebox {
+        said: Mutex<Vec<String>>,
+        answers: Mutex<VecDeque<Result<Vec<f32>, String>>>,
+        /// Held shut until a test opens it, so that a barge-in can happen *during* a synthesis.
+        gate: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl Voicebox {
+        fn plain() -> Arc<Voicebox> {
+            Arc::new(Voicebox {
+                said: Mutex::new(Vec::new()),
+                answers: Mutex::new(VecDeque::new()),
+                gate: None,
+            })
+        }
+
+        fn gated() -> (Arc<Voicebox>, std::sync::mpsc::Sender<()>) {
+            let (open, gate) = std::sync::mpsc::channel();
+            let voice = Arc::new(Voicebox {
+                said: Mutex::new(Vec::new()),
+                answers: Mutex::new(VecDeque::new()),
+                gate: Some(Mutex::new(gate)),
+            });
+            (voice, open)
+        }
+
+        fn refusing(reason: &str) -> Arc<Voicebox> {
+            Arc::new(Voicebox {
+                said: Mutex::new(Vec::new()),
+                answers: Mutex::new(VecDeque::from([Err(reason.to_string())])),
+                gate: None,
+            })
+        }
+
+        fn spoken(&self) -> Vec<String> {
+            self.said.lock().expect("not poisoned").clone()
+        }
+    }
+
+    impl Synthesise for Voicebox {
+        fn say(&self, text: &str) -> Result<Vec<f32>, String> {
+            self.said.lock().expect("not poisoned").push(text.to_string());
+            if let Some(gate) = &self.gate {
+                let _ = gate.lock().expect("not poisoned").recv();
+            }
+            self.answers
+                .lock()
+                .expect("not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Ok(vec![0.1; text.chars().count() * PER_CHAR]))
+        }
+    }
+
+    /// What reached Attacca, in order. The order is the assertion in one of the tests below.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Told {
+        Cancel,
+        Said(String),
+    }
+
+    #[derive(Default)]
+    struct Conversation {
+        told: Mutex<Vec<Told>>,
+    }
+
+    impl Conversation {
+        fn told(&self) -> Vec<Told> {
+            self.told.lock().expect("not poisoned").clone()
+        }
+
+        /// The one message posted, or a panic naming what was posted instead.
+        fn message(&self) -> String {
+            match self.told().into_iter().find_map(|told| match told {
+                Told::Said(message) => Some(message),
+                Told::Cancel => None,
+            }) {
+                Some(message) => message,
+                None => panic!("nothing was posted into the session: {:?}", self.told()),
+            }
+        }
+    }
+
+    #[zyris::async_trait]
+    impl Says for Conversation {
+        async fn cancel(&self) -> Result<(), String> {
+            self.told.lock().expect("not poisoned").push(Told::Cancel);
+            Ok(())
+        }
+        async fn say(&self, message: String) -> Result<(), String> {
+            self.told.lock().expect("not poisoned").push(Told::Said(message));
+            Ok(())
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The harness
+    // -----------------------------------------------------------------------------------------
+
+    /// A speaker, a voice, a conversation and the real [`Fill`] behind the queue.
+    ///
+    /// **The callback is the real one**, from `playback::offline`: what a discard does to
+    /// `played`, what `pending` says afterwards and where a fragment starts are the rules being
+    /// decided here, and a double for them would be a second implementation of exactly that.
+    struct Rig {
+        speaking: Arc<Speaking>,
+        voice: Arc<Voicebox>,
+        conversation: Arc<Conversation>,
+        speaker: Speaker,
+        fill: Fill,
+        _tap: mpsc::UnboundedReceiver<Vec<f32>>,
+        events: broadcast::Receiver<VoiceEvent>,
+    }
+
+    fn rig(voice: Arc<Voicebox>) -> Rig {
+        let (speaker, fill, tap) = offline(441);
+        let conversation = Arc::new(Conversation::default());
+        let (events, events_rx) = broadcast::channel(64);
+        let speaking = Speaking::new(
+            voice.clone(),
+            Arc::new(speaker.clone()),
+            conversation.clone(),
+            events,
+        );
+        Rig { speaking, voice, conversation, speaker, fill, _tap: tap, events: events_rx }
+    }
+
+    impl Rig {
+        /// One callback: `samples` of whatever is queued reach the device.
+        fn play(&mut self, samples: usize) {
+            let mut out = vec![0.0f32; samples];
+            self.fill.deliver(&mut out, 1, None);
+        }
+
+        /// Synthesise and queue one fragment, the way the feed would.
+        async fn say(&self, text: &str) {
+            self.speaking.synthesise(text).await;
+        }
+
+        async fn next_event(&mut self) -> VoiceEvent {
+            tokio::time::timeout(PATIENCE, self.events.recv())
+                .await
+                .expect("an event was expected and none arrived")
+                .expect("the event stream is open")
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The ledger
+    // -----------------------------------------------------------------------------------------
+
+    fn ledger() -> Ledger {
+        let mut ledger = Ledger::default();
+        ledger.add("One.", 0, 1000);
+        ledger.add("Two.", 1000, 2000);
+        ledger.add("Three.", 3000, 500);
+        ledger
+    }
+
+    /// Nothing reached the device, so nothing was heard — **not** "the first one was".
+    #[test]
+    fn a_fragment_the_speaker_has_not_started_is_not_one_that_was_heard() {
+        let read = ledger().at(0);
+
+        assert_eq!(read.heard, Vec::<String>::new());
+        assert_eq!(read.cut, None);
+        assert_eq!(read.unheard, vec!["One.", "Two.", "Three."]);
+    }
+
+    /// The exact boundary: `played` equal to a fragment's end is that fragment heard in full and
+    /// the next one not begun. Off by one either way and a sentence changes sides.
+    #[test]
+    fn the_boundary_between_heard_and_not_is_where_the_fragment_ends() {
+        let read = ledger().at(1000);
+
+        assert_eq!(read.heard, vec!["One."]);
+        assert_eq!(read.cut, None, "the second has not started");
+        assert_eq!(read.unheard, vec!["Two.", "Three."]);
+    }
+
+    /// Part way through the second, which is the case the whole message exists for.
+    #[test]
+    fn a_fragment_the_speaker_was_in_the_middle_of_says_how_far_it_got() {
+        let read = ledger().at(2000);
+
+        assert_eq!(read.heard, vec!["One."]);
+        assert_eq!(
+            read.cut,
+            Some(Cut {
+                text: "Two.".to_string(),
+                at: played_for(1000),
+                of: played_for(2000),
+            })
+        );
+        assert_eq!(read.unheard, vec!["Three."]);
+    }
+
+    /// Everything queued reached the device. There is nothing to tell anybody about.
+    #[test]
+    fn a_speaker_that_finished_missed_nothing() {
+        let read = ledger().at(3500);
+
+        assert_eq!(read.heard, vec!["One.", "Two.", "Three."]);
+        assert!(!read.anything_missed());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The message
+    // -----------------------------------------------------------------------------------------
+
+    /// **The copy may not claim the agent's own record is short**, and it is not: generation
+    /// finishes long before speech does, so the answer was written whether or not it was heard.
+    /// Three tasks of this project have shipped copy claiming more than the code does.
+    #[test]
+    fn the_message_says_what_was_heard_and_does_not_claim_the_record_is_truncated() {
+        let message = ledger().at(2000).message();
+
+        assert!(message.contains("\u{201c}One.\u{201d}"), "{message}");
+        assert!(message.contains("Heard 0.0s of 0.0s"), "one second at 44.1 kHz is not a second");
+        assert!(message.contains("\u{201c}Two.\u{201d}"), "{message}");
+        assert!(message.contains("Not heard at all: \u{201c}Three.\u{201d}"), "{message}");
+        assert!(
+            message.contains("Your own record of that answer is complete"),
+            "the one thing this message must not leave a reader believing is that their own \
+             transcript was cut short: {message}"
+        );
+        assert!(
+            message.contains("most of what you wrote had already been written"),
+            "and the sentence after it is half of what makes that believable — an agent told \
+             only that its record is complete has no reason to think so, since the speech it \
+             was writing for stopped: {message}"
+        );
+    }
+
+    /// A key pressed before a word of the answer came out. "None of it was heard" rather than a
+    /// message with nothing in it, which reads as a formatting bug.
+    #[test]
+    fn a_message_about_speech_that_never_started_says_so() {
+        let message = ledger().at(0).message();
+
+        assert!(message.contains("None of it was heard."), "{message}");
+        assert!(!message.contains("Heard in full"), "{message}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Stopping
+    // -----------------------------------------------------------------------------------------
+
+    /// **The whole of task 4, in one test.** Two sentences queued, one and a half played, and
+    /// the key goes down.
+    ///
+    /// The third assertion is the discriminator that matters: audio still on the queue must not
+    /// be counted as audio the person heard. `Fill` counts a discard into `discarded` and not
+    /// into `played` for exactly this, and a version that did the other thing would report every
+    /// queued sentence as spoken and cancel a turn saying so.
+    #[tokio::test]
+    async fn a_key_pressed_part_way_through_an_answer_stops_it_and_says_where() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await; // 4 characters, 4000 samples
+        rig.say("Here it is.").await; // 11 characters, 11000 samples
+        rig.play(6000);
+
+        let interruption = rig.speaking.stop().expect("the speaker had not finished");
+
+        assert_eq!(interruption.heard, vec!["Yes."]);
+        assert_eq!(
+            interruption.cut.as_ref().map(|cut| cut.text.as_str()),
+            Some("Here it is."),
+            "the second sentence was two thousand samples in when the key went down"
+        );
+        assert_eq!(interruption.unheard, Vec::<String>::new());
+
+        // And the speaker really is stopped: the discard happens in the callback.
+        rig.play(6000);
+        assert_eq!(rig.speaker.played(), 6000, "nothing more reached the device");
+        assert_eq!(rig.speaker.pending(), 0, "and nothing is still waiting");
+
+        assert_eq!(
+            rig.speaking.stop(),
+            None,
+            "and the ledger went with it: a second press must not report the same sentence cut \
+             off twice, into a turn that has already been cancelled once"
+        );
+    }
+
+    /// A key pressed between answers interrupts nothing, and **must not post a message**.
+    ///
+    /// Without this a person who pressed the key to say a second thing would put a "your answer
+    /// was cut off" note into the session after every completed answer.
+    #[tokio::test]
+    async fn a_key_pressed_after_the_answer_finished_interrupts_nothing() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await;
+        rig.play(4000);
+
+        assert_eq!(rig.speaking.stop(), None);
+
+        rig.speaking.interrupt();
+        settle().await;
+        assert_eq!(rig.conversation.told(), Vec::new(), "nothing was said to Attacca");
+    }
+
+    /// **The turn is cancelled before the message is posted.** The other order posts a message
+    /// into a turn that is still generating, and the server may interleave the two.
+    #[tokio::test]
+    async fn the_turn_is_cancelled_before_the_interruption_is_recorded() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await;
+        rig.play(1000);
+
+        let interruption = rig.speaking.stop().expect("the speaker had not finished");
+        rig.speaking.record(interruption).await;
+
+        let told = rig.conversation.told();
+        assert_eq!(told.len(), 2);
+        assert_eq!(told[0], Told::Cancel);
+        assert!(matches!(told[1], Told::Said(_)));
+        assert!(
+            rig.conversation.message().contains("\u{201c}Yes.\u{201d}"),
+            "and the message that was posted is the one the interruption describes: {:?}",
+            rig.conversation.message()
+        );
+    }
+
+    /// **A fragment that finished being synthesised after the key went down is thrown away.**
+    ///
+    /// Synthesis is seconds on this machine, so a person who interrupts is nearly always
+    /// interrupting during one. Without this they hear the sentence they cut off, several
+    /// seconds after cutting it off, over whatever they said instead.
+    #[tokio::test]
+    async fn a_sentence_that_was_still_being_made_when_the_key_went_down_is_not_played() {
+        let (voice, open) = Voicebox::gated();
+        let mut rig = rig(voice);
+
+        let speaking = rig.speaking.clone();
+        let synthesising =
+            tokio::spawn(async move { speaking.synthesise("The answer is this.").await });
+
+        // Wait for the synthesis to have started, then interrupt it.
+        let started = tokio::time::Instant::now();
+        while rig.voice.spoken().is_empty() {
+            assert!(started.elapsed() < PATIENCE, "the synthesis never started");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(rig.speaking.stop(), None, "nothing had reached the speaker yet");
+        open.send(()).expect("the synthesis is waiting");
+        synthesising.await.expect("the synthesis task does not panic");
+
+        assert_eq!(rig.speaker.pending(), 0, "the finished sentence was not queued");
+        rig.play(4096);
+        assert_eq!(rig.speaker.played(), 0, "and nothing was played");
+    }
+
+    /// A voice that refused says so on the event stream rather than going quiet. A synthesiser
+    /// that has stopped working and a turn with nothing sayable in it are the same silence
+    /// otherwise.
+    #[tokio::test]
+    async fn a_fragment_the_voice_refused_is_reported_rather_than_swallowed() {
+        let mut rig = rig(Voicebox::refusing("the vocoder would not load"));
+
+        rig.say("Yes.").await;
+
+        assert_eq!(
+            rig.next_event().await,
+            VoiceEvent::Failed { reason: "the vocoder would not load".to_string() }
+        );
+    }
+
+    /// The first fragment to reach the speaker is what `Speaking` means, and it is published
+    /// once per turn rather than once per sentence.
+    #[tokio::test]
+    async fn the_answer_being_read_aloud_is_announced_once() {
+        let mut rig = rig(Voicebox::plain());
+
+        rig.say("One.").await;
+        rig.say("Two.").await;
+
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rig.events.recv()).await.is_err(),
+            "a second sentence is not a second announcement"
+        );
+    }
+
+    /// **The end of a turn is not the end of the speaking**, and a window told otherwise would
+    /// show `Speaking` over a speaker that stopped a minute ago — or stop showing it while the
+    /// machine is still talking. `Spoke` is published when the queue is empty, not when the
+    /// agent stopped writing.
+    #[tokio::test]
+    async fn the_speaker_finishing_is_a_different_moment_from_the_answer_finishing() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await;
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+
+        // The turn ends with four thousand samples still queued.
+        let speaking = rig.speaking.clone();
+        let draining = tokio::spawn(async move { speaking.drained().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rig.events.recv()).await.is_err(),
+            "the answer is finished and the speaker is not"
+        );
+
+        rig.play(4000);
+        tokio::time::timeout(PATIENCE, draining)
+            .await
+            .expect("the drain watch has to end when the queue does")
+            .expect("it does not panic");
+        assert_eq!(rig.next_event().await, VoiceEvent::Spoke);
+    }
+
+    /// The same drain watch, interrupted: whoever pressed the key owns the ending, and
+    /// publishing `Spoke` as well would say the answer was finished being read out.
+    #[tokio::test]
+    async fn an_interrupted_answer_does_not_also_report_that_it_finished() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await;
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+
+        let speaking = rig.speaking.clone();
+        let draining = tokio::spawn(async move { speaking.drained().await });
+        // The watch has to be waiting before the key goes down, which is the ordinary case: a
+        // turn ends, the speaker is still talking, and a person interrupts what is left.
+        settle().await;
+        rig.play(1000);
+        rig.speaking.interrupt();
+
+        tokio::time::timeout(PATIENCE, draining)
+            .await
+            .expect("the drain watch has to notice the interruption")
+            .expect("it does not panic");
+
+        assert_eq!(rig.next_event().await, VoiceEvent::Interrupted);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rig.events.recv()).await.is_err(),
+            "`Spoke` would say the answer was read to the end, which is the opposite of what \
+             happened"
+        );
+    }
+
+    /// Let spawned work run. `session::tests::settle`'s reason, and its shape.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Through the session
+    // -----------------------------------------------------------------------------------------
+
+    /// **The wiring**: the push-to-talk key is what barge-in is, so the stopping has to happen
+    /// on the press and not somewhere a test reaches directly.
+    #[tokio::test]
+    async fn the_key_going_down_is_what_stops_the_speaker() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Here is a long answer.").await;
+        rig.play(1000);
+
+        let (audio, audio_rx) = mpsc::unbounded_channel::<Captured>();
+        let (keys, keys_rx) = broadcast::channel(8);
+        let (events, _events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let session = Session::new(audio_rx, keys_rx, apm, Scribe::always(""), events)
+            .speaking(rig.speaking.clone());
+        let running = tokio::spawn(session.run());
+
+        keys.send(Push::Pressed).expect("the session is listening");
+        // Waited for without playing anything, so that the assertion below is about the key and
+        // not about how many samples the waiting happened to consume.
+        let stopped = tokio::time::Instant::now();
+        while rig.speaker.counters().discarded() == 0 && rig.speaker.pending() > 0 {
+            assert!(stopped.elapsed() < PATIENCE, "the key press never reached the speaker");
+            tokio::task::yield_now().await;
+            rig.play(0);
+        }
+
+        rig.play(4096);
+        assert_eq!(rig.speaker.played(), 1000, "nothing was played after the key went down");
+        assert_eq!(rig.speaker.pending(), 0, "and the queue was thrown away");
+        drop(audio);
+        drop(keys);
+        let _ = tokio::time::timeout(PATIENCE, running).await;
+    }
+
+    /// A session with no speaker is every session step 7 built, and a key pressed in one must
+    /// still start a turn rather than reaching for something that is not there.
+    #[tokio::test]
+    async fn a_session_with_no_speaker_still_starts_a_turn() {
+        let (audio, audio_rx) = mpsc::unbounded_channel::<Captured>();
+        let (keys, keys_rx) = broadcast::channel(8);
+        let (events, mut events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let session = Session::new(audio_rx, keys_rx, apm, Scribe::always(""), events);
+        let running = tokio::spawn(session.run());
+
+        keys.send(Push::Pressed).expect("the session is listening");
+
+        assert_eq!(
+            tokio::time::timeout(PATIENCE, events_rx.recv())
+                .await
+                .expect("a turn has to start")
+                .expect("the stream is open"),
+            VoiceEvent::Listening
+        );
+        drop(audio);
+        drop(keys);
+        let _ = tokio::time::timeout(PATIENCE, running).await;
+    }
+
+    /// **The worker, end to end**: fragments off a feed become audio at the speaker, and the
+    /// end of the turn becomes the end of the speaking.
+    ///
+    /// `Speaking::run` is what `run::Engine` spawns, and nothing else in this module reaches it:
+    /// every test above drives `synthesise` and `drained` directly, which leaves the `match` that
+    /// maps a `TurnEvent` onto them untested. A `Say` read as a `Shown` would be a machine that
+    /// never says anything, with no error anywhere.
+    #[tokio::test]
+    async fn what_the_feed_says_to_say_is_what_reaches_the_speaker() {
+        let mut rig = rig(Voicebox::plain());
+        let (turns, subscription) = broadcast::channel(16);
+
+        let worker = tokio::spawn(rig.speaking.clone().run(subscription));
+        turns
+            .send(crate::turn::TurnEvent::Shown {
+                kind: crate::speak::Kind::Assistant,
+                text: "Yes.".to_string(),
+            })
+            .expect("the worker is reading");
+        turns
+            .send(crate::turn::TurnEvent::Say(crate::split::Fragment::spoken("Yes.")))
+            .expect("the worker is reading");
+
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+        assert_eq!(rig.voice.spoken(), vec!["Yes."], "and only the fragment, not the delta");
+        assert_eq!(rig.speaker.pending(), 4 * PER_CHAR as u64);
+
+        turns.send(crate::turn::TurnEvent::Running(false)).expect("the worker is reading");
+        settle().await;
+        rig.play(4 * PER_CHAR);
+        assert_eq!(rig.next_event().await, VoiceEvent::Spoke);
+
+        drop(turns);
+        tokio::time::timeout(PATIENCE, worker)
+            .await
+            .expect("the worker ends when the feed does, or a stopped session leaks a task")
+            .expect("it does not panic");
+    }
+
+    /// The double `session::tests` already has, reached through its module so that there is one
+    /// of it.
+    use super::tests::Scribe;
 }

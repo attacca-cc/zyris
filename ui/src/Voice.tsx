@@ -165,6 +165,12 @@ function heardLine(event: VoiceEvent): string {
       return "Nothing was said in that turn.";
     case "failed":
       return event.reason;
+    case "speaking":
+      return "Reading the answer out loud.";
+    case "spoke":
+      return "Finished reading the answer out loud.";
+    case "interrupted":
+      return "Stopped reading the answer out loud, because you started speaking.";
   }
 }
 

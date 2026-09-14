@@ -177,6 +177,34 @@ impl Chunker {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The two halves of what the echo canceller calls the stream delay
+// ---------------------------------------------------------------------------------------------
+
+/// What [`read_delay`] reads as "the backend has not said yet".
+///
+/// A sentinel rather than an `Option` behind a lock: both halves of the delay are written from
+/// an audio callback, where a lock may not be taken, and read from somewhere else entirely.
+pub(crate) const UNKNOWN_DELAY: u64 = u64::MAX;
+
+/// Record a delay an audio callback just measured.
+///
+/// Saturating at one below [`UNKNOWN_DELAY`], so that a backend reporting an absurd figure is a
+/// very long delay rather than "not known" — the two have to stay tellable apart, and
+/// `u64::MAX` nanoseconds is 584 years.
+pub(crate) fn store_delay(slot: &std::sync::atomic::AtomicU64, delay: Duration) {
+    let nanos = delay.as_nanos().min(u128::from(UNKNOWN_DELAY - 1)) as u64;
+    slot.store(nanos, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What a callback last recorded, or `None` while nothing has.
+pub(crate) fn read_delay(slot: &std::sync::atomic::AtomicU64) -> Option<Duration> {
+    match slot.load(std::sync::atomic::Ordering::Relaxed) {
+        UNKNOWN_DELAY => None,
+        nanos => Some(Duration::from_nanos(nanos)),
+    }
+}
+
 /// Average the channels of one interleaved buffer, appending the mono result to `out`.
 ///
 /// An average rather than the first channel: a headset wired out of phase, or a device whose
@@ -635,6 +663,9 @@ pub struct Capture {
     source: cpal::SupportedStreamConfig,
     device: String,
     follows_default: bool,
+    /// `callback - capture` as the backend last reported it, in nanoseconds, or
+    /// [`UNKNOWN_DELAY`].
+    delay: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Capture {
@@ -685,6 +716,9 @@ impl Capture {
         let conversion = Conversion::new(source.sample_rate(), source.channels())?;
         let chunker = Chunker::new(frames);
         let (sender, receiver) = mpsc::unbounded_channel();
+        // Written by the callback, read by whoever is configuring the echo canceller. See
+        // [`Capture::stream_delay`].
+        let delay = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(UNKNOWN_DELAY));
 
         let problems = sender.clone();
         let on_error = move |error: cpal::Error| {
@@ -698,49 +732,49 @@ impl Capture {
         let stream = match source.sample_format() {
             cpal::SampleFormat::I8 => device.build_input_stream::<i8, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::I32 => device.build_input_stream::<i32, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::U8 => device.build_input_stream::<u8, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::U16 => device.build_input_stream::<u16, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::U32 => device.build_input_stream::<u32, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::F32 => device.build_input_stream::<f32, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
             cpal::SampleFormat::F64 => device.build_input_stream::<f64, _, _>(
                 config,
-                widen(conversion, chunker, sender),
+                widen(conversion, chunker, sender, delay.clone()),
                 on_error,
                 Some(OPEN_TIMEOUT),
             ),
@@ -759,12 +793,25 @@ impl Capture {
         // Streams come back stopped, input ones included.
         stream.play().map_err(|error| classify(&error))?;
 
-        Ok((Capture { stream, source, device: name, follows_default }, receiver))
+        Ok((Capture { stream, source, device: name, follows_default, delay }, receiver))
     }
 
     /// The format the device is actually recording at, before this crate converts it.
     pub fn source(&self) -> &cpal::SupportedStreamConfig {
         &self.source
+    }
+
+    /// How long ago the samples in the last callback were taken off the ADC: `callback -
+    /// capture`, as `cpal` reported it.
+    ///
+    /// **One of the two halves of what the echo canceller calls the stream delay**, the other
+    /// being [`crate::playback::Playback::stream_delay`]. Half of it is not a usable figure:
+    /// `crate::apm::Apm::set_stream_delay` wants the round trip, and a canceller given the wrong
+    /// delay cancels less while going on reporting that it is working.
+    ///
+    /// `None` until the first callback has run, and on any backend that reports no timestamp.
+    pub fn stream_delay(&self) -> Option<Duration> {
+        read_delay(&self.delay)
     }
 
     /// What the open device is called, for the window.
@@ -780,6 +827,14 @@ impl Capture {
     /// the two the same would either rebuild for nothing or go deaf without noticing.
     pub fn follows_default(&self) -> bool {
         self.follows_default
+    }
+
+    /// The slot the callback leaves `callback - capture` in, for [`Self::stream_delay`].
+    ///
+    /// `pub(crate)` and an `Arc` rather than a value: the only caller is the thread that owns
+    /// this stream handing the number to somebody who cannot own the stream itself.
+    pub(crate) fn delay_slot(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.delay.clone()
     }
 
     /// Stop delivering audio without dropping the handle.
@@ -814,12 +869,25 @@ pub struct Callback {
     /// The device's samples as `f32`, before conversion. Kept across calls so the steady state
     /// allocates nothing for it.
     wide: Vec<f32>,
+    /// Where `callback - capture` is left for [`Capture::stream_delay`], or `None` on a
+    /// [`Callback`] nobody asked to measure — which is every one a test builds.
+    delay: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Callback {
     /// The conversion from the device's format, and the chunk length the caller asked for.
     pub fn new(conversion: Conversion, chunker: Chunker) -> Callback {
-        Callback { conversion, chunker, wide: Vec::new() }
+        Callback { conversion, chunker, wide: Vec::new(), delay: None }
+    }
+
+    /// Also record `callback - capture` from each timestamp, for the echo canceller.
+    ///
+    /// Separate from [`Callback::new`] so that the delay is something a caller opts into: the
+    /// conversion and the chunking are what this type is for, and every test of them would
+    /// otherwise have to name a slot it does not care about.
+    pub fn measuring(mut self, delay: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Callback {
+        self.delay = Some(delay);
+        self
     }
 
     /// One buffer from the device, as [`Captured::Audio`] chunks on `sender`.
@@ -828,6 +896,26 @@ impl Callback {
         T: cpal::SizedSample,
         f32: FromSample<T>,
     {
+        self.deliver_at(data, None, sender)
+    }
+
+    /// The same, with the backend's timestamp for this callback.
+    ///
+    /// **Saturating rather than checked**: a backend whose capture instant is after the callback
+    /// is saying "no delay I can measure", not "negative delay". The same reading
+    /// [`crate::playback::Fill`] takes of the other direction.
+    pub fn deliver_at<T>(
+        &mut self,
+        data: &[T],
+        at: Option<cpal::InputStreamTimestamp>,
+        sender: &mpsc::UnboundedSender<Captured>,
+    ) where
+        T: cpal::SizedSample,
+        f32: FromSample<T>,
+    {
+        if let (Some(at), Some(slot)) = (at, &self.delay) {
+            store_delay(slot, at.callback.saturating_duration_since(at.capture));
+        }
         self.wide.clear();
         self.wide.extend(data.iter().map(|sample| sane(sample.to_sample::<f32>())));
         for chunk in self.chunker.push(self.conversion.feed(&self.wide)) {
@@ -871,13 +959,16 @@ fn widen<T>(
     conversion: Conversion,
     chunker: Chunker,
     sender: mpsc::UnboundedSender<Captured>,
+    delay: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> impl FnMut(&[T], &cpal::InputCallbackInfo)
 where
     T: cpal::SizedSample,
     f32: FromSample<T>,
 {
-    let mut callback = Callback::new(conversion, chunker);
-    move |data: &[T], _: &cpal::InputCallbackInfo| callback.deliver(data, &sender)
+    let mut callback = Callback::new(conversion, chunker).measuring(delay);
+    move |data: &[T], info: &cpal::InputCallbackInfo| {
+        callback.deliver_at(data, Some(info.timestamp()), &sender)
+    }
 }
 
 #[cfg(test)]
@@ -1421,5 +1512,86 @@ mod tests {
             audio > 150,
             "two seconds at 16 kHz is about 200 chunks of {APM_FRAME}, got {audio}"
         );
+    }
+}
+
+#[cfg(test)]
+mod the_other_half_of_the_stream_delay {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+
+    /// **The input side of what the echo canceller calls the stream delay.**
+    ///
+    /// `crate::apm::Apm::set_stream_delay` wants the round trip: this plus `playback - callback`
+    /// on the output stream. Half of it is a confident wrong number, which is worse than none —
+    /// a canceller given the wrong delay cancels less and goes on reporting that it is working.
+    ///
+    /// `InputCallbackInfo` *can* be constructed, exactly as `OutputCallbackInfo` can; this file
+    /// used to say otherwise and `playback.rs` corrects it.
+    #[test]
+    fn the_delay_the_microphone_reports_survives_the_callback() {
+        let delay = Arc::new(AtomicU64::new(UNKNOWN_DELAY));
+        let (sender, mut heard) = mpsc::unbounded_channel();
+        let mut callback = Callback::new(
+            Conversion::new(SAMPLE_RATE, 1).expect("16 kHz mono is ordinary"),
+            Chunker::new(APM_FRAME),
+        )
+        .measuring(delay.clone());
+
+        let at = cpal::StreamInstant::ZERO + Duration::from_millis(500);
+        callback.deliver_at(
+            &vec![0.25f32; APM_FRAME],
+            Some(cpal::InputStreamTimestamp { callback: at, capture: at - Duration::from_millis(9) }),
+            &sender,
+        );
+
+        assert_eq!(read_delay(&delay), Some(Duration::from_millis(9)));
+        assert!(matches!(heard.try_recv(), Ok(Captured::Audio(_))), "and the audio still arrived");
+    }
+
+    /// A backend whose capture instant is *after* the callback is saying "no delay I can
+    /// measure", not "negative delay" — and an underflow here would be a panic in an audio
+    /// callback. The same reading `playback::Fill` takes of the other direction.
+    #[test]
+    fn a_backwards_timestamp_is_no_delay_rather_than_a_panic() {
+        let delay = Arc::new(AtomicU64::new(UNKNOWN_DELAY));
+        let (sender, _heard) = mpsc::unbounded_channel();
+        let mut callback = Callback::new(
+            Conversion::new(SAMPLE_RATE, 1).expect("16 kHz mono is ordinary"),
+            Chunker::new(APM_FRAME),
+        )
+        .measuring(delay.clone());
+
+        let at = cpal::StreamInstant::ZERO + Duration::from_millis(500);
+        callback.deliver_at(
+            &vec![0.0f32; APM_FRAME],
+            Some(cpal::InputStreamTimestamp { callback: at, capture: at + Duration::from_millis(3) }),
+            &sender,
+        );
+
+        assert_eq!(read_delay(&delay), Some(Duration::ZERO));
+    }
+
+    /// Until a callback has run, the delay is **unknown** rather than zero.
+    ///
+    /// The discriminator for the whole arrangement: `run::declare_stream_delay` waits for both
+    /// halves to be `Some` before it tells the canceller anything, and a confident zero here
+    /// would have it declaring half a delay the moment a microphone opened.
+    #[test]
+    fn a_microphone_that_has_not_run_yet_reports_no_delay_rather_than_none_of_one() {
+        let delay = Arc::new(AtomicU64::new(UNKNOWN_DELAY));
+        let (sender, _heard) = mpsc::unbounded_channel();
+        let mut callback = Callback::new(
+            Conversion::new(SAMPLE_RATE, 1).expect("16 kHz mono is ordinary"),
+            Chunker::new(APM_FRAME),
+        )
+        .measuring(delay.clone());
+
+        assert_eq!(read_delay(&delay), None);
+        // And a callback the backend gave no timestamp for leaves it alone rather than
+        // recording a zero.
+        callback.deliver(&vec![0.0f32; APM_FRAME], &sender);
+        assert_eq!(read_delay(&delay), None);
     }
 }

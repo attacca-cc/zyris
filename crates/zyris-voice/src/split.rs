@@ -149,6 +149,18 @@ impl Fragment {
     pub fn text(&self) -> &str {
         &self.0
     }
+
+    /// One, without a splitter.
+    ///
+    /// **Test-only, and that is enforced rather than asked for.** `Fragment` has no public
+    /// constructor for the reason [`crate::speak::Aloud`] has none: a text that has not been
+    /// through the filter must not be able to reach the voice, because there is then no way to
+    /// read a `Reasoning` delta aloud by mistake. This is `#[cfg(test)]`, so the rule holds for
+    /// everything that is not a test in this crate and for every crate outside it.
+    #[cfg(test)]
+    pub(crate) fn spoken(text: &str) -> Fragment {
+        Fragment(text.to_string())
+    }
 }
 
 /// Deltas in, fragments out. **One per turn**: it remembers whether anything has been spoken
