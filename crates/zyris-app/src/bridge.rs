@@ -30,6 +30,7 @@ use zyris_tools::{
 };
 
 use crate::confirm::{Pending, Question};
+use crate::hotkey::Hotkey;
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
@@ -157,6 +158,163 @@ pub fn after_falling_behind(bus: &EventBus, gate: &Gate, pending: &Pending) -> V
     }
     messages.push(Resend::AskAgain);
     messages
+}
+
+/// What the voice session said. Its own channel, carrying `zyris_voice::VoiceEvent`'s tagged JSON.
+///
+/// **Not a [`CoreEvent`]**, for the reason [`RESYNC_EVENT_NAME`] is not one: every variant of that
+/// union is something the node did about its connection to Attacca, and this is a microphone. A
+/// build with no audio stack has to be able to name the type either way, which is why
+/// `VoiceEvent` lives in `zyris-voice`'s `lib.rs` and not behind its feature.
+pub const VOICE_EVENT_NAME: &str = "voice-event";
+
+/// Republish what the voice session says onto the webview, for as long as the app lives.
+///
+/// **No catch-up half, deliberately, and the Voice screen is written to that.** A turn is four
+/// events over a second or two and none of them is state: "what was heard three turns ago" is
+/// not something a window that has just opened needs, and there is nothing on this side holding
+/// it to hand back. What *is* state — whether a microphone is open, and why not — is read through
+/// [`voice_state`], which the screen calls on the way in.
+///
+/// A lag is therefore not resynced either: losing a `Thinking` costs a label that catches up at
+/// the next event, and there is no stored value that would make it right in the meantime.
+pub fn forward_voice(
+    app: AppHandle,
+    mut events: tokio::sync::broadcast::Receiver<zyris_voice::VoiceEvent>,
+    runtime: &tokio::runtime::Handle,
+) {
+    runtime.spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Err(error) = app.emit(VOICE_EVENT_NAME, &event) {
+                        tracing::warn!(%error, "could not forward a voice event to the window");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "the window fell behind on voice events");
+                }
+                // A build with no audio stack hands out a stream that has already ended, which
+                // is the whole point of it being closed rather than idle: this task leaves
+                // rather than waiting forever for speech that can never arrive.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+/// Everything the Voice screen draws, read off this machine in one go.
+///
+/// **One structure rather than two commands**, for the reason [`AutostartView`] gives: the two
+/// halves have to agree. "Nothing is listening" and a hotkey answer fetched a round trip later
+/// describe two different moments, and this is the screen where a person reads one against the
+/// other to work out what to do next.
+///
+/// The hotkey half is `zyris-app`'s because a global shortcut is a desktop-session concern; the
+/// rest is `zyris-voice`'s. Neither knows about the other, and this is the only place they meet.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceScreen {
+    /// The microphone, the model on disk and the wake word.
+    pub voice: zyris_voice::view::VoiceView,
+    /// Whether a push-to-talk key can work on this desktop, and what the person has to do.
+    /// Three answers — see [`crate::hotkey::HotkeySupport`] — and the window must not flatten
+    /// them: on a Wayland desktop with a GlobalShortcuts portal the key has to be bound by hand,
+    /// and on one without a portal there is nothing to bind.
+    pub hotkey: crate::hotkey::HotkeySupport,
+}
+
+fn voice_screen(view: zyris_voice::view::VoiceView, hotkey: &Arc<dyn Hotkey>) -> VoiceScreen {
+    VoiceScreen { voice: view, hotkey: hotkey.describe() }
+}
+
+/// What this machine can hear with, right now.
+///
+/// Read off the disk and the sound system on every call rather than remembered: a microphone can
+/// be unplugged and the speech model deleted while this window is open, and both are things the
+/// screen would otherwise be confidently wrong about.
+#[tauri::command]
+pub async fn voice_state(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.look().await, &hotkey))
+}
+
+/// Turn listening on or off, and answer with what that left the machine as.
+///
+/// **What happened, not what was asked for** — the same rule [`set_mcp_server_enabled`] follows,
+/// and the case that proves it is turning it on with no speech model downloaded: the answer comes
+/// back with `listening` as `failed` and the reason in it, rather than the `on` that was clicked.
+///
+/// The answer is also *stored*, whichever way it went. A person who said "listen" has said it for
+/// the next launch too; see `zyris_voice`'s `run` module for why that is the shape of this
+/// decision and why nothing listens before it is made.
+#[tauri::command]
+pub async fn set_voice_listening(
+    listening: bool,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.set_listening(listening).await, &hotkey))
+}
+
+/// Choose which microphone to open, now and at the next launch.
+#[tauri::command]
+pub async fn set_voice_device(
+    device: zyris_voice::view::Choice,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose(device).await, &hotkey))
+}
+
+/// Download the speech model.
+///
+/// `Err` is a download that did not produce the model — no network, a proxy's error page, a disk
+/// with no room — carrying the sentence `zyris_voice::stt::Fault` gives. It can take minutes, so
+/// the screen says what it is doing rather than showing a button that appears to do nothing.
+#[tauri::command]
+pub async fn fetch_speech_model(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.fetch_model().await?, &hotkey))
+}
+
+/// Delete the downloaded speech model.
+///
+/// Turns listening off on the way, because the running session holds the model open. It refuses
+/// to delete a file `ZYRIS_WHISPER_MODEL` names — that one is an operator's own, and the window
+/// does not offer the button for it.
+#[tauri::command]
+pub async fn forget_speech_model(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.forget_model().await?, &hotkey))
+}
+
+/// Record one take of the wake word, from the chosen microphone.
+///
+/// **Nothing matches what this records**, and the window says so: `zyris_voice::wake`'s
+/// `NOTHING_READS_THESE` is carried in the answer rather than written again here, because that
+/// constant has a test on each of its claims and a second copy of the sentence would have none.
+#[tauri::command]
+pub async fn record_wake_take(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.record_wake_take().await?, &hotkey))
+}
+
+/// Forget every take of the wake word.
+#[tauri::command]
+pub async fn clear_wake_word(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.clear_wake_word().await?, &hotkey))
 }
 
 /// What the core last published, for a window whose listener came up too late to see it live.

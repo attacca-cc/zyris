@@ -15,6 +15,11 @@
 //! is enough for one that quits on end-of-file and not for one that ignores it, and such a server
 //! is then left running and reparented until somebody finds it in a task manager. So
 //! [`Servers::stop_all`] is called explicitly, from the two places this process leaves from.
+//!
+//! The push-to-talk key is the second thing of that kind and the cost is plainer still: on
+//! Wayland the registration belongs to `xdg-desktop-portal` rather than to this process and stays
+//! listed after it dies. [`close_hotkey`] goes on the same two lines, and the test at the bottom
+//! of this file is what stops one of them being forgotten.
 
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
@@ -33,9 +38,23 @@ fn stop_mcp_servers(servers: &Servers, runtime: &tokio::runtime::Handle) {
     runtime.block_on(servers.stop_all());
 }
 
+/// Give the push-to-talk key back, from the same two exits, before the process goes away.
+///
+/// The twin of [`stop_mcp_servers`], and it is here for a sharper reason than tidiness: a
+/// GlobalShortcuts portal registration is held by `xdg-desktop-portal`, not by this process.
+/// Killing Zyris leaves it listed by `hyprctl globalshortcuts` — measured — so there is something
+/// to hand back that outlives us, which is not true of an X11 grab or a Windows `RegisterHotKey`.
+///
+/// Blocking, like its twin, and for the same reason: both callers are on the main thread with the
+/// event loop already finished or never started.
+fn close_hotkey(hotkey: &std::sync::Arc<dyn Hotkey>, runtime: &tokio::runtime::Handle) {
+    runtime.block_on(hotkey.close());
+}
+
 use crate::cli::Mode;
 use crate::confirm::Pending;
-use crate::{bridge, tray};
+use crate::hotkey::Hotkey;
+use crate::{bridge, hotkey, tray};
 
 pub fn run(
     bus: EventBus,
@@ -57,6 +76,11 @@ pub fn run(
     // same supervisor the core is already watching for deaths with, so the window and the node
     // cannot disagree about which servers are announced.
     servers: Servers,
+    // Speech. Built by `main` so that the instance's data directory names the file the answer to
+    // "should this listen?" is kept in. It has opened nothing yet: `resume` below is what acts
+    // on that stored answer, and it is called here and not in `headless.rs` because a run with
+    // no window has no push-to-talk key for anybody to hold.
+    voice: std::sync::Arc<zyris_voice::Voice>,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -70,8 +94,49 @@ pub fn run(
 ) -> anyhow::Result<()> {
     tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
 
+    // **Built here, on the main thread, before Tauri takes it over.** On Windows
+    // `RegisterHotKey` posts `WM_HOTKEY` to a message-only window and only the thread that owns
+    // that window ever dispatches to it; this is that thread, and `app.run` below is what will
+    // pump it. Built before the builder rather than inside `setup` so that both of this
+    // process's exits can hold a handle taken here — `state::<T>()` for something that was never
+    // managed panics, and the last thing this program does is not the place to find that out.
+    // Same shape as `exit_servers` just below, and it has the same consequence: a launch that
+    // turns out to be the second one has already registered, so that branch has to give it back
+    // too.
+    //
+    // Never fails. A desktop with no way to register a global key gets a `Hotkey` that says so,
+    // for the reason `zyris-tools`'s `announce.rs` gives about a machine with no display server:
+    // a control that cannot work is worse than an absent one.
+    let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read()));
+    tracing::info!(support = ?hotkey.describe(), "push-to-talk");
+
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
+    let exit_hotkey = hotkey.clone();
+    let setup_hotkey = hotkey.clone();
+
+    // **The one thing that consumes the key**, and the whole of the wiring between the desktop
+    // session and the audio stack. `hotkey::HotkeyEvent` and `zyris_voice::Push` are two types
+    // on purpose — a global shortcut is a desktop concern and `--headless` has none — and this
+    // is the one line that maps between them. `Push` is declared in `zyris-voice`'s `lib.rs`
+    // rather than in its feature-gated session module precisely so that this line needs no
+    // `#[cfg]`.
+    //
+    // Started whether or not anything is listening. A key pressed with the switch off is
+    // discarded inside `Voice::push`; the alternative is a subscription that has to be taken and
+    // dropped as the switch moves, which is a race with nothing to gain.
+    let key_voice = voice.clone();
+    let mut keys = hotkey.events();
+    runtime.spawn(async move {
+        while let Ok(event) = keys.recv().await {
+            key_voice.push(match event {
+                hotkey::HotkeyEvent::Pressed => zyris_voice::Push::Pressed,
+                hotkey::HotkeyEvent::Released => zyris_voice::Push::Released,
+            });
+        }
+    });
+
+    let setup_voice = voice.clone();
     // For the other exit, the ordinary one. A handle taken here rather than looked up out of
     // Tauri's state inside the closure: a `state::<T>()` that was never managed panics, and the
     // last thing this program does is not the place to find that out.
@@ -149,6 +214,15 @@ pub fn run(
         // reason the gate is: a window that read a second copy would show servers this node is
         // not announcing, and its switch would move something nothing else could see.
         .manage(servers)
+        // The push-to-talk key, as a handle on the one this process registered. What the window
+        // needs from it is `describe()`: whether a key can work on this desktop at all, and — on
+        // Wayland, where no application is allowed to choose the key — the exact line the person
+        // has to add to their compositor configuration. The Voice screen reads it.
+        .manage(hotkey)
+        // Speech, as a handle on the one this process built. The Voice screen reads everything
+        // through it — the device list, the model on disk, whether a microphone is open — and
+        // moves the one switch that opens one.
+        .manage(voice)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -164,6 +238,13 @@ pub fn run(
             bridge::peer_fingerprint,
             bridge::mcp_servers,
             bridge::set_mcp_server_enabled,
+            bridge::voice_state,
+            bridge::set_voice_listening,
+            bridge::set_voice_device,
+            bridge::fetch_speech_model,
+            bridge::forget_speech_model,
+            bridge::record_wake_take,
+            bridge::clear_wake_word,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:
@@ -191,6 +272,11 @@ pub fn run(
                     // to be complete. Leaving here without stopping them is a second copy of every
                     // configured server left running, from a process that did nothing else.
                     stop_mcp_servers(&app.state::<Servers>(), &setup_runtime);
+                    // And it has already registered the push-to-talk key, for the same reason:
+                    // that happens above, before the builder. On Wayland the registration is the
+                    // portal's rather than this process's and outlives it, so a launch that did
+                    // nothing else still has one to hand back.
+                    close_hotkey(&setup_hotkey, &setup_runtime);
                     std::process::exit(0);
                 }
                 Err(error) => {
@@ -260,6 +346,25 @@ pub fn run(
                 &setup_runtime,
             );
 
+            // What the voice session says, on its own channel to the window. Not a `CoreEvent`:
+            // every variant of that union is something the node did about its connection to
+            // Attacca, and this is a microphone. Subscribed here, beside the bridge above and
+            // before `resume` below, for the same reason — `broadcast` never replays a send to
+            // a subscriber that shows up late, and a turn that happened before the window was
+            // listening is a turn nobody would ever be told about.
+            bridge::forward_voice(app.handle().clone(), setup_voice.events(), &setup_runtime);
+
+            // **Acting on an answer a person already gave.** Nothing is opened here unless the
+            // stored settings say it was asked for on some earlier run; on a machine nobody has
+            // turned this on, `resume` reads the file, finds `listen: false`, and returns.
+            //
+            // Spawned rather than blocked on: loading the speech model takes long enough to
+            // notice, and `setup` is what stands between this process and a window on the
+            // screen. The Voice screen reads the answer through `voice_state` whenever it is
+            // opened, so nothing is lost by it finishing late.
+            let resume_voice = setup_voice.clone();
+            setup_runtime.spawn(async move { resume_voice.resume().await });
+
             // Registered in **both** modes, unlike the enrolment watcher above, and for a reason
             // that is not about `--minimized`: closing the window hides it rather than quitting
             // (see `on_window_event` below), so a run that started with a window on the screen
@@ -307,6 +412,10 @@ pub fn run(
             // Before `shutdown`, which only publishes. These are processes, and this is the last
             // moment anything in this program can reach them.
             stop_mcp_servers(&exit_servers, &exit_runtime);
+            // And the key. Nothing in this program is dropped on the way out — `app.run` ends
+            // with `std::process::exit` — so a registration held by somebody else's daemon has
+            // to be handed back on this line or not at all.
+            close_hotkey(&exit_hotkey, &exit_runtime);
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
         }
@@ -434,4 +543,97 @@ fn raise_the_window_for_a_peer_question(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::hotkey::{HotkeyEvent, HotkeySupport};
+
+    /// A hotkey that only records whether anything asked for it back.
+    struct CountingHotkey {
+        closed: Arc<AtomicUsize>,
+        events: tokio::sync::broadcast::Sender<HotkeyEvent>,
+    }
+
+    impl Hotkey for CountingHotkey {
+        fn describe(&self) -> HotkeySupport {
+            HotkeySupport::Working { trigger: "Ctrl+Alt+Space".into() }
+        }
+
+        fn events(&self) -> tokio::sync::broadcast::Receiver<HotkeyEvent> {
+            self.events.subscribe()
+        }
+
+        fn close(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let closed = self.closed.clone();
+            Box::pin(async move {
+                closed.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    /// The helper has to *await* the close, not fire it and return: on the portal it is a D-Bus
+    /// round trip, and the caller's next statement on both exits is the process ending.
+    #[test]
+    fn closing_the_hotkey_waits_for_it() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let closed = Arc::new(AtomicUsize::new(0));
+        let hotkey: Arc<dyn Hotkey> = Arc::new(CountingHotkey {
+            closed: closed.clone(),
+            events: tokio::sync::broadcast::channel(4).0,
+        });
+
+        close_hotkey(&hotkey, runtime.handle());
+
+        assert_eq!(closed.load(Ordering::SeqCst), 1, "the close ran, and this line waited for it");
+    }
+
+    /// **This process leaves from two places and both of them have to give everything back.**
+    ///
+    /// There is no way to reach either from a test: one is inside Tauri's `setup` and ends in
+    /// `std::process::exit`, the other is the event loop's final callback, and `app.run` never
+    /// returns on any platform. So this reads the source, which is the same thing `announce.rs`
+    /// does to the README and for the same reason — the alternative is nothing at all noticing.
+    ///
+    /// It is deliberately not a count of call sites. A third exit added later that hands nothing
+    /// back is exactly the mistake worth catching, and a count would pass for it.
+    #[test]
+    fn both_ways_out_of_this_process_hand_everything_back() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/gui.rs"),
+        )
+        .expect("gui.rs is readable from its own crate");
+
+        // Each exit is read between the line that starts it and the line that ends it, so the
+        // window really is that arm and not a neighbourhood that happens to be big enough.
+        for (exit, start, end) in [
+            (
+                "the instance lock turned out to be taken",
+                "another Zyris is already running",
+                "std::process::exit(0);",
+            ),
+            ("the event loop's final event", "RunEvent::Exit =>", "lifecycle::shutdown("),
+        ] {
+            let at = source.find(start).unwrap_or_else(|| {
+                panic!("`{start}` is no longer in gui.rs, so this test can no longer see {exit}")
+            });
+            let length = source[at..].find(end).unwrap_or_else(|| {
+                panic!("`{exit}` no longer ends with `{end}`; this test has to be rewritten")
+            });
+            let arm = &source[at..at + length];
+            for owed in ["stop_mcp_servers(", "close_hotkey("] {
+                assert!(
+                    arm.contains(owed),
+                    "{exit} leaves without `{owed}`. Anything this process took from outside \
+                     itself — a child process, a registration held by a desktop daemon — has to \
+                     be handed back on every path out, because Tauri exits with \
+                     `std::process::exit` and drops nothing."
+                );
+            }
+        }
+    }
 }

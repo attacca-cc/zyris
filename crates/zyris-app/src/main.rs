@@ -12,6 +12,7 @@ mod cli;
 mod confirm;
 mod gui;
 mod headless;
+mod hotkey;
 mod tray;
 
 use clap::Parser;
@@ -128,6 +129,25 @@ fn main() -> anyhow::Result<()> {
     // Read once and shared: it is where a caller's relative paths start for `file_io` and
     // `terminal`, and the one directory `file_transfer` will read a file out of.
     let root = zyris_tools::default_root();
+
+    // What this build and this machine can do about speech.
+    //
+    // **This is the same line in both feature states**, which is the whole point of it. The
+    // audio stack is off by default — a cold build of it is two minutes against a warm 1.4
+    // seconds — so almost every run of this program is the build that cannot listen, and a
+    // build that cannot listen has to say so rather than being silently indistinguishable from
+    // one that can. `zyris_voice::start` answers on every platform and never fails, exactly as
+    // `hotkey::start` does. Nothing in this crate asks whether the audio stack was compiled in;
+    // `tests/the_app_never_asks_whether_voice_is_compiled_in.rs` fails if anything ever starts.
+    //
+    // **It opens nothing.** Whether a microphone is opened is a person's answer, kept in
+    // `data` beside everything else this instance owns, and acted on by `Voice::resume` — which
+    // only the windowed branch calls, because `--headless` has no push-to-talk key for anybody
+    // to hold. `data` rather than a shared directory for the reason the MCP server list is
+    // scoped that way: a development run choosing to listen must not turn the production node's
+    // microphone on.
+    let voice = std::sync::Arc::new(zyris_voice::start(Some(&data)));
+    tracing::info!(support = ?voice.describe(), "speech");
 
     // The slot a question about an unapproved peer waits in, built here because both ends of it
     // are built here: `peer_confirmer` below fills it from a tokio worker, and `gui::run` hands
@@ -299,6 +319,9 @@ fn main() -> anyhow::Result<()> {
             // the same supervisor the watcher above is running, not a second one: two would be
             // two opinions about which server died.
             servers,
+            // Speech. The window is the only place the switch that opens a microphone lives,
+            // and the only place the key that starts a turn can be pressed.
+            voice,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether

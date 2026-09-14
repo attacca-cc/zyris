@@ -16,6 +16,19 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # **The release path's half of the `GGML_NATIVE` rule**, and the only half a workflow can
+  # carry. whisper.cpp's CMake defaults it ON, which compiles `-march=native` in and produces a
+  # binary that dies with SIGILL — before `main`, with no message — on any CPU older than the
+  # runner that built it. **No test can catch it**: the machine running the tests is the one CPU
+  # where it works. `crates/zyris-voice/build.rs` refuses a release build without this, which is
+  # what makes the rule survive somebody editing this file; the line is here so that the day
+  # `pnpm tauri build` is given `--features voice` it is already right rather than failing.
+  #
+  # These bundles carry no features today, so it currently reaches nothing. Quoted because YAML
+  # 1.1 reads a bare `OFF` as the boolean false — which CMake happens to accept, which is
+  # exactly why an unquoted one would never be noticed. AVX2 is still required either way, and
+  # the README says so.
+  GGML_NATIVE: "OFF"
 
 permissions:
   contents: read
@@ -65,7 +78,10 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} matches \"version\": \"${configured}\" in ${config}"
 
-      # The same list `ci.yml` installs, which was arrived at by building rather than guessing.
+      # The same list `ci.yml` installs, which was arrived at by building rather than guessing,
+      # minus `libasound2-dev` and `libclang-dev`: those two are the voice build's, and these
+      # bundles are built with no features. They move here the day `pnpm tauri build` is given
+      # `--features voice`.
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |

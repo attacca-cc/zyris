@@ -210,14 +210,95 @@ and a build or a fetch that was working would be the thing it cut off. This is n
 `terminal`'s `exec` with no `timeout_ms` has the same property, and so does any call an agent
 abandons.
 
-### Checking it against a real agent — this has not been run
+## Voice
 
-Everything above has tests behind it, up to and including a real MCP server started from a real
-`mcp-servers.json`, announced on a live node, and called by a peer on the other end of a real
-connection. **What no test on this side can reach is Attacca.** Whether an agent that was never
-told an MCP server exists picks a promoted tool out of the list and calls it like any other is the
-one claim on this page that only a person can check, and **nobody has checked it.** What follows
-is the procedure, written down rather than performed.
+Speech runs on this machine. Whisper transcribes, and the model is fetched on first run rather
+than shipped in the installer.
+
+**Nothing listens until you turn it on.** The switch is on the Voice tab. Opening a microphone
+and downloading 141 MB are not things to do to somebody who has not asked for either, and a
+feature that never starts on its own is not better — so it is asked once and then remembered:
+the answer is kept with the rest of this instance's settings and Zyris starts listening again the
+next time it runs. A run started with `--headless` never listens, because it has no window and no
+push-to-talk key for anybody to hold.
+
+- **Hold the hotkey and talk.** Everything you say is a command. No wake word, no false triggers.
+- **While the switch is on** the microphone is open and nothing is recorded: a turn starts when
+  the key goes down and ends when it comes up, and the recording is gone once it has been turned
+  into text.
+
+The text does not go anywhere yet. It arrives in the window, and handing it to an agent is step 8
+below, along with speaking the answer back.
+
+### The push-to-talk key
+
+`Ctrl+Alt+Space`, on Windows and on an X11 session, where an application is allowed to ask for a
+key.
+
+**A Wayland session is different and Zyris cannot bind the key for you.** It registers a global
+shortcut called `push_to_talk` through the GlobalShortcuts portal, and which key points at it is
+your compositor's business — version 1 of that interface gives an application no way to choose
+one or even to offer you the choice. On Hyprland the line is
+
+```
+bind = CTRL ALT, space, global, :push_to_talk
+```
+
+and the Voice tab shows it, for the desktops whose spelling has actually been checked. On any
+other it names the shortcut and leaves the line to you rather than guessing: a wrong line pasted
+into a configuration file costs an evening. Zyris also cannot tell whether you have bound one —
+your compositor does not say.
+
+**Some desktops cannot do this at all.** XFCE, MATE, Cinnamon and LXQt fall back to
+`xdg-desktop-portal-gtk`, which implements no GlobalShortcuts interface, so no application can
+register a global key there. The Voice tab says so instead of offering a switch that could never
+work.
+
+**Not yet confirmed on Wayland: whether letting go of the key gets through.** The portal has a
+signal for the release, Zyris listens for it, and it has not been possible to check here —
+dispatching the shortcut by hand sends a press and never a release, so it takes a person holding
+a real key. If a turn does not end when you let go, Zyris ends it after 30 seconds and throws the
+recording away rather than sending half a sentence on. The check is written out under
+[What nobody has checked by hand](#a-microphone-a-key-and-windows), with the rest of what is
+owed.
+
+### The wake word
+
+You can record one on the Voice tab: five takes, kept as 16 kHz WAV files in this computer's data
+directory alongside a manifest that says what was recorded and how. **Nothing listens for one
+yet.** Matching is a separate piece of work; the recordings exist so that it can be added later
+without asking you to record them again, and recording one today does not make Zyris respond to
+it.
+
+### The model
+
+**The speech model is 141 MB and is downloaded once**, into this computer's cache directory
+(`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\attacca\zyris\cache\models` on Windows)
+rather than into the installer. It is checked against a published SHA-256 before it is put in
+place, so an interrupted or intercepted download leaves nothing behind and the next run simply
+offers to fetch it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it
+and no download happens at all — Zyris then takes that file as given, and will neither replace it
+nor delete it.
+
+**Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
+transcription engine is compiled without `-march=native` so that the release runs on every such
+machine rather than only on the one that built it; on anything older it will not start. Nothing
+else in Zyris has that requirement.
+
+## What nobody has checked by hand
+
+Everything on this page has tests behind it, and two kinds of claim are outside what any test on
+this machine can reach: **an agent on Attacca**, and **a person at a real keyboard and a real
+microphone, on a desktop that is not this one**. What follows is both lists, written down rather
+than performed. **None of it has been run.** They are together so they can be done in one sitting.
+
+### An agent, and a promoted MCP tool
+
+The MCP path is tested up to and including a real server started from a real `mcp-servers.json`,
+announced on a live node, and called by a peer on the other end of a real connection. **What no
+test on this side can reach is Attacca.** Whether an agent that was never told an MCP server
+exists picks a promoted tool out of the list and calls it like any other is a claim only a person
+can check, and **nobody has checked it.**
 
 It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
 today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
@@ -227,10 +308,11 @@ Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, an
 5, 8 and 9 happen entirely on this computer.
 
 Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl` on Linux and
-`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the server list named above. A
-`--server` run keeps its own, in a `zyris-dev-…` directory of its own rather than in `zyris`.
+`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the `mcp-servers.json` described
+under **MCP servers** above. A `--server` run keeps its own, in a `zyris-dev-…` directory of its
+own rather than in `zyris`.
 
-1. **Configure it.** Put one entry in the file named above, then **restart Zyris** — the file is
+1. **Configure it.** Put one entry in `mcp-servers.json`, then **restart Zyris** — the file is
    read at startup and never again.
 2. **Look at the MCP tab.** Pass: the server is listed as running, with the tools it promoted and
    the capability name an agent will address (`mcp_<name>`). The log says the same thing on the
@@ -260,21 +342,58 @@ Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl
    and the path of the file, and `terminal` and `file_io` still work. Fail: Zyris does not start,
    or the tab says you have configured no servers.
 
-## Voice
+### A microphone, a key, and Windows
 
-Speech runs on this machine. Whisper transcribes, Supertonic speaks, and the models are fetched
-on first run rather than shipped in the installer.
+Speech is tested as far as a file can stand in for a microphone: a recording goes in at the
+48 kHz stereo an ordinary device delivers, through the real rate conversion, the real silence
+rule and real whisper, and the sentence comes back out of the same `VoiceEvent` the window
+renders. What no test here has is a microphone, a finger on a key, a Wayland compositor, or a
+Windows machine. Six things are owed, and **the first can still change what the product is.**
 
-- **Hold the hotkey and talk.** Everything you say is a command. No wake word, no false triggers.
-- **Or leave the microphone on** and call it by name. The wake word is one you record yourself,
-  so it is a sound rather than a phrase in a particular language.
-- **When the agent asks you something,** answer without calling it — that window opens on its own
-  and closes when you reply.
-
-Replies are spoken sentence by sentence as they stream in, so the wait is only ever for the first
-one. Code blocks are read as "code" and parenthetical asides are skipped, because an answer read
-aloud is not the same text as an answer on screen. Start talking and it stops to listen; what it
-had not yet said does not go into the transcript.
+1. **Does letting go of the key get through? — Wayland only, and it is the one that matters.**
+   Bind the shortcut as the Voice tab describes, turn listening on, hold the key for about two
+   seconds while saying a sentence, then let go. Three times, unhurried.
+   Pass: each hold ends *when you let go* — the window leaves Listening within a moment and the
+   text arrives.
+   Fail: nothing happens when you let go, and about thirty seconds later the turn is thrown away
+   saying the key was held for more than thirty seconds without coming up. That is the portal
+   never delivering the release.
+   **If it fails, hold-to-talk is impossible on a Wayland session** and the interaction has to
+   change — press to start and press again to stop is a different product, not a bug fix.
+   Nothing else depends on it: an X11 session and Windows both report the release themselves.
+   The Voice tab says today that this is unconfirmed; if it passes, that sentence should go.
+2. **With the window closed.** Close the window to the tray, hold the key, say something, and
+   open the window again. Pass: the transcript is there and the microphone never stopped —
+   speech lives in the core and the window is a reader of it, which is the claim. A run started
+   with `--headless` is the opposite case and is meant to listen to nothing at all: it has no
+   key for anybody to hold.
+3. **Windows: one hold is one turn.** Hold the key for about five seconds and say a sentence in
+   the middle of it. Pass: the window enters Listening once and the whole sentence comes back as
+   one transcript. Fail: several turns, or a transcript that begins in the middle of what you
+   said — which would mean a held key is repeating. Windows is asked not to repeat the hotkey
+   while it is held; that request has been read in the source and never seen work. Tap the key
+   on its own too: a tap should come back as "nobody spoke", not as a turn that never ends.
+4. **Windows: the microphone, including a refused one.** Pass: the Voice tab lists devices with
+   readable names, and the one you pick is the one that records. Then turn microphone access off
+   for desktop applications in Windows' privacy settings and turn listening on. Pass: Zyris says
+   Windows has not given it access and offers the settings page. Fail: any other wording, and
+   especially a bare error number — the sound library does not classify a refusal, so Zyris reads
+   the message text, and the spellings it looks for were read out of the Windows sources rather
+   than produced by a real refusal.
+5. **A wake word take while listening is on.** Turn listening on, then record the five takes on
+   the same tab, and hold the push-to-talk key between them. Pass: every take records and the key
+   goes on producing turns. Fail: a take that will not start, a take that comes back silent, or a
+   key that stops working afterwards — recording a take opens a **second** input stream on the
+   same device without closing the first, and no machine has been asked to do that yet.
+6. **Korean.** Say something in Korean and read the transcript. **Only English has ever been
+   measured**, and one thing about this is already known rather than owed: Zyris *tells* whisper
+   the audio is English instead of asking it to work the language out, because detection measured
+   over three times slower on this machine. That is a bias and a cost rather than a switch —
+   telling it the wrong language was tried here on an English recording and it still produced the
+   English sentence, six times more slowly — so what a Korean sentence comes back as could be
+   anything from usable to nonsense, and nobody knows which. What this check is for is deciding
+   whether the answer is a language setting and what it should cost, and that decision belongs
+   with the step that hands the text to an agent rather than here.
 
 ## Install
 
@@ -366,8 +485,10 @@ lands in what order. Nothing here is ready to install yet.
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
 5. File transfer — peer endpoint, inbox, approving a new machine's key from the window (done)
 6. MCP — local servers promoted to capabilities (done, except for the
-   [check against a real agent](#checking-it-against-a-real-agent--this-has-not-been-run))
-7. Voice in — audio, echo cancellation, wake word, transcription
+   [check against a real agent](#an-agent-and-a-promoted-mcp-tool))
+7. Voice in — audio, wake word recording, transcription (done, except for the
+   [checks that need a person](#a-microphone-a-key-and-windows); echo cancellation is built and
+   cancels nothing until there is something to speak)
 8. Voice out — streaming speech, interruption
 
 ## Security

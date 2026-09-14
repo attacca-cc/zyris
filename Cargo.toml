@@ -12,9 +12,38 @@ repository = "https://github.com/attacca-cc/zyris"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+# The GlobalShortcuts portal, and the only way to register a global key on Wayland. Linux only,
+# and `default-features = false` because the defaults pull in every portal interface this project
+# will never ask for. `tokio` selects zbus's tokio executor, which is the runtime `main` builds.
+ashpd = { version = "0.13.13", default-features = false, features = [
+    "global_shortcuts",
+    "tokio",
+] }
 clap = { version = "4.6.6", features = ["derive"] }
+# Audio in. `pipewire` is on for a reason worth writing down: the default ALSA backend on this
+# machine enumerates **7 input devices for one microphone**, and one of them is `null`, whose
+# description is "generate zero samples (capture)" and which reports `supports_input() == true`
+# with a perfectly ordinary `default_input_config()` — a person who picks it gets silence
+# forever and no error. PipeWire lists 5 with readable names and exposes `default_sink` as
+# `Duplex`, which is the render reference step 8's echo cancellation needs. It costs +1m32s of
+# build and `libpipewire-0.3-dev`, which CI already installs. Windows is unaffected: cpal
+# declares `pipewire` only under a Linux/BSD `[target]`, so the feature is inert there.
+cpal = { version = "0.18.2", features = ["pipewire"] }
 directories = "6.0.0"
+# Voice activity detection: a 2026 neural detector with no external dependency and no model file
+# (40 KB embedded). 23.25 us per 256-sample frame — 0.145% of one core, and 10.2x faster than
+# Silero through ONNX measured side by side, which is what took ONNX Runtime out of this project
+# altogether. `webrtc-audio-processing` 2.x has no VAD of its own; the old APM's
+# `voice_detection` is gone from its `Config`.
+earshot = "1.2.2"
 fs4 = "1.1.0"
+# `StreamExt::next` over the two portal signal streams `ashpd` hands out. Already in the tree
+# through `zbus`; named here so the one crate that calls it does not depend on that staying true.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# The X11 and Windows hotkey, taken directly rather than through `tauri-plugin-global-shortcut`.
+# That plugin is a re-export of this crate plus four IPC commands; `hotkey/mod.rs` says why the
+# plugin is the wrong shape here, and why registering it alongside this would be a mistake.
+global-hotkey = "0.8.0"
 keyring = "4.2.0"
 open = "5.4.4"
 # `default-features = false` on purpose. `rmcp`'s defaults are `base64`, `macros` and `server`,
@@ -28,8 +57,39 @@ rmcp = { version = "3.3.0", default-features = false, features = [
     "client",
     "transport-child-process",
 ] }
+# The one HTTP client in this workspace, and it is already here: `iroh` pulls it in for every
+# build. `zyris-voice` uses it for one thing, the 141 MB speech model, and it is behind the
+# `voice` feature so the off build still has no downloader.
+#
+# **`rustls-no-provider` and not `rustls`, deliberately.** `rustls` would select
+# `aws-lc-rs`, which is a cmake-and-NASM native build that nothing in this workspace has today;
+# `rustls-no-provider` takes the `ring` that `iroh` already compiles and leaves the choice of
+# provider to us — `stt::fetch` installs it. Both spellings pull in `rustls-platform-verifier`,
+# so certificates are checked against the machine's own store rather than a copy of Mozilla's
+# baked into the binary, and a proxy a user has already trusted keeps working.
+# `system-proxy` costs three lockfile entries (`system-configuration`, `windows-registry`, and a
+# second major of `core-foundation` that only macOS would build) and buys the case it is here
+# for: a corporate Windows machine whose proxy is set in Windows settings and in no environment
+# variable. Downloading 141 MB is the one thing this program asks of the network besides its own
+# websocket, and failing it on such a machine would look like a broken build.
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "rustls-no-provider",
+    "system-proxy",
+] }
+# Capture comes in at whatever the device offers and whisper wants 16 kHz mono. Linux accepts a
+# 16 kHz mono request directly through ALSA's plug layer or PipeWire; **Windows does not** —
+# `cpal`'s WASAPI backend puts `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` on output streams only, and
+# says so in its own comment. So the conversion is ours on every platform, and a test that runs
+# only on Linux would never see the bug. 48k -> 16k costs 26 us per 1024-frame block.
+rubato = "5.0.0"
+# Only for `CryptoProvider::install_default`: see `reqwest` above. `ring` is the provider
+# `iroh` already builds, so this adds no native code to any platform.
+rustls = { version = "0.23.44", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The model's integrity check. 0.10 rather than 0.11 because 0.10 is the copy already in the
+# lockfile through the protocol stack; taking 0.11 would compile a second one for one digest.
+sha2 = "0.10.9"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-build = "2.6.3"
 tauri-plugin-single-instance = "2.4.4"
@@ -38,6 +98,18 @@ time = { version = "0.3.44", features = ["formatting"] }
 tokio = "1.53.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# Echo cancellation. Behind `zyris-voice`'s `aec` feature rather than its `voice` one, because
+# no runner and no Debian release can supply it — that manifest carries the evidence.
+webrtc-audio-processing = "2.1.0"
+# Speech to text, building a vendored whisper.cpp through CMake. **`GGML_NATIVE` defaults to ON
+# and would ship a binary that SIGILLs on somebody else's CPU**; `whisper-rs-sys/build.rs`
+# forwards any `WHISPER_`/`GGML_`/`CMAKE_` environment variable to CMake, so `GGML_NATIVE=OFF`
+# is the whole fix, and it is set in CI. AVX2 is still required. No GPU feature is on: the
+# defaults are empty and every accelerator here is opt-in.
+# `tracing_backend` rather than the default, which is no backend at all: whisper.cpp prints a
+# screenful of model parameters and timings to stderr on every load, and in `--headless` that is
+# the process log. `zyris_voice::stt::Stt::load` installs the hooks once per process.
+whisper-rs = { version = "0.16.0", features = ["tracing_backend"] }
 # `=0.2.0`, not `^0.2.0`, for the six that come from the registry. Each of them depends on one of
 # the crates patched below — `zyris-caps`, `zyris-core` — with a plain caret, and
 # `[patch.crates-io]` pins those to a git rev whose version is 0.2.0. The day upstream publishes

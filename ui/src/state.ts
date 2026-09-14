@@ -80,6 +80,7 @@ export const TABS = [
   { id: "status", label: "Status" },
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP" },
+  { id: "voice", label: "Voice" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -326,6 +327,33 @@ const RESYNC_EVENT_NAME = "core-resync";
 
 export function subscribeResync(onResync: () => void): Promise<() => void> {
   return listen(RESYNC_EVENT_NAME, () => onResync());
+}
+
+// What the voice session did. Mirrors `VoiceEvent` in crates/zyris-voice/src/lib.rs, which is
+// serialized as a tagged union in camelCase and has a test pinning that shape.
+//
+// **Not a `CoreEvent` and not in the reducer.** Every variant of that union is something the node
+// did about its connection to Attacca; this is a microphone, and nothing outside the Voice screen
+// needs to know about it. `heardNothing` is its own variant rather than `heard` with an empty
+// string because the two are shown differently — an empty transcript is also what a broken
+// microphone produces.
+export type VoiceEvent =
+  | { kind: "listening" }
+  | { kind: "thinking" }
+  | { kind: "heard"; text: string }
+  | { kind: "heardNothing" }
+  | { kind: "failed"; reason: string };
+
+// Has to match VOICE_EVENT_NAME in crates/zyris-app/src/bridge.rs exactly; nothing checks that
+// at build time.
+const VOICE_EVENT_NAME = "voice-event";
+
+// There is deliberately **no catch-up call beside this one**. A turn is four events over a second
+// or two and none of them is state, so there is nothing on the Rust side holding the last one to
+// hand back. What is state — whether a microphone is open, and why not — comes from `voice_state`,
+// which the screen calls on the way in.
+export function subscribeVoice(onEvent: (event: VoiceEvent) => void): Promise<() => void> {
+  return listen<VoiceEvent>(VOICE_EVENT_NAME, (message) => onEvent(message.payload));
 }
 
 // What the core published before this window's listener was registered — see the module comment
