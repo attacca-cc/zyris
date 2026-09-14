@@ -545,4 +545,35 @@ mod tests {
         assert!(production.starts_with("/data/zyris"));
         assert_eq!(production.file_name().unwrap(), CONFIG_FILE);
     }
+
+    #[test]
+    fn every_json_block_in_the_readme_is_a_server_list_this_code_would_accept() {
+        // **The front page tells somebody what to type, and nothing has ever read it back.** The
+        // example is meant to be copied, `deny_unknown_fields` is on, and a misspelled key in it
+        // would be a file this code refuses — which is the one failure the README itself says
+        // costs every server on the machine.
+        //
+        // Both shapes are allowed because the page uses both: a whole file, and a single entry
+        // shown on its own. Anything that is neither fails here with what serde said about it.
+        let readme = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )
+        .expect("the README is two directories up from this crate");
+
+        let mut checked = 0;
+        for block in readme.split("```json").skip(1) {
+            let json = block.split("```").next().expect("a fenced block has a closing fence");
+            let as_file = serde_json::from_str::<Config>(json);
+            let as_entry = serde_json::from_str::<ServerConfig>(json);
+            assert!(
+                as_file.is_ok() || as_entry.is_ok(),
+                "a JSON example on the front page is not something Zyris would accept.\n\
+                 As a whole file: {}\nAs one entry: {}\n{json}",
+                as_file.err().map(|e| e.to_string()).unwrap_or_default(),
+                as_entry.err().map(|e| e.to_string()).unwrap_or_default(),
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "the README's server-list examples have moved: found {checked}");
+    }
 }

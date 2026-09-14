@@ -380,7 +380,17 @@ mod tests {
     ];
 
     /// The README's wording for `TOOLS_PER_CAPABILITY`'s total, as it is spelled there.
-    const README_TOTAL: (usize, &str) = (25, "twenty-five tools");
+    ///
+    /// **The words before the number are part of what is guarded**, and they are the half that
+    /// went wrong. The sentence was rewritten to fold MCP promotion into its subject, and "Between
+    /// them that is twenty-five tools" then read as counting the promoted servers too — whose tool
+    /// count is whatever somebody installed. A guard that looked only for `twenty-five tools`
+    /// could not see that: the number was right and its antecedent was not.
+    ///
+    /// So the phrase names the five explicitly, and the test below checks that "five" is still
+    /// how many rows [`TOOLS_PER_CAPABILITY`] has. It moves when somebody rewrites that clause,
+    /// which is exactly the edit that should send them back here.
+    const README_TOTAL: (usize, &str) = (25, "those five that is twenty-five tools");
 
     fn tools(dir: &Path) -> Tools {
         Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
@@ -589,6 +599,15 @@ mod tests {
 
         let total: usize = TOOLS_PER_CAPABILITY.iter().map(|(_, count)| count).sum();
         assert_eq!(total, README_TOTAL.0);
+        // The subject of the count, not only the count. A sixth capability here without a
+        // rewrite of that clause would leave the README saying "those five".
+        assert_eq!(
+            TOOLS_PER_CAPABILITY.len(),
+            5,
+            "README.md says `{}`; the table it is counting now has {} rows",
+            README_TOTAL.1,
+            TOOLS_PER_CAPABILITY.len()
+        );
         let readme = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
         )

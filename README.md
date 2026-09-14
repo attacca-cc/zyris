@@ -32,8 +32,8 @@ server to reach, because a tool that is always going to fail is worse than a too
 
 **Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live, and so is
 the promotion of local MCP servers — see [MCP servers](#mcp-servers) — though no agent on Attacca
-has yet called one of their tools end to end.** Between them that is twenty-five tools, and a
-capability is all or nothing — announcing `file_io` announces `remove`, and announcing `terminal`
+has yet called one of their tools end to end.** Between those five that is twenty-five tools —
+an MCP server adds however many its own tools come to, on top — and a capability is all or nothing — announcing `file_io` announces `remove`, and announcing `terminal`
 announces `exec` with whatever command an agent chooses. A path an agent sends without a leading
 slash starts in your home directory. That is where relative paths start rather than a fence around
 them: an absolute path goes where it says, and a command can work anywhere you can. What bounds
@@ -148,7 +148,7 @@ of an ordinary machine and not something Zyris complains about.
 {
   "servers": [
     { "name": "desk-notes", "command": "notes-mcp", "args": ["--root", "/home/you/notes"] },
-    { "name": "calendar", "command": "npx", "args": ["-y", "@example/calendar-mcp"],
+    { "name": "calendar", "command": "calendar-mcp", "args": ["--ics", "/home/you/cal.ics"],
       "enabled": false }
   ]
 }
@@ -160,6 +160,20 @@ collects are spelling ones, and an `"arg"` quietly ignored is a server that star
 the arguments you gave it. Each command is run directly and spoken to over its standard input and
 output — nothing goes through a shell, so each argument is passed exactly as written and none of
 them is split or expanded.
+
+**On Windows that means `command` has to name the file that actually exists.** A great many MCP
+servers are published to npm and started with `npx`, and on Windows `npx` is `npx.cmd` — a batch
+wrapper, not a program. Because nothing goes through a shell, the bare name does not find it and
+the server does not start; write the extension out:
+
+```json
+{ "name": "calendar", "command": "npx.cmd", "args": ["-y", "@example/calendar-mcp"] }
+```
+
+The same goes for `pnpm`, `yarn` and anything else that ships as `.cmd`. On Linux and macOS the
+bare `npx` is right and the extension would be wrong. When it is wrong, the MCP tab shows that
+server as not started, with the operating system's own "cannot find the file" as the reason, and
+nothing else on the machine is affected.
 
 Zyris reads this file when it starts and **never writes to it**. The MCP tab lists what is in it
 and what each server is doing; the switches there stop and start a server for as long as Zyris is
@@ -205,9 +219,15 @@ one claim on this page that only a person can check, and **nobody has checked it
 is the procedure, written down rather than performed.
 
 It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
-today; nothing here depends on which. If you are also running the file-transfer check that step 5
-left owed, this rides along with it: same machine, same agent, and only step 7 below wants a
-second computer's attention at all.
+today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
+the file-transfer check that step 5 left owed; if you are running that one too, this rides along
+with it on the same machine and the same agent. What it does need throughout is an agent on
+Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, and only steps 1, 2,
+5, 8 and 9 happen entirely on this computer.
+
+Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl` on Linux and
+`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the server list named above. A
+`--server` run keeps its own, in a `zyris-dev-…` directory of its own rather than in `zyris`.
 
 1. **Configure it.** Put one entry in the file named above, then **restart Zyris** — the file is
    read at startup and never again.
