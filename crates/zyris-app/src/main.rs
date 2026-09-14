@@ -12,6 +12,7 @@ mod cli;
 mod confirm;
 mod gui;
 mod headless;
+mod hotkey;
 mod tray;
 
 use clap::Parser;

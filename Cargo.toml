@@ -12,9 +12,23 @@ repository = "https://github.com/attacca-cc/zyris"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+# The GlobalShortcuts portal, and the only way to register a global key on Wayland. Linux only,
+# and `default-features = false` because the defaults pull in every portal interface this project
+# will never ask for. `tokio` selects zbus's tokio executor, which is the runtime `main` builds.
+ashpd = { version = "0.13.13", default-features = false, features = [
+    "global_shortcuts",
+    "tokio",
+] }
 clap = { version = "4.6.6", features = ["derive"] }
 directories = "6.0.0"
 fs4 = "1.1.0"
+# `StreamExt::next` over the two portal signal streams `ashpd` hands out. Already in the tree
+# through `zbus`; named here so the one crate that calls it does not depend on that staying true.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+# The X11 and Windows hotkey, taken directly rather than through `tauri-plugin-global-shortcut`.
+# That plugin is a re-export of this crate plus four IPC commands; `hotkey/mod.rs` says why the
+# plugin is the wrong shape here, and why registering it alongside this would be a mistake.
+global-hotkey = "0.8.0"
 keyring = "4.2.0"
 open = "5.4.4"
 # `default-features = false` on purpose. `rmcp`'s defaults are `base64`, `macros` and `server`,

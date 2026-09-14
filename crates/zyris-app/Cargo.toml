@@ -21,6 +21,10 @@ zyris-tools = { path = "../zyris-tools" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
+# The push-to-talk key on X11 and on Windows. Present on every platform: the crate carries a
+# no-op backend for the ones it does not implement, and `hotkey::start` never reaches it on a
+# Wayland session anyway.
+global-hotkey = { workspace = true }
 open = { workspace = true }
 serde = { workspace = true }
 tauri = { workspace = true }
@@ -30,6 +34,19 @@ tauri-plugin-single-instance = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# The Wayland half of the push-to-talk key. Linux only, because the GlobalShortcuts portal is:
+# `ashpd` speaks D-Bus to `xdg-desktop-portal`, which exists nowhere else. Windows takes the
+# `global-hotkey` path above and never reaches this.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { workspace = true }
+futures-util = { workspace = true }
+
+# One `#[ignore]`d test in `hotkey/x11.rs`, and only that. It measures how many `WM_HOTKEY` a
+# held key produces, which needs a message pump — a `#[test]` has no event loop, and without one
+# `global-hotkey`'s message-only window is never dispatched to. Nothing outside a test uses it.
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # The wire shape of what the Settings screen reads, pinned by a test in `bridge.rs`.
