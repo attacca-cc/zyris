@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# Not a compilation step: `build.rs` is the only thing that can refuse a release built with
+# `GGML_NATIVE` on, and it explains why in its own module documentation.
+build = "build.rs"
 
 [dependencies]
 # The stream, and nothing heavier. `sync` builds no runtime: it is the same `broadcast` the
@@ -43,6 +46,29 @@ optional = true
 workspace = true
 optional = true
 
+# Where the 141 MB model goes: the platform cache directory, shared by every instance. See
+# `stt::cache_dir` for why it is the cache and not `zyris-app`'s per-instance data directory.
+[dependencies.directories]
+workspace = true
+optional = true
+
+# How it gets there. Already in every build of `zyris-app` through `iroh`; here it is behind
+# the feature, so the off build still has no HTTP client of its own.
+[dependencies.reqwest]
+workspace = true
+optional = true
+
+# Only to install `ring` as the process TLS provider; `reqwest` is taken with
+# `rustls-no-provider` so that this workspace does not grow an `aws-lc-rs` native build.
+[dependencies.rustls]
+workspace = true
+optional = true
+
+# The digest that says the bytes are the model and not a proxy's error page.
+[dependencies.sha2]
+workspace = true
+optional = true
+
 [dev-dependencies]
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
@@ -62,7 +88,20 @@ default = []
 #
 # **This is what CI compiles, on both runners.** Everything in it is either pure Rust or builds
 # from source with a toolchain `ubuntu-latest` and `windows-latest` already have.
-voice = ["dep:cpal", "dep:rubato", "dep:earshot", "dep:whisper-rs"]
+# `tokio/rt` is in here rather than in the base dependency for the same reason everything else
+# is: `spawn_blocking` is what keeps `state.full()` off the runtime, and a build with no whisper
+# has nothing to send there.
+voice = [
+    "dep:cpal",
+    "dep:rubato",
+    "dep:earshot",
+    "dep:whisper-rs",
+    "dep:directories",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:sha2",
+    "tokio/rt",
+]
 
 # Echo cancellation, so the microphone can stay open while Zyris is speaking.
 #

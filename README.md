@@ -276,6 +276,18 @@ one. Code blocks are read as "code" and parenthetical asides are skipped, becaus
 aloud is not the same text as an answer on screen. Start talking and it stops to listen; what it
 had not yet said does not go into the transcript.
 
+**The speech model is 141 MB and is downloaded once**, into this computer's cache directory
+(`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\zyris\cache\models` on Windows) rather than
+into the installer. It is checked against a published SHA-256 before it is put in place, so an
+interrupted or intercepted download leaves nothing behind and the next run simply offers to fetch
+it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it and no download
+happens at all.
+
+**Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
+transcription engine is compiled without `-march=native` so that the release runs on every such
+machine rather than only on the one that built it; on anything older it will not start. Nothing
+else in Zyris has that requirement.
+
 ## Install
 
 Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the

@@ -57,14 +57,39 @@ rmcp = { version = "3.3.0", default-features = false, features = [
     "client",
     "transport-child-process",
 ] }
+# The one HTTP client in this workspace, and it is already here: `iroh` pulls it in for every
+# build. `zyris-voice` uses it for one thing, the 141 MB speech model, and it is behind the
+# `voice` feature so the off build still has no downloader.
+#
+# **`rustls-no-provider` and not `rustls`, deliberately.** `rustls` would select
+# `aws-lc-rs`, which is a cmake-and-NASM native build that nothing in this workspace has today;
+# `rustls-no-provider` takes the `ring` that `iroh` already compiles and leaves the choice of
+# provider to us — `stt::fetch` installs it. Both spellings pull in `rustls-platform-verifier`,
+# so certificates are checked against the machine's own store rather than a copy of Mozilla's
+# baked into the binary, and a proxy a user has already trusted keeps working.
+# `system-proxy` costs three lockfile entries (`system-configuration`, `windows-registry`, and a
+# second major of `core-foundation` that only macOS would build) and buys the case it is here
+# for: a corporate Windows machine whose proxy is set in Windows settings and in no environment
+# variable. Downloading 141 MB is the one thing this program asks of the network besides its own
+# websocket, and failing it on such a machine would look like a broken build.
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "rustls-no-provider",
+    "system-proxy",
+] }
 # Capture comes in at whatever the device offers and whisper wants 16 kHz mono. Linux accepts a
 # 16 kHz mono request directly through ALSA's plug layer or PipeWire; **Windows does not** —
 # `cpal`'s WASAPI backend puts `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM` on output streams only, and
 # says so in its own comment. So the conversion is ours on every platform, and a test that runs
 # only on Linux would never see the bug. 48k -> 16k costs 26 us per 1024-frame block.
 rubato = "5.0.0"
+# Only for `CryptoProvider::install_default`: see `reqwest` above. `ring` is the provider
+# `iroh` already builds, so this adds no native code to any platform.
+rustls = { version = "0.23.44", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# The model's integrity check. 0.10 rather than 0.11 because 0.10 is the copy already in the
+# lockfile through the protocol stack; taking 0.11 would compile a second one for one digest.
+sha2 = "0.10.9"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-build = "2.6.3"
 tauri-plugin-single-instance = "2.4.4"
@@ -81,7 +106,10 @@ webrtc-audio-processing = "2.1.0"
 # forwards any `WHISPER_`/`GGML_`/`CMAKE_` environment variable to CMake, so `GGML_NATIVE=OFF`
 # is the whole fix, and it is set in CI. AVX2 is still required. No GPU feature is on: the
 # defaults are empty and every accelerator here is opt-in.
-whisper-rs = "0.16.0"
+# `tracing_backend` rather than the default, which is no backend at all: whisper.cpp prints a
+# screenful of model parameters and timings to stderr on every load, and in `--headless` that is
+# the process log. `zyris_voice::stt::Stt::load` installs the hooks once per process.
+whisper-rs = { version = "0.16.0", features = ["tracing_backend"] }
 # `=0.2.0`, not `^0.2.0`, for the six that come from the registry. Each of them depends on one of
 # the crates patched below — `zyris-caps`, `zyris-core` — with a plain caret, and
 # `[patch.crates-io]` pins those to a git rev whose version is 0.2.0. The day upstream publishes

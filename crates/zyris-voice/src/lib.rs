@@ -50,6 +50,11 @@ pub mod capture;
 #[cfg(feature = "voice")]
 pub mod vad;
 
+// Whisper: the model on disk, the one parameter that makes it fast enough to talk to, and
+// the settings that are decisions rather than defaults.
+#[cfg(feature = "voice")]
+pub mod stt;
+
 /// Why a build with no `voice` feature will never hear anything.
 ///
 /// Worded for a person reading the window, not for a developer reading a log: whoever installed
