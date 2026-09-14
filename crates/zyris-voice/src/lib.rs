@@ -65,6 +65,14 @@ pub mod stt;
 #[cfg(feature = "voice")]
 pub mod tts;
 
+// What is read aloud and what is not, and the two texts that are not the same text.
+#[cfg(feature = "voice")]
+pub mod speak;
+
+// Where one fragment ends and the next begins, argued from what synthesis actually costs.
+#[cfg(feature = "voice")]
+pub mod split;
+
 // The speaker: the output stream, the queue in front of it, and the tap that keeps what was
 // played so the echo canceller can be told what to subtract.
 #[cfg(feature = "voice")]
