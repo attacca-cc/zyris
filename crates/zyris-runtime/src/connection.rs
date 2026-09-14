@@ -83,7 +83,13 @@ pub struct Connector {
     capabilities: LiveCapabilities,
     /// What this node does on each connection it establishes, beyond reporting it. See
     /// [`ConnectHook`].
-    connect_hook: Option<ConnectHook>,
+    ///
+    /// **A list, since step 8.** Two unrelated things now need a connection the moment it comes
+    /// up — file transfer's rendezvous client, and the voice's turn subscription — and they are
+    /// not each other's business. A single slot made that `main`'s problem to compose, silently:
+    /// a second `with_connect_hook` kept the second hook and dropped the first, with nothing
+    /// going red. The same one-slot shape `hotkey`'s `set_event_handler` note warns about.
+    connect_hooks: Vec<ConnectHook>,
 }
 
 impl Connector {
@@ -94,7 +100,7 @@ impl Connector {
             server: zyris::DEFAULT_SERVER_URL.to_string(),
             ever_connected: Arc::new(AtomicBool::new(false)),
             capabilities: LiveCapabilities::default(),
-            connect_hook: None,
+            connect_hooks: Vec::new(),
         }
     }
 
@@ -116,17 +122,25 @@ impl Connector {
         self
     }
 
-    /// Installs the per-connection work described by [`ConnectHook`].
+    /// Adds per-connection work, as described by [`ConnectHook`]. **Adds**: every hook installed
+    /// runs on every connection, and a second call does not replace the first.
     ///
-    /// There is room for exactly one, because the library has room for exactly one:
-    /// `NodeBuilder::on_connect` keeps a single closure and setting it twice keeps the second. A
-    /// caller with two things to do on connect does both inside one hook.
-    pub fn with_connect_hook<F, Fut>(mut self, hook: F) -> Connector
+    /// The library has room for exactly one — `NodeBuilder::on_connect` keeps a single closure
+    /// and setting it twice keeps the second — so this crate holds the list and runs it inside
+    /// that one closure. Leaving the composing to the caller was the earlier shape and it was a
+    /// silent trap: `main` installing two hooks got one, with nothing to say which.
+    ///
+    /// The hooks are independent, so they are run **concurrently**, each on its own task. One
+    /// that blocks for its whole timeout waiting for a capability that never arrives therefore
+    /// does not delay another that is already working — which matters here because both of this
+    /// app's hooks begin by waiting for `attacca_api`. All of them are still awaited: a hook is
+    /// per-connection work and the connection's closure is not finished while any of it is.
+    pub fn add_connect_hook<F, Fut>(mut self, hook: F) -> Connector
     where
         F: Fn(zyris::Connection) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.connect_hook = Some(Arc::new(move |conn| Box::pin(hook(conn))));
+        self.connect_hooks.push(Arc::new(move |conn| Box::pin(hook(conn))));
         self
     }
 
@@ -271,7 +285,7 @@ impl Connector {
                         self.bus.clone(),
                         name.to_string(),
                         self.ever_connected.clone(),
-                        self.connect_hook.clone(),
+                        self.connect_hooks.clone(),
                     ));
                 for capability in capabilities {
                     builder = builder.capability_arc(capability.clone());
@@ -290,21 +304,21 @@ impl Connector {
     /// dial and every redial alike — which is the whole reason [`ConnectHook`] can be trusted to
     /// replace what a previous connection left behind.
     ///
-    /// The installed hook runs *beside* the close report rather than before it: whatever it does
-    /// is a network round trip, and a connection that dies while it is still going has to be
+    /// The installed hooks run *beside* the close report rather than before it: whatever they do
+    /// is a network round trip, and a connection that dies while one is still going has to be
     /// reported the moment it dies, not whenever the hook is finished with it.
     fn per_connection(
         bus: EventBus,
         node_name: String,
         ever_connected: Arc<AtomicBool>,
-        hook: Option<ConnectHook>,
+        hooks: Vec<ConnectHook>,
     ) -> impl Fn(zyris::Connection) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static
     {
         move |conn| {
             let bus = bus.clone();
             let node_name = node_name.clone();
             let ever_connected = ever_connected.clone();
-            let hook = hook.clone();
+            let hooks = hooks.clone();
             Box::pin(async move {
                 // Set before publishing: `report_setup_failure`, called from a concurrent
                 // recovery attempt, must never read a stale `false` and send a person who is
@@ -316,8 +330,17 @@ impl Connector {
                 });
 
                 let per_connection_work = async {
-                    if let Some(hook) = &hook {
-                        hook(conn.clone()).await;
+                    // Spawned rather than awaited in turn: the hooks have nothing to do with
+                    // each other, and one waiting out its whole `attacca_api` timeout on a
+                    // connection that never announces it must not hold the next one up. A hook
+                    // that panics takes its own task down and not this one, or a connection
+                    // would stop being reported because something unrelated fell over.
+                    let mut running = Vec::with_capacity(hooks.len());
+                    for hook in &hooks {
+                        running.push(tokio::spawn(hook(conn.clone())));
+                    }
+                    for task in running {
+                        let _ = task.await;
                     }
                 };
 
@@ -717,7 +740,7 @@ mod tests {
             EventBus::new(16),
             "test".to_string(),
             Arc::new(AtomicBool::new(false)),
-            Some(recording_hook(seen.clone())),
+            vec![recording_hook(seen.clone())],
         );
 
         // Held, not dropped: the far end of each is what keeps the connection open, and the
@@ -748,6 +771,57 @@ mod tests {
         );
     }
 
+    /// Two things now need a connection the moment it comes up, and a connector that kept one
+    /// hook would drop the other in silence — no error, no log, just a feature that is never
+    /// wired. Both halves of that are asserted: both hooks ran, and the *first* one installed is
+    /// among them.
+    #[tokio::test]
+    async fn a_second_hook_is_added_rather_than_replacing_the_first() {
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let label = |name: &'static str| {
+            let ran = ran.clone();
+            Arc::new(move |_conn: zyris::Connection| {
+                let ran = ran.clone();
+                Box::pin(async move { ran.lock().unwrap().push(name) })
+                    as Pin<Box<dyn Future<Output = ()> + Send>>
+            }) as ConnectHook
+        };
+        // Installed the way `main` installs them — two separate calls — because that is the
+        // clause being decided. Driving `per_connection` from a hand-built list would pass just
+        // as well for a connector that kept only the second.
+        let dir = tempfile::tempdir().unwrap();
+        let connector = Connector::new(
+            crate::identity::Identity::new(crate::secret::SecretStore::with_file_dir(
+                "zyris-test",
+                dir.path().to_path_buf(),
+            )),
+            EventBus::new(16),
+        )
+        .add_connect_hook({
+            let hook = label("transfer");
+            move |conn| hook(conn)
+        })
+        .add_connect_hook({
+            let hook = label("voice");
+            move |conn| hook(conn)
+        });
+
+        let on_connect = Connector::per_connection(
+            EventBus::new(16),
+            "test".to_string(),
+            Arc::new(AtomicBool::new(false)),
+            connector.connect_hooks.clone(),
+        );
+
+        let (conn, _server) = in_process_connection().await;
+        tokio::spawn(on_connect(conn));
+
+        wait_until("both hooks ran on the one connection", || ran.lock().unwrap().len() == 2).await;
+        let mut ran = ran.lock().unwrap().clone();
+        ran.sort_unstable();
+        assert_eq!(ran, vec!["transfer", "voice"]);
+    }
+
     /// A hook still busy when its connection dies must not hold up the report that it died. The
     /// window this closes is small and the symptom is not: a link that has already gone back to
     /// dialling, while the person watching still sees a green light.
@@ -761,10 +835,10 @@ mod tests {
             bus,
             "test".to_string(),
             Arc::new(AtomicBool::new(false)),
-            Some(Arc::new(move |_conn| {
+            vec![Arc::new(move |_conn| {
                 let hold = hold.clone();
                 Box::pin(async move { hold.notified().await })
-            })),
+            })],
         );
 
         let (conn, server) = in_process_connection().await;

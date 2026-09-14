@@ -94,6 +94,24 @@ optional = true
 workspace = true
 optional = true
 
+# The turn feed: `turn_events`, `send_message`, and the frames they carry. **Optional, and that
+# is the point** -- the off build of this crate has no protocol stack in it, which is why
+# `speak::Kind` mirrors `ZDeltaKind` rather than re-exporting it. With `voice` on, `turn.rs` is
+# the one place the two are mapped, in one line that stops compiling if the protocol grows an arm.
+[dependencies.zyris]
+workspace = true
+optional = true
+
+[dependencies.zyris-attacca]
+workspace = true
+optional = true
+
+# Reading a `Streaming`'s items: `StreamExt::next`, and nothing else. Already in this workspace
+# through `zyris-app`.
+[dependencies.futures-util]
+workspace = true
+optional = true
+
 [dev-dependencies]
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
@@ -129,6 +147,9 @@ voice = [
     "dep:sha2",
     "dep:serde_json",
     "dep:tracing",
+    "dep:zyris",
+    "dep:zyris-attacca",
+    "dep:futures-util",
     "tokio/rt",
 ]
 

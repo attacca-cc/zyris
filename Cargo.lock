@@ -9338,6 +9338,7 @@ dependencies = [
  "cpal",
  "directories",
  "earshot",
+ "futures-util",
  "ort",
  "reqwest",
  "rubato",
@@ -9350,4 +9351,6 @@ dependencies = [
  "unicode-normalization",
  "webrtc-audio-processing",
  "whisper-rs",
+ "zyris",
+ "zyris-attacca",
 ]

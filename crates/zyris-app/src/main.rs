@@ -280,7 +280,7 @@ fn main() -> anyhow::Result<()> {
     // replacing the rendezvous client, republishing where this machine can be reached, and — the
     // first time only — starting the accept loop.
     if let Some(transfers) = transfers {
-        connector = connector.with_connect_hook(move |connection| {
+        connector = connector.add_connect_hook(move |connection| {
             let transfers = transfers.clone();
             async move { transfers.on_connect(connection).await }
         });

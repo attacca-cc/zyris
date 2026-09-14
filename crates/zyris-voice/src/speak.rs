@@ -211,6 +211,34 @@ impl Filter {
         Aloud(out)
     }
 
+    /// Release the word being held, **without ending the turn**.
+    ///
+    /// What [`crate::split::IDLE_FLUSH`] needs, and it is not [`Filter::finish`]: a stream that
+    /// has merely stalled may still be inside a fence or an aside, and finishing would clear
+    /// both — the rest of a code block would then be read aloud because the answer paused in the
+    /// middle of it.
+    ///
+    /// Nothing a fence or an aside is holding can escape through here, and that is structural
+    /// rather than checked: a character inside a fence is dropped and a character inside an
+    /// aside goes to [`Filter::aside`], so [`Filter::word`] is non-empty only outside both.
+    ///
+    /// **A stall in the middle of a word says the half that arrived**, and the other half begins
+    /// the next fragment. That is the same split the fragment boundary already is, and it is the
+    /// price of not dropping the last word of every stalled sentence — a delta ends without
+    /// trailing whitespace almost every time, so without this the word before the stall is
+    /// *always* the one left behind.
+    /// Whether a word is being held that [`Filter::pause`] would release. What decides whether
+    /// an idle stream has anything to say at all.
+    pub fn holds_a_word(&self) -> bool {
+        !self.word.is_empty()
+    }
+
+    pub fn pause(&mut self) -> Aloud {
+        let mut out = String::new();
+        self.flush_word(&mut out);
+        Aloud(out)
+    }
+
     /// One character.
     fn feed(&mut self, c: char, out: &mut String) {
         // Backticks first: three of them change what every later character means.
@@ -396,6 +424,39 @@ mod tests {
 
     fn assistant(text: &str) -> String {
         aloud(&[(Kind::Assistant, text)])
+    }
+
+    /// A stalled stream. The last word of a delta has no whitespace after it, so it is *always*
+    /// the one still held — a pause that did not release it would leave every stalled sentence
+    /// short of its last word, and put that word at the front of whatever came next.
+    #[test]
+    fn a_pause_releases_the_word_a_delta_ended_on() {
+        let mut filter = Filter::new();
+        assert_eq!(filter.read(Kind::Assistant, "One moment").aloud.text(), "One ");
+        assert_eq!(filter.pause().text(), "moment");
+    }
+
+    /// And it is not [`Filter::finish`]. A stall inside a code block must not open the block up
+    /// — the rest of it would then be read out, line by line, as the answer resumed.
+    #[test]
+    fn a_pause_inside_a_fence_says_nothing_and_leaves_the_fence_shut() {
+        let mut filter = Filter::new();
+        filter.read(Kind::Assistant, "Run ```cargo build");
+        assert_eq!(filter.pause().text(), "", "a fence holds nothing a pause can release");
+        assert_eq!(
+            filter.read(Kind::Assistant, " --release\n").aloud.text(),
+            "",
+            "and the fence is still open"
+        );
+    }
+
+    /// The same for an aside, which may still close.
+    #[test]
+    fn a_pause_inside_an_aside_leaves_it_open() {
+        let mut filter = Filter::new();
+        assert_eq!(filter.read(Kind::Assistant, "Done (nearly").aloud.text(), "Done ");
+        assert_eq!(filter.pause().text(), "");
+        assert_eq!(filter.read(Kind::Assistant, ") now. ").aloud.text(), " now. ");
     }
 
     /// **Rule 1, and the reason it is rule 1.**

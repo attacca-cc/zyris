@@ -78,6 +78,11 @@ pub mod split;
 #[cfg(feature = "voice")]
 pub mod playback;
 
+// The live turn feed: `turn_events`, the cursor a reconnect resumes from, and the deltas on
+// their way to the filter. The only module here that speaks to Attacca.
+#[cfg(feature = "voice")]
+pub mod turn;
+
 // The state machine: Idle -> Listening -> Thinking, and what a push-to-talk key does to it.
 // Everything above is a piece; this is the only thing that publishes a `VoiceEvent`.
 #[cfg(feature = "voice")]
