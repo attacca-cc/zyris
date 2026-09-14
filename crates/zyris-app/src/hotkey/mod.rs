@@ -33,6 +33,30 @@
 //!
 //! Do not add the plugin alongside this. `GlobalHotKeyEvent::set_event_handler` is one
 //! process-global slot and both would want it.
+//!
+//! # The portal's vocabulary, and why it is compiled where there is no portal
+//!
+//! Five things here exist only for the GlobalShortcuts portal, and `portal.rs` is
+//! `#[cfg(target_os = "linux")]` — so on Windows nothing constructs or calls them:
+//! [`SHORTCUT_ID`], [`SHORTCUT_DESCRIPTION`], [`HotkeySupport::NeedsAKeyBound`],
+//! [`Env::desktop_name`] and [`compositor_line`]. `cargo build -p zyris-app` said so five times
+//! on `windows-latest` while the same build was clean here, which is the worst shape a warning
+//! can have: one that appears only on the platform nobody in this project can run.
+//!
+//! Each carries `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]` — **and that, rather
+//! than a `#[cfg]`, for two reasons that are not a preference**:
+//!
+//! - [`HotkeySupport`] is one wire type with one TypeScript union on the other side of it, and
+//!   `ui/src/Voice.tsx` renders all three of its arms. A variant that existed only on Linux
+//!   would make the shape of what the window receives depend on which runner built the binary,
+//!   on the one screen whose whole job is not to flatten those three answers into fewer.
+//! - The tests at the bottom of this file are the only thing pinning the compositor line, the id
+//!   it points at, and which part of `XDG_CURRENT_DESKTOP` names a desktop — and CI runs
+//!   `cargo test --workspace` on **both** runners. A `#[cfg]` would have to take those tests with
+//!   it, and what this project proves would start depending on where it was proved.
+//!
+//! The lint stays live where it can still mean something: on Linux none of the five is allowed
+//! to be dead, so the day the portal stops calling one, this machine says so.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -55,10 +79,17 @@ pub use x11::GrabbedHotkey;
 ///
 /// On the portal it is the *name* a compositor points a key at, so it is part of the line a
 /// person puts in their configuration and cannot be renamed without breaking every existing
-/// install. On X11 and Windows it is only an internal label.
+/// install.
+///
+/// **On X11 and on Windows nothing reads it.** `global-hotkey` identifies a registration by the
+/// key combination it was given and never by a name, so `x11.rs` — which is both of those
+/// backends — has no use for it. It is the portal's word, and `portal.rs` is its only caller.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SHORTCUT_ID: &str = "push_to_talk";
 
-/// What the shortcut is for, as the portal shows it to the user.
+/// What the shortcut is for, as the portal shows it to the user. The portal's only, like the id
+/// above.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SHORTCUT_DESCRIPTION: &str = "Hold to talk to Zyris";
 
 /// The key this asks for where it is allowed to ask: Ctrl+Alt+Space.
@@ -105,6 +136,10 @@ pub enum HotkeySupport {
     /// **Zyris cannot tell whether they already have.** The compositor does not tell the portal
     /// what it bound, so `trigger_description` stays empty either way; anything rendering this
     /// has to be worded as "if you have not already" rather than as "this is not working".
+    ///
+    /// Constructed by `portal.rs` and therefore only on Linux; compiled everywhere, because the
+    /// window's union is one union. See the module documentation.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     #[serde(rename_all = "camelCase")]
     NeedsAKeyBound {
         /// What the compositor has to point a key at.
@@ -224,7 +259,9 @@ impl Env {
         }
     }
 
-    /// What to call this desktop in a sentence a person reads.
+    /// What to call this desktop in a sentence a person reads. Only the portal's advice needs
+    /// one; see the module documentation for why it is compiled where no portal is.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn desktop_name(&self) -> String {
         // `XDG_CURRENT_DESKTOP` is a colon-separated list, most specific first
         // (`Hyprland`, or `pop:GNOME`). The first entry is the one to name.
@@ -252,6 +289,7 @@ fn var(name: &str) -> Option<String> {
 /// assumed: an unsandboxed binary registers with no id, and `hyprctl globalshortcuts` lists the
 /// shortcut as `:push_to_talk` (2026-09-15). A Flatpak build would have one and this would have
 /// to grow it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn compositor_line(desktop: &str, shortcut_id: &str) -> Option<String> {
     match desktop.to_ascii_lowercase().as_str() {
         "hyprland" => Some(format!("bind = CTRL ALT, space, global, :{shortcut_id}")),
