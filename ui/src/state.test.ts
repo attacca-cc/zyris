@@ -53,3 +53,78 @@ describe("peerQuestionEnded", () => {
     expect(reduce(state, { kind: "peerQuestionEnded", id: FIRST.id }).screen).toBe("tools");
   });
 });
+
+describe("mcpServer", () => {
+  it("carries what happened and to which server", () => {
+    const after = reduce(initialState, {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "died" },
+    });
+
+    expect(after.mcpChange).toEqual({ server: "desk-notes", change: { change: "died" } });
+  });
+
+  it("replaces rather than accumulating, and does not move anybody off their screen", () => {
+    // A server dying is not a reason to take somebody off the tab they are reading — the same rule
+    // `connecting` and `disconnected` follow. And the MCP screen re-reads the whole list from the
+    // command when this changes, so there is nothing to queue here: only the fact that something
+    // moved has to survive.
+    const state = { ...initialState, screen: "settings" as const };
+
+    const first = reduce(state, {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "disabled" },
+    });
+    const second = reduce(first, {
+      kind: "mcpServer",
+      server: "calendar",
+      change: { change: "announced", capability: "mcp_calendar", tools: 3 },
+    });
+
+    expect(second.screen).toBe("settings");
+    expect(second.mcpChange).toEqual({
+      server: "calendar",
+      change: { change: "announced", capability: "mcp_calendar", tools: 3 },
+    });
+  });
+
+  it("leaves the same state applying the same event twice", () => {
+    // The rule every arm here follows, because App.tsx's catch-up can hand the reducer an event
+    // that was also delivered live. A server change is published transiently and so is never in
+    // the one-slot value that catch-up reads, but the arm is written to tolerate it anyway.
+    const event = {
+      kind: "mcpServer",
+      server: "desk-notes",
+      change: { change: "failed" as const, reason: "no such file" },
+    } as const;
+
+    expect(reduce(reduce(initialState, event), event)).toEqual(reduce(initialState, event));
+  });
+});
+
+describe("resync", () => {
+  it("changes a value the screens that read through a command can watch", () => {
+    // The one thing this action does. A window that fell behind on the event bus was never told
+    // which MCP server moved — server changes are published transiently and nothing keeps the
+    // last one — so there is nothing to fold in, only a reason to ask again.
+    const before = { ...initialState, mcpChange: null };
+
+    const after = reduce(before, { kind: "resync" });
+
+    expect(after.resyncs).toBe(before.resyncs + 1);
+    // And it says nothing about any server, because it knows nothing about any server.
+    expect(after.mcpChange).toBe(before.mcpChange);
+  });
+
+  it("counts each time it is told, rather than settling after the first", () => {
+    // Deliberately not idempotent, and safe only because it cannot arrive twice for one lag:
+    // it is not a core event, so it is never in the bus's one-slot catch-up value. Being told
+    // twice means falling behind twice, and each of those is a fresh reason to read again.
+    const once = reduce(initialState, { kind: "resync" });
+    const twice = reduce(once, { kind: "resync" });
+
+    expect(twice.resyncs).toBe(2);
+  });
+});

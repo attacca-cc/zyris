@@ -153,6 +153,37 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // **Started before the `Tools`, for the same reason the endpoint is:** what is announced
+    // depends on which of them are actually running, and a `Tools` is a list rather than a place
+    // to start processes from. Nothing here can fail — a file that will not read and a command
+    // that will not start are both logged where they happen and cost only themselves — so there
+    // is no arm for it, and a machine with no MCP servers configured, which is most of them, gets
+    // an empty list in silence.
+    //
+    // **`data`, so the list is the instance's.** Everything else `instance_name` reaches — the
+    // keychain service, the lock, the audit log, the peer key — is scoped so that a `--server`
+    // run is a different node from the production one. A server list read from anywhere shared
+    // would put that back: a development run would start the machines the real account had
+    // configured and announce them to a development server, and the other way round. That is why
+    // `zyris_mcp::Config::path` takes a directory rather than finding one — the decision about
+    // what this instance is belongs on this line, with the others.
+    //
+    // **Still before the window, and still one after another**, now that a server can join an
+    // announcement that is already live. Letting them start in the background and announce
+    // themselves as they came up would take the worst case — several misconfigured servers, ten
+    // seconds each — off the startup path, and it was weighed rather than skipped. Three things
+    // decided against it. `zyris.announce` is full replacement, so a node that grows capabilities
+    // after connecting announces twice, and an agent that read the first one saw a machine with no
+    // MCP tools and may already have acted on it; blocking is what makes the first announcement
+    // the complete one. `Tools::announced()` is a snapshot taken once, on purpose, so that the
+    // window reports what the node was given rather than a fresh look — servers arriving later
+    // would make it permanently incomplete, and a screen that understates what this machine hands
+    // out is worse than a slow start. And the delay is paid only by servers that are *broken*: a
+    // server that works answers `initialize` in well under a second, and the ten is the ceiling
+    // for one that never speaks at all.
+    let started = runtime.block_on(zyris_mcp::config::start(&data));
+    let promoted = started.running.clone();
+
     // Built here, once, for the same reason the connector is: the switch has to stop tools with
     // the window closed exactly as it does with it open, and a `Tools` per runtime would be two
     // switches and two logs that disagree.
@@ -163,13 +194,16 @@ fn main() -> anyhow::Result<()> {
     )
     // Every call is published as well as written down. The bus is the only way the window and
     // the tray hear about a call while it happens; the file is what outlives the process.
-    .with_bus(bus.clone());
+    .with_bus(bus.clone())
+    // Announced beside this machine's own, behind the same switch and the same log. Empty is the
+    // ordinary case and says nothing. `as _` widens each `Promoted` to the trait `Tools` keeps
+    // them by; what is dropped with the type — which tools a server did not announce, and why —
+    // is the window's to show and belongs to whatever holds the servers themselves.
+    .with_mcp(promoted.into_iter().map(|server| server as _).collect());
     if let Some(transfers) = &transfers {
         tools = tools.with_transfer(transfers);
     }
-    // Built once and named from that same list. `announced()` answers from what this call
-    // records, so it has to run before `gui::run` takes the `Tools` or the window would have
-    // nothing to report.
+    // Built once, and the list below is named from it.
     let capabilities = tools.clone().into_capabilities();
     // Which ones actually made it, said out loud. `input` and `screen_capture` are absent on a
     // machine with no display server, and this line plus the one `zyris-tools` logs when it is
@@ -190,8 +224,27 @@ fn main() -> anyhow::Result<()> {
         "tools are announced: what ran is written here, and a relative path starts at the root"
     );
 
+    // **The one handle on what this node announces**, and the reason it is built here rather than
+    // inside the connector: the connector is not the only thing that changes it. A server a person
+    // enables, one they turn off, and one whose process falls over all reach the same list, and
+    // `run` builds a fresh node after recovering from a dead token — so a list captured at the
+    // first build would have the second node announcing whatever was true at startup.
+    let live = zyris_runtime::LiveCapabilities::new(capabilities);
+
+    // What keeps that list honest about the MCP servers: a window's switch on one side, and a
+    // process that died on the other. Built in **both** modes and watched in both — a headless
+    // node is exactly the one nobody is looking at, and a capability announced over a process
+    // that is gone is worse there than anywhere.
+    let servers = zyris_tools::Servers::new(&tools, live.clone(), bus.clone(), started);
+    runtime.spawn(servers.clone().watch());
+
+    // The window's handle on the same list, taken before the connector takes its own. What the
+    // Tools screen lists is read through this, so it cannot go on advertising a capability the
+    // node has withdrawn.
+    let window_live = live.clone();
+
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
-        .with_capabilities(capabilities);
+        .with_capabilities(live);
 
     // The window's handle on file transfer, taken before the hook below consumes the value.
     //
@@ -233,12 +286,19 @@ fn main() -> anyhow::Result<()> {
             runtime.handle().clone(),
             connector,
             tools,
+            // What that `Tools` describes when the window asks. The same handle the supervisor
+            // and the connector hold, so the screen and the node cannot disagree.
+            window_live,
             // The other end of the slot `peer_confirmer` fills. The window reads and answers
             // through this handle; it is not a copy.
             pending,
             // What the Tools screen lists the inbox from, and the only reason the window has any
             // handle on transfer at all.
             window_transfers,
+            // The MCP servers, so the window can list them and move their switches. A clone of
+            // the same supervisor the watcher above is running, not a second one: two would be
+            // two opinions about which server died.
+            servers,
             instance,
             mode,
             // Not the URL, only whether there was one: the window needs this to decide whether
@@ -630,6 +690,23 @@ mod tests {
             instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws")),
             instance_name(Some("ws://127.0.0.1:9090/zyris/v1/ws"))
         );
+    }
+
+    #[test]
+    fn each_instance_reads_its_own_mcp_server_list() {
+        // The list of MCP servers is per-instance like everything else this run owns, and for the
+        // same reason: a `--server` run must not start the production machine's servers and
+        // announce them to a development server, nor the other way round. `Config::path` takes a
+        // directory rather than finding one so that this is decided once, where the instance is.
+        let production = zyris_mcp::Config::path(&data_dir(&instance_name(None)));
+        let development = zyris_mcp::Config::path(&data_dir(&instance_name(Some(
+            "ws://127.0.0.1:8080/zyris/v1/ws",
+        ))));
+
+        assert_ne!(production, development);
+        // And it lands beside the rest of that instance's state rather than beside the binary or
+        // in whatever directory Zyris happened to be started from.
+        assert_eq!(production.parent().unwrap(), data_dir("zyris"));
     }
 
     #[test]

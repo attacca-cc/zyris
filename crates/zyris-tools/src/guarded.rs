@@ -30,7 +30,44 @@ pub struct Guarded<C> {
     /// without one still refuses, still runs and still writes every line to disk. The crate's
     /// own tests use that shape.
     bus: Option<EventBus>,
+    /// Whether [`summarize`] runs at all, decided once from the capability's name.
+    ///
+    /// See [`MCP_CAPABILITY_PREFIX`]. False for a promoted MCP server, whose arguments this
+    /// workspace has never seen and must not write down.
+    summarize_params: bool,
 }
+
+/// The prefix `zyris-mcp` gives every capability it promotes from a local MCP server.
+///
+/// **A capability whose name starts with this writes no argument detail into the audit log at
+/// all**, and that is the whole reason this constant is here rather than in the crate that
+/// produces it.
+///
+/// [`LOGGED_FIELDS`] is an allowlist whose entries were each chosen by reasoning about what a
+/// parameter *means* in one of this machine's own five capabilities — `path` is a file this node
+/// resolved, `command` is a shell command line, `pty` is a terminal. **None of that reasoning
+/// transfers to a server somebody installed.** A promoted tool's arguments are arbitrary JSON
+/// written by a third party, and a field spelled `path` or `command` in one of them is a
+/// coincidence of spelling and not the same fact — it could as easily be a password. The
+/// allowlist matches on spelling alone, so without this rule those two names would be written
+/// down for every MCP server on the machine.
+///
+/// Widening the allowlist to *catch* MCP arguments would be the same mistake pointing the other
+/// way, and is ruled out for the same reason. The tool call is still recorded — when, which
+/// capability, which tool, and whether the switch let it through — and that is the record. What
+/// is not recorded is what was asked, and anything telling a person about this log has to say so
+/// rather than let them assume otherwise.
+///
+/// Matched on the name rather than set by whoever builds the `Guarded`, so it cannot be forgotten
+/// at a call site added later.
+///
+/// **`zyris_mcp::CAPABILITY_PREFIX` itself, not a copy of it.** Two strings that have to agree,
+/// in two crates, with nothing that fails when they stop agreeing, is the shape this workspace
+/// keeps writing down as the quiet kind of bug: the day somebody renamed the prefix on one side,
+/// every promoted tool's arguments would start being written into the audit file and no test
+/// anywhere would go red. This alias is a second name for one value, and `announce.rs` names
+/// `zyris-mcp` for it.
+pub const MCP_CAPABILITY_PREFIX: &str = zyris_mcp::CAPABILITY_PREFIX;
 
 impl<C: ServeCapability> Guarded<C> {
     pub fn new(inner: C, gate: Gate, log: AuditLog) -> Guarded<C> {
@@ -38,7 +75,8 @@ impl<C: ServeCapability> Guarded<C> {
         // in the capability on each call — about a millisecond for `file_io` — so the name is
         // taken once here rather than on the request path.
         let capability = inner.descriptor().name;
-        Guarded { inner, capability, gate, log, bus: None }
+        let summarize_params = !capability.starts_with(MCP_CAPABILITY_PREFIX);
+        Guarded { inner, capability, gate, log, bus: None, summarize_params }
     }
 
     /// Also tell everything watching, as each call happens.
@@ -87,10 +125,33 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
         self.inner.descriptor()
     }
 
+    /// **A line is written when the call finishes, one way or another — and only then.**
+    ///
+    /// A refusal is written before the capability is reached, and an answer or a failure is
+    /// written when `inner.dispatch` returns. A call that never gets to return therefore leaves
+    /// nothing: `zyris-core` holds an `AbortHandle` per call in flight and aborts the task when
+    /// the peer sends a cancel, when the connection goes down, and when the capability is revoked
+    /// (`connection.rs` in that crate, measured at rev 274e9af). An aborted future does not run
+    /// its continuation, so the `record` below never happens.
+    ///
+    /// That is a real hole and it is deliberately left open here, because closing it honestly is
+    /// not a change to this function. It would take a second kind of line — one at the start and
+    /// one at the end — or a drop guard writing a fourth [`Outcome`] for "began and did not
+    /// finish", and either one changes the shape of the file, the audit tail on the Tools screen,
+    /// and every sentence anybody has written about what a line means. It is also not new and not
+    /// about MCP: `terminal.exec` with no `timeout_ms` has had exactly this property since it was
+    /// announced, and [`crate::gate`] names it.
+    ///
+    /// What is **not** left open is the copy. `ui/src/Mcp.tsx` and `README.md` both describe this
+    /// log, and both now say a line is written when a call finishes and that a call cut off
+    /// before it finished has none. See
+    /// [`a_call_that_never_finishes_leaves_no_line`](tests::a_call_that_never_finishes_leaves_no_line).
     async fn dispatch(&self, call: IncomingCall) -> zyris::Result<Outgoing> {
         // Both of these are read before the call is handed on, because `dispatch` consumes it.
         let tool = call.tool.clone();
-        let detail = summarize(&call);
+        // An empty detail rather than a summary for a promoted MCP capability — see
+        // [`MCP_CAPABILITY_PREFIX`]. The line itself is still written.
+        let detail = if self.summarize_params { summarize(&call) } else { String::new() };
 
         if let Err(refusal) = self.gate.check() {
             self.record(&tool, detail, Outcome::Refused);
@@ -164,6 +225,11 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
 /// trait's parameter list with no `rename_all`, so they stay snake_case. `exec` carries its
 /// command line in `command` **or** `argv`, never both, and `pty` identifies the target of every
 /// `read`/`screen`/`write`/`resize`/`close`.
+///
+/// **None of this reasoning reaches a promoted MCP capability, and it must not be made to.** Every
+/// entry below is a judgement about what a name *means* in one of this machine's own five
+/// capabilities, and a server somebody installed shares none of those meanings — only, sometimes,
+/// the spelling. See [`MCP_CAPABILITY_PREFIX`], where that is settled.
 ///
 /// The array's order is the line's order, so `path=` stays first.
 const LOGGED_FIELDS: &[&str] = &[
@@ -385,6 +451,115 @@ mod tests {
         let log = crate::AuditLog::new(dir.join("audit.jsonl"));
         let cap = Guarded::new(FileTransferServer(FakeTransfer), gate.clone(), log.clone());
         (gate, log, cap)
+    }
+
+    /// A capability built at runtime, under whatever name it is given, with one tool that takes
+    /// anything and always succeeds.
+    ///
+    /// This is the shape `zyris-mcp`'s `Promoted` has: not produced by the capability macro, with
+    /// a name chosen from a configuration file, and with a request schema that says nothing.
+    /// Written here rather than depended on, because `zyris-tools` does not name `zyris-mcp` yet
+    /// and what is under test is this file's rule and not that crate's.
+    struct RuntimeCapability(&'static str);
+
+    #[zyris::async_trait]
+    impl ServeCapability for RuntimeCapability {
+        fn descriptor(&self) -> CapabilityDescriptor {
+            CapabilityDescriptor {
+                name: self.0.to_string(),
+                version: 1,
+                tools: vec![zyris::ToolDescriptor {
+                    name: "search".to_string(),
+                    description: "Somebody else's tool.".to_string(),
+                    transfer: zyris::Transfer::Unary,
+                    request_schema: serde_json::json!({}),
+                    response_schema: None,
+                    item_schema: None,
+                    call_limit: None,
+                }],
+            }
+        }
+
+        async fn dispatch(&self, _call: IncomingCall) -> zyris::Result<Outgoing> {
+            zyris::encode_response(&serde_json::json!({ "ok": true }))
+        }
+    }
+
+    fn guarded_runtime(
+        dir: &std::path::Path,
+        name: &'static str,
+    ) -> (crate::AuditLog, Guarded<RuntimeCapability>) {
+        let log = crate::AuditLog::new(dir.join("audit.jsonl"));
+        let cap = Guarded::new(RuntimeCapability(name), crate::Gate::running(), log.clone());
+        (log, cap)
+    }
+
+    /// Arguments belonging to somebody else's tool, spelled the way this file's allowlist
+    /// happens to spell four of its own.
+    fn foreign_arguments() -> serde_json::Value {
+        serde_json::json!({
+            "path": "/etc/shadow",
+            "command": "psql -c 'select * from customers'",
+            "name": "quarterly numbers",
+            "recursive": true,
+            "passphrase": "hunter2-do-not-log-me",
+            "query": "everything about alice",
+        })
+    }
+
+    #[tokio::test]
+    async fn a_promoted_capability_writes_no_arguments_into_the_log() {
+        // The MCP decision, by test rather than by assumption. A promoted tool's arguments are
+        // arbitrary JSON from a third party; four of the names below collide with the allowlist
+        // by spelling alone, and none of them means what the allowlist's reasoning assumed.
+        let dir = tempfile::tempdir().unwrap();
+        let (log, cap) = guarded_runtime(dir.path(), "mcp_desk-notes");
+
+        cap.dispatch(call("search", foreign_arguments()))
+            .await
+            .expect("the call runs");
+
+        let entry = &log.recent(1).unwrap()[0];
+        assert_eq!(
+            entry.outcome,
+            crate::Outcome::Allowed,
+            "the call has to have actually run, or this test proves nothing"
+        );
+        // The line is still written, and it still says what happened. What is missing is what was
+        // asked, and anything telling a person about this log has to say so.
+        assert_eq!(entry.capability, "mcp_desk-notes");
+        assert_eq!(entry.tool, "search");
+        assert_eq!(
+            entry.detail, "",
+            "a promoted tool's arguments reached the audit log: {}",
+            entry.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn the_allowlist_matches_on_spelling_alone_which_is_why_promoted_tools_are_exempt() {
+        // The hazard the rule above exists to close, pinned so it cannot be rediscovered by
+        // accident. The same arguments, under a name outside the promoted space: `summarize`
+        // walks names and knows nothing about meaning, so four of them are written down.
+        let dir = tempfile::tempdir().unwrap();
+        let (log, cap) = guarded_runtime(dir.path(), "notes");
+
+        cap.dispatch(call("search", foreign_arguments()))
+            .await
+            .expect("the call runs");
+
+        let detail = &log.recent(1).unwrap()[0].detail;
+        for spelled in ["path=/etc/shadow", "name=quarterly numbers", "recursive=true"] {
+            assert!(
+                detail.contains(spelled),
+                "expected the allowlist to write `{spelled}`: {detail}"
+            );
+        }
+        assert!(detail.contains("command=psql"), "{detail}");
+        // The default is still "log nothing": a field nobody put on the list is not written down,
+        // whatever it is called and whichever capability it arrived at.
+        assert!(!detail.contains("hunter2"), "an unknown field was written down: {detail}");
+        assert!(!detail.contains("alice"), "an unknown field was written down: {detail}");
     }
 
     #[test]
@@ -775,5 +950,78 @@ mod tests {
         assert_eq!(entry.capability, "file_transfer");
         assert_eq!(entry.tool, "inbox_list");
         assert_eq!(entry.detail, "");
+    }
+
+    /// A capability that starts and does not come back, so a test can interfere with a call while
+    /// it is genuinely running rather than hoping it is.
+    struct NeverAnswers {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[zyris::async_trait]
+    impl ServeCapability for NeverAnswers {
+        fn descriptor(&self) -> CapabilityDescriptor {
+            CapabilityDescriptor {
+                name: "mcp_desk-notes".to_string(),
+                version: 1,
+                tools: vec![zyris::ToolDescriptor {
+                    name: "search".to_string(),
+                    description: "Somebody else's tool, and it does not answer.".to_string(),
+                    transfer: zyris::Transfer::Unary,
+                    request_schema: serde_json::json!({}),
+                    response_schema: None,
+                    item_schema: None,
+                    call_limit: None,
+                }],
+            }
+        }
+
+        async fn dispatch(&self, _call: IncomingCall) -> zyris::Result<Outgoing> {
+            self.started.notify_waiters();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_that_never_finishes_leaves_no_line() {
+        // **What the log does not record, pinned so the copy cannot drift back into claiming it
+        // does.** A line is written when a call finishes; a call that is cut off before it
+        // finishes writes nothing at all, because the task carrying it is aborted and an aborted
+        // future does not run its continuation. `zyris-core` does exactly that on a peer's cancel,
+        // on the connection going down, and on the capability being revoked — so this is the
+        // ordinary way an MCP call ends when an agent gives up on a slow server, not an exotic
+        // one.
+        //
+        // Asserted against a promoted name because that is where the sentence lives, but it is
+        // `Guarded`'s behaviour and `terminal.exec` with no `timeout_ms` has it too.
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::AuditLog::new(dir.path().join("audit.jsonl"));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cap = Arc::new(Guarded::new(
+            NeverAnswers { started: started.clone() },
+            crate::Gate::running(),
+            log.clone(),
+        ));
+
+        let waiting = started.notified();
+        let calling = {
+            let cap = cap.clone();
+            tokio::spawn(async move { cap.dispatch(call("search", serde_json::json!({}))).await })
+        };
+        // Not a sleep: the call has to have reached the capability, or this would be asserting
+        // about a call that never started.
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the call reaches the capability");
+
+        calling.abort();
+        let ended = calling.await;
+        assert!(ended.is_err_and(|why| why.is_cancelled()), "the call was cut off mid-flight");
+
+        assert!(
+            log.recent(10).unwrap().is_empty(),
+            "a call cut off mid-flight wrote a line; the copy in Mcp.tsx and README.md says it \
+             does not, and one of the two is now wrong"
+        );
     }
 }

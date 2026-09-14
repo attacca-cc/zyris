@@ -15,7 +15,27 @@ export type CoreEvent =
   | { kind: "setupFailed"; reason: string }
   | { kind: "paused"; paused: boolean }
   | ({ kind: "needsPeerApproval" } & PeerQuestion)
-  | ({ kind: "toolCall" } & ToolCall);
+  | ({ kind: "toolCall" } & ToolCall)
+  | ({ kind: "mcpServer" } & McpServerEvent);
+
+// What happened to one local MCP server. Mirrors `McpServerChange` in
+// crates/zyris-runtime/src/event.rs — internally tagged on `change`, so this switches on one
+// field and each variant's own detail travels beside it.
+//
+// **`disabled` and `died` are two answers and not one.** An agent that finds the capability gone
+// cannot tell them apart and does not need to; the person at the window can, and one of the two
+// is a process to restart. The core keeps them apart all the way from `ServerState`, and the MCP
+// screen is the last place that can throw the distinction away.
+export type McpServerChange =
+  | { change: "announced"; capability: string; tools: number }
+  | { change: "disabled" }
+  | { change: "died" }
+  | { change: "failed"; reason: string };
+
+export type McpServerEvent = {
+  server: string;
+  change: McpServerChange;
+};
 
 // A machine this computer is about to send a file to and has never sent to before, waiting for a
 // person to say yes or no. `id` names the question an answer has to name back — the core refuses
@@ -48,10 +68,22 @@ export type ToolCall = {
 // reducer, which stamps it as it arrives. See the `toolCall` arm for what that time means.
 export type ToolCallRow = ToolCall & { at: string };
 
-// The three screens a person can move between once this machine is enrolled. `starting` and
-// `onboarding` are not among them: they are where the core puts the window, not where anyone
-// chooses to be.
-export type Tab = "status" | "tools" | "settings";
+// The screens a person can move between once this machine is enrolled, and what the sidebar calls
+// each of them. `starting` and `onboarding` are not among them: they are where the core puts the
+// window, not where anyone chooses to be.
+//
+// **The list is the definition and `Tab` is derived from it**, rather than the two being written
+// out separately and kept in step by hand. A screen that exists and is not in this list is a
+// screen with nothing to navigate to it — reachable only by an event, which for a tab is never —
+// and that failure is silent in a way nothing here would catch.
+export const TABS = [
+  { id: "status", label: "Status" },
+  { id: "tools", label: "Tools" },
+  { id: "mcp", label: "MCP" },
+  { id: "settings", label: "Settings" },
+] as const;
+
+export type Tab = (typeof TABS)[number]["id"];
 
 export type Screen = "starting" | "onboarding" | Tab;
 
@@ -68,7 +100,8 @@ export type Action =
   | CoreEvent
   | { kind: "navigate"; to: Tab }
   | { kind: "peerQuestion"; question: PeerQuestion }
-  | { kind: "peerQuestionEnded"; id: number };
+  | { kind: "peerQuestionEnded"; id: number }
+  | { kind: "resync" };
 
 // How many calls the window keeps and how many it asks the audit file for. This is a tail, not a
 // record: the whole history is the file on disk, and an unbounded list would grow for as long as
@@ -99,6 +132,26 @@ export type State = {
   // switch, reading the audit tail — and it has to hand that screen back untouched when it is
   // answered, which a screen change cannot do. App.tsx renders it over whatever is showing.
   question: PeerQuestion | null;
+  // The last thing the core said about a local MCP server, or null before it has said anything.
+  //
+  // **A trigger rather than a record.** The MCP screen re-reads the whole list through
+  // `mcp_servers` whenever this changes, instead of patching the row the event names: the
+  // supervisor is the authority on what is announced, and a screen that applied events to its own
+  // copy would be a second opinion that drifts the moment one is dropped. What the event is for is
+  // knowing that *something* moved — a server dying is the case that matters, because nobody
+  // clicked anything and the row would otherwise go on saying "running" until the window was
+  // reopened.
+  mcpChange: McpServerEvent | null;
+  // How many times this window has been told it fell behind. A counter and nothing else: what it
+  // is for is being a value that changes, so an effect watching it runs again.
+  //
+  // **The half `mcpChange` cannot cover.** A server change is published transiently, so a window
+  // that fell behind on the event bus has no way to learn which server moved — the core keeps no
+  // last one to hand back. Without this, such a window would go on showing a dead MCP server as
+  // running, and the Tools screen would go on listing a capability this computer has withdrawn,
+  // until somebody navigated away and back. See `RESYNC_EVENT_NAME` in
+  // crates/zyris-app/src/bridge.rs.
+  resyncs: number;
 };
 
 export const initialState: State = {
@@ -111,6 +164,8 @@ export const initialState: State = {
   paused: false,
   toolCalls: [],
   question: null,
+  mcpChange: null,
+  resyncs: 0,
 };
 
 // Where a core event that means "past enrolment" leaves the window.
@@ -233,6 +288,20 @@ export function reduce(state: State, action: Action): State {
           ...state.toolCalls,
         ].slice(0, MAX_TOOL_CALLS),
       };
+    case "resync":
+      // The one arm that is deliberately **not** idempotent, and it is not reachable by the route
+      // that makes idempotence necessary: this is never in the bus's one-slot catch-up value —
+      // it is not a core event at all — so it arrives once per time the window actually fell
+      // behind. Being told twice means falling behind twice, and each of those is a reason to
+      // read again.
+      return { ...state, resyncs: state.resyncs + 1 };
+    case "mcpServer":
+      // Replaces rather than appends, so applying the same event twice leaves the same value —
+      // the rule every arm here follows. Two changes that are equal in content do produce two
+      // different objects, and that is deliberate: the MCP screen watches this for a change of
+      // identity and re-reads the list, so a second death notice for the same server still gets
+      // a fresh read rather than being swallowed as a repeat.
+      return { ...state, mcpChange: { server: action.server, change: action.change } };
     default:
       return state;
   }
@@ -245,6 +314,18 @@ const EVENT_NAME = "core-event";
 
 export function subscribe(onEvent: (event: CoreEvent) => void): Promise<() => void> {
   return listen<CoreEvent>(EVENT_NAME, (message) => onEvent(message.payload));
+}
+
+// "You fell behind; ask your questions again." Has to match RESYNC_EVENT_NAME in
+// crates/zyris-app/src/bridge.rs exactly; nothing checks that at build time.
+//
+// A second subscription rather than a `CoreEvent`, because it is not one: every variant of that
+// union is something the core did, and this is something this window did. The Rust side says the
+// same thing from its own end.
+const RESYNC_EVENT_NAME = "core-resync";
+
+export function subscribeResync(onResync: () => void): Promise<() => void> {
+  return listen(RESYNC_EVENT_NAME, () => onResync());
 }
 
 // What the core published before this window's listener was registered — see the module comment

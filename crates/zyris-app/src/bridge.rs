@@ -1,9 +1,13 @@
 //! The one place a core event becomes a Tauri event.
 //!
-//! Everything the window knows arrives through this channel. Keeping it to one event name means
+//! Everything the core says arrives on one channel. Keeping [`CoreEvent`] to one event name means
 //! the UI has a single subscription and a single switch, and it keeps core state out of Tauri
 //! commands — the window asks for nothing but what it missed, and it asks for that exactly once,
 //! right after it starts listening.
+//!
+//! There is a second name, [`RESYNC_EVENT_NAME`], and it carries nothing. It is not something the
+//! core did; it is this layer saying "you fell behind, ask your questions again", which is the one
+//! piece of news a `CoreEvent` cannot be. See [`forward`]'s lag arm.
 //!
 //! `app.emit` only reaches JS listeners already registered by the time it is called, and
 //! `EventBus`'s broadcast channel never replays a send to a subscriber that shows up late. The
@@ -19,13 +23,31 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
-use zyris_runtime::{CoreEvent, EventBus};
-use zyris_tools::{Announcement, AuditLog, Entry, Gate, InboxEntry, Tools, Transfers};
+use zyris_runtime::{CoreEvent, EventBus, LiveCapabilities};
+use zyris_tools::{
+    Announcement, AuditLog, Entry, Gate, InboxEntry, ServerList, ServerView, Servers, Tools,
+    Transfers,
+};
 
 use crate::confirm::{Pending, Question};
 
 /// The single channel. The payload is `CoreEvent`'s tagged JSON.
 pub const EVENT_NAME: &str = "core-event";
+
+/// "Ask everything again." No payload, because there is nothing to say beyond that.
+///
+/// **Not a [`CoreEvent`], deliberately.** Every variant of that enum is something the core did,
+/// and falling behind is something the *window* did — inventing a core event to describe it would
+/// put a fiction in the one vocabulary the tray, the log and the window all read. It is also not
+/// something a headless run can experience: there is no webview to fall behind.
+///
+/// What it is for: the two screens that read their contents through a command and re-read when an
+/// event tells them something moved. [`forward`]'s lag arm can name the catch-up value, the switch
+/// and a waiting peer question, because each of those is held somewhere it can read. It cannot
+/// name the MCP server change it dropped — those are published transiently and nothing keeps the
+/// last one — so a window that fell behind would go on showing a dead server as running, and the
+/// Tools screen would go on advertising its capability, until somebody clicked away and back.
+pub const RESYNC_EVENT_NAME: &str = "core-resync";
 
 /// The one place a waiting question becomes an event.
 ///
@@ -71,25 +93,13 @@ pub fn forward(
                 // over a live link, with no command to ask again.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "the window fell behind on core events; resyncing");
-                    if let Some(event) = bus.latest() {
-                        if let Err(error) = app.emit(EVENT_NAME, &event) {
-                            tracing::warn!(%error, "could not resend the catch-up event");
-                        }
-                    }
-                    let paused = CoreEvent::Paused { paused: gate.is_paused() };
-                    if let Err(error) = app.emit(EVENT_NAME, &paused) {
-                        tracing::warn!(%error, "could not resend the switch");
-                    }
-                    // And the question, for the same reason and read the same way: off the thing
-                    // that owns it rather than off the bus, because a transient publish leaves
-                    // nothing behind. Losing this one costs more than losing a tool call — an
-                    // agent's `send_to` is blocked on it, and it answers itself with a refusal
-                    // three quarters of a minute later if nobody is shown it. Absent is the
-                    // ordinary case and says nothing: `question()` is `None` whenever there is
-                    // no question, which is almost always.
-                    if let Some(question) = pending.question() {
-                        if let Err(error) = app.emit(EVENT_NAME, peer_question_event(&question)) {
-                            tracing::warn!(%error, "could not resend the waiting peer question");
+                    for message in after_falling_behind(&bus, &gate, &pending) {
+                        let sent = match &message {
+                            Resend::Core(event) => app.emit(EVENT_NAME, event),
+                            Resend::AskAgain => app.emit(RESYNC_EVENT_NAME, ()),
+                        };
+                        if let Err(error) = sent {
+                            tracing::warn!(%error, ?message, "could not resync the window");
                         }
                     }
                 }
@@ -97,6 +107,56 @@ pub fn forward(
             }
         }
     });
+}
+
+/// One thing a window that fell behind is told.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// A core event, named again on [`EVENT_NAME`].
+    Core(CoreEvent),
+    /// [`RESYNC_EVENT_NAME`]: everything that could not be named.
+    AskAgain,
+}
+
+/// Everything to tell a window that missed a stretch of the bus.
+///
+/// **A list rather than four `emit` calls in a row, because the list is the claim.** What a
+/// window that fell behind gets back is the whole of what stops it rendering something untrue,
+/// and the one way to be wrong here is to leave something out — which is invisible in a sequence
+/// of statements and plain in a value. `forward` emits whatever comes back; the tests below say
+/// what has to be in it.
+///
+/// Each item is read off the thing that owns it rather than off the bus, because the bus is what
+/// was just lost: the catch-up value is the only event it still holds, the switch is the gate's,
+/// and a waiting peer question is [`Pending`]'s. `reduce` on the other side is idempotent for
+/// every arm reachable this way, so re-sending something the window already had costs nothing.
+///
+/// [`Resend::AskAgain`] is last and is **not** conditional. It is for everything with no owner to
+/// read: an MCP server change is published transiently and nothing keeps the last one, so there
+/// is no way to say which server moved — only that the window's idea of them is worth nothing.
+/// Sending it when nothing in fact changed costs two commands being re-read; not sending it when
+/// something did leaves a dead server listed as running, and a capability advertised on the Tools
+/// screen that this node has withdrawn, until somebody navigates away and back.
+pub fn after_falling_behind(bus: &EventBus, gate: &Gate, pending: &Pending) -> Vec<Resend> {
+    let mut messages = Vec::new();
+    // Lagged drops a contiguous range of whatever was in the ring, so the window did not merely
+    // miss some tool calls — it may have missed the state change that decides which screen it
+    // renders. Without this a lost `Connected` leaves the window claiming "Not connected" over a
+    // live link, with no command to ask again.
+    if let Some(event) = bus.latest() {
+        messages.push(Resend::Core(event));
+    }
+    // Off the gate, not the bus: `Paused` is published transiently and is never in that slot.
+    messages.push(Resend::Core(CoreEvent::Paused { paused: gate.is_paused() }));
+    // Losing this one costs more than losing a tool call — an agent's `send_to` is blocked on it,
+    // and it answers itself with a refusal three quarters of a minute later if nobody is shown
+    // it. Absent is the ordinary case and says nothing: `question()` is `None` whenever there is
+    // no question, which is almost always.
+    if let Some(question) = pending.question() {
+        messages.push(Resend::Core(peer_question_event(&question)));
+    }
+    messages.push(Resend::AskAgain);
+    messages
 }
 
 /// What the core last published, for a window whose listener came up too late to see it live.
@@ -198,16 +258,27 @@ pub fn answer_peer(id: u64, approved: bool, pending: State<Pending>) -> bool {
     reached
 }
 
-/// What this machine announces, and the two paths that make the rest of the screen readable.
+/// What this machine announces **right now**, and the two paths that make the rest of the screen
+/// readable.
 ///
 /// A command rather than an event, and it breaks no rule about core state living behind one: the
 /// capabilities were built in `main` and handed to the connector long before any window existed,
 /// `--headless` announces exactly the same ones without ever calling this, and nothing the core
-/// does depends on the answer. It only changes when the app restarts, so a window that asks once
-/// when the Tools screen opens is asking at the only moment that matters.
+/// does depends on the answer.
+///
+/// **Read through [`LiveCapabilities`], which is the list every node is built from.** This used to
+/// say the answer only changed when the app restarted, so asking once on the way into the Tools
+/// screen was asking at the only moment that mattered. That stopped being true the moment a
+/// promoted MCP server could be turned off, turned on, or die while this machine was connected:
+/// the screen went on telling a person that agents could reach a capability this node had
+/// withdrawn. There is now no snapshot to be stale — see [`Tools::announcement`] — and the window
+/// asks again whenever the core says a server moved.
 #[tauri::command]
-pub fn announced_tools(tools: State<Tools>) -> Announcement {
-    tools.announcement()
+pub async fn announced_tools(
+    tools: State<'_, Tools>,
+    live: State<'_, LiveCapabilities>,
+) -> Result<Announcement, String> {
+    Ok(tools.announcement(&live).await)
 }
 
 /// The durable tail, newest first. Read from the audit file rather than from the bus, so the
@@ -273,6 +344,58 @@ pub async fn inbox(
 #[tauri::command]
 pub fn peer_fingerprint(transfers: State<'_, Option<Transfers>>) -> Option<String> {
     transfers.inner().as_ref().map(|transfers| transfers.peering().fingerprint())
+}
+
+/// Every configured MCP server and what it is doing right now.
+///
+/// **The catch-up half of [`CoreEvent::McpServer`]**, exactly as [`is_paused`] is to `Paused`: the
+/// event reaches a window that was already listening, and this reaches one that was not. It is a
+/// command rather than state on the bus for the reason the module doc gives — a server change is
+/// published transiently, so the bus's one-slot catch-up value never holds one.
+///
+/// It is also the only place the two withdrawals stay apart. An agent on the other end cannot tell
+/// a server somebody turned off from one whose process fell over, and does not need to; the person
+/// reading this can and does, through `ServerState`.
+///
+/// Read straight through the supervisor, which is the same one the core watches with — so what
+/// this lists is what the node announces, not a second reader's idea of it.
+///
+/// **Three answers, and the window says something different for each** — the same rule [`inbox`]
+/// follows. `ServerList::problem` set is a server list that could not be read; clear, with no
+/// servers, is a machine nobody has configured. Assembled by the supervisor rather than here, so
+/// the one thing that knows whether the file was readable is the one thing that says so.
+///
+/// `Result` for the shape of the boundary rather than for anything this can do: reading the list
+/// cannot fail, and the window still has to handle a rejection, because an `invoke` that never
+/// reaches here fails on the TypeScript side whatever this signature says.
+#[tauri::command]
+pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<ServerList, String> {
+    Ok(servers.view().await)
+}
+
+/// Turn one MCP server on or off, and answer with what that left it as.
+///
+/// It returns the server's state afterwards rather than `()`, for the same reason
+/// [`apply_autostart`] does: a screen that renders its own request is a screen that can be wrong.
+/// Turning one on is the case that proves it — the command may not be there any more, and the
+/// answer is a `Failed` carrying the reason rather than the `Running` the click asked for.
+///
+/// So a server that would not start comes back here as `Ok`, not `Err`. `Err` is a request that
+/// could not be acted on at all, which is one thing: a name the server list does not have.
+///
+/// **Nothing is written to the server list on disk, and the window says so.** This switch lasts
+/// as long as this run; the file decides what the next one starts. `zyris_tools::Servers::
+/// set_enabled` records the three things that decided that, the first of which is that the file is
+/// read once at startup — so a write-back would put a stale snapshot over whatever a person has
+/// edited since. `ui/src/Mcp.tsx` is where it is said out loud, which is the half that makes it a
+/// decision rather than a screen that forgets.
+#[tauri::command]
+pub async fn set_mcp_server_enabled(
+    name: String,
+    enabled: bool,
+    servers: State<'_, Servers>,
+) -> Result<ServerView, String> {
+    servers.set_enabled(&name, enabled).await
 }
 
 /// Everything the Settings screen needs to draw the autostart switch, read off the machine in
@@ -417,6 +540,77 @@ mod tests {
         // the Rust half of that guard, and the comment beside the TypeScript literal is the
         // other half.
         assert_eq!(EVENT_NAME, "core-event");
+    }
+
+    #[test]
+    fn the_resync_name_is_what_ui_src_state_ts_hardcodes_and_is_not_the_other_one() {
+        // Same agreement, second channel. The inequality is the half worth asserting: emitted
+        // under the event name, an empty payload would reach the reducer as an action with no
+        // `kind` and be swallowed by its `default` arm — a resync that silently did nothing,
+        // which is exactly the failure this channel exists to fix.
+        assert_eq!(RESYNC_EVENT_NAME, "core-resync");
+        assert_ne!(RESYNC_EVENT_NAME, EVENT_NAME);
+    }
+
+    #[test]
+    fn a_window_that_fell_behind_is_asked_to_read_again() {
+        // **The item with no owner to read it off, and the reason this channel exists.** The
+        // other three are recoverable because something holds them: the bus keeps one catch-up
+        // value, the gate holds the switch, `Pending` holds a waiting question. An MCP server
+        // change is published transiently and nothing keeps the last one, so a window that
+        // missed one cannot be told which server moved — only that its idea of them is worth
+        // nothing. Leave this out and such a window shows a dead server as running, and lists a
+        // capability this node has withdrawn, until somebody navigates away and back.
+        let bus = EventBus::new(8);
+        let gate = Gate::running();
+        let pending = Pending::new();
+
+        let messages = after_falling_behind(&bus, &gate, &pending);
+
+        assert!(
+            messages.contains(&Resend::AskAgain),
+            "a window that fell behind was told nothing about what could not be named: \
+             {messages:?}"
+        );
+        // Last, so the screens re-read after they have been given everything that could be
+        // named rather than in the middle of it.
+        assert_eq!(messages.last(), Some(&Resend::AskAgain));
+    }
+
+    #[test]
+    fn a_window_that_fell_behind_is_told_the_switch_and_whatever_the_bus_still_holds() {
+        // The rest of the list, asserted here rather than left to `forward`, which needs a
+        // `tauri::AppHandle` and so cannot be reached from a unit test at all. Every one of these
+        // is something a window would otherwise render untruthfully: a lost `Connected` reads as
+        // "Not connected" over a live link, and a lost `Paused` reads as a machine that is
+        // running when it is not.
+        let bus = EventBus::new(8);
+        bus.publish(CoreEvent::Connected {
+            node_id: "n-1".to_string(),
+            node_name: "this-machine".to_string(),
+        });
+        let gate = Gate::running();
+        gate.set_paused(true);
+
+        let messages = after_falling_behind(&bus, &gate, &Pending::new());
+
+        assert!(
+            messages.iter().any(|m| matches!(m, Resend::Core(CoreEvent::Connected { .. }))),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&Resend::Core(CoreEvent::Paused { paused: true })),
+            "the switch is read off the gate, not the bus, because `Paused` is transient: \
+             {messages:?}"
+        );
+        // And nothing about a question, because there is not one. A window handed an absence
+        // would have nothing to do with it; the reducer has no action that carries one.
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Resend::Core(CoreEvent::NeedsPeerApproval { .. }))),
+            "{messages:?}"
+        );
     }
 
     #[test]

@@ -17,6 +17,17 @@ directories = "6.0.0"
 fs4 = "1.1.0"
 keyring = "4.2.0"
 open = "5.4.4"
+# `default-features = false` on purpose. `rmcp`'s defaults are `base64`, `macros` and `server`,
+# and this workspace is only ever an MCP *client*: it spawns somebody else's server and asks what
+# it has. Taking the defaults would compile the server half, its `schemars` schema generation and
+# a proc-macro crate, for code nothing here calls.
+#
+# A plain caret, unlike the six protocol crates below: `rmcp` is not part of that pinned rev and
+# has no path dependency anyone can reach around the registry with.
+rmcp = { version = "3.3.0", default-features = false, features = [
+    "client",
+    "transport-child-process",
+] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tauri = { version = "2.11.5", features = ["tray-icon"] }

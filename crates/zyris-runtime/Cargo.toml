@@ -17,5 +17,9 @@ tracing = { workspace = true }
 zyris = { workspace = true }
 
 [dev-dependencies]
+# `testing` gives `zyris::testing::duplex`, a pair of connected nodes with no socket in it.
+# `announcement.rs`'s assertions are all about what the *peer* can see and call, and there is no
+# way to ask that without a peer.
+zyris = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

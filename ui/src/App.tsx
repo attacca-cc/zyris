@@ -1,4 +1,5 @@
 import { useEffect, useReducer } from "react";
+import { Mcp } from "./Mcp";
 import { Onboarding } from "./Onboarding";
 import { PeerConfirm } from "./PeerConfirm";
 import { Settings } from "./Settings";
@@ -10,18 +11,17 @@ import {
   initialState,
   reduce,
   subscribe,
+  subscribeResync,
+  TABS,
   type Screen,
   type Tab,
 } from "./state";
 
-// The whole of navigation. Three screens, named once, so the sidebar and the branch below
-// cannot disagree about what exists.
-const TABS: { id: Tab; label: string }[] = [
-  { id: "status", label: "Status" },
-  { id: "tools", label: "Tools" },
-  { id: "settings", label: "Settings" },
-];
-
+// The list of screens lives in state.ts beside the `Tab` type it defines — see the comment there.
+// MCP sits beside Tools rather than inside it: both are about what this machine hands an agent,
+// but one of them is a list of processes with switches on it and the other is a record of what
+// ran, and the Tools screen was already three sections long.
+//
 // No router. There are no URLs here — the window is one process with one screen showing — so a
 // router would be a dependency, a history stack and a set of paths to keep in step, in exchange
 // for what an equality check already does.
@@ -81,9 +81,22 @@ export function App() {
         if (!cancelled && question) dispatch({ kind: "peerQuestion", question });
       });
     });
+    // The other channel, and the reason it is a channel at all: when the forwarder finds it has
+    // fallen behind on the core's events it can name the catch-up value, the switch and a waiting
+    // peer question, because each of those is held somewhere it can read — but not the MCP server
+    // changes it dropped, which are published transiently and kept nowhere. This says only that
+    // the window's idea of things is no longer worth anything, and the screens that read through
+    // a command ask again.
+    let unlistenResync: (() => void) | undefined;
+    void subscribeResync(() => dispatch({ kind: "resync" })).then((fn) => {
+      if (cancelled) fn();
+      else unlistenResync = fn;
+    });
+
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenResync?.();
     };
   }, []);
 
@@ -97,12 +110,21 @@ export function App() {
   // The sidebar appears only once this machine is enrolled: before that there is nothing to
   // navigate to, and offering a choice of screens to someone who has not authorized the computer
   // yet is offering them a way to miss the one thing they have to do.
-  if (state.screen === "status" || state.screen === "tools" || state.screen === "settings") {
+  //
+  // Named by what it is *not* — onboarding having already returned above, `starting` is the only
+  // screen left that is not a tab — so that adding a `Tab` cannot leave a screen the sidebar
+  // offers and this branch drops through, which would be the starting screen with no way back to
+  // anywhere. `pastEnrolment` in state.ts names the two it claims for the same reason.
+  if (state.screen !== "starting") {
     return (
       <div className="shell">
         <Sidebar screen={state.screen} onNavigate={(to) => dispatch({ kind: "navigate", to })} />
         {state.screen === "status" && <Status state={state} />}
         {state.screen === "tools" && <Tools state={state} dispatch={dispatch} />}
+        {/* Only `state` in: what this screen lists is read through a command, and the one thing
+            it needs from the core is the news that a server changed — a death in particular, which
+            nobody clicked and which nothing else would bring to the screen. */}
+        {state.screen === "mcp" && <Mcp state={state} />}
         {/* No props: what this screen shows is read off the machine through a command, not
             folded into core state, because nothing outside it needs the answer. */}
         {state.screen === "settings" && <Settings />}

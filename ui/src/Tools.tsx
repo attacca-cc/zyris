@@ -7,6 +7,9 @@ import { MAX_TOOL_CALLS, type Action, type State, type ToolCallRow } from "./sta
 // What the `announced_tools` command answers with: `zyris_tools::Announcement`, serialized
 // camelCase. A test in crates/zyris-tools/src/announce.rs pins those field names; this is the
 // other half of that agreement, and nothing checks the two at build time.
+//
+// **What it lists is what the node is announcing at the moment it is asked**, promoted MCP
+// servers included — see the effect that reads it for why this screen has to ask more than once.
 type Announcement = {
   capabilities: { name: string; version: number; tools: string[] }[];
   root: string;
@@ -134,16 +137,6 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
     // way.
     boundary.current = state.toolCalls[0] ?? null;
 
-    void invoke<Announcement>("announced_tools")
-      .then((answer) => {
-        if (!cancelled) setAnnouncement(answer);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setAnnouncementProblem(asMessage(error, "Could not read what this computer offers."));
-        }
-      });
-
     void invoke<ToolCallRow[]>("recent_tool_calls", { limit: MAX_TOOL_CALLS })
       .then((rows) => {
         if (cancelled) return;
@@ -231,6 +224,45 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
     // opposite case and re-reads itself on focus, above.
   }, []);
 
+  // What this computer announces, read again whenever the core says a local MCP server moved.
+  //
+  // **An effect of its own, and not part of the mount-only one above.** What is announced is no
+  // longer fixed for the run: a promoted MCP server is withdrawn when somebody turns it off and
+  // when its process falls over, and joins when somebody turns it back on. A list read once would
+  // go on telling a person that agents can reach a capability this node has withdrawn — and hide
+  // one it has added — which is a screen stating something false about what this machine hands
+  // out. The core has no snapshot to be stale any more (`zyris_tools::Tools::announcement` reads
+  // the node's own list), so all that is left is asking again.
+  //
+  // `state.mcpChange` is the signal, and it is the same one the MCP screen uses. The five
+  // built-ins never move, so a change to one of these servers is the only thing that can change
+  // this answer.
+  useEffect(() => {
+    let cancelled = false;
+
+    void invoke<Announcement>("announced_tools")
+      .then((answer) => {
+        if (cancelled) return;
+        setAnnouncement(answer);
+        // An answer is an answer: a message from a read that failed earlier has stopped being
+        // true, and leaving it above a fresh list reads as a broken screen.
+        setAnnouncementProblem(null);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        // Deliberately not an empty announcement. Whatever is on the screen is still the last
+        // thing this computer said about itself, and a blank list here would claim it offers an
+        // agent nothing at all.
+        setAnnouncementProblem(asMessage(error, "Could not read what this computer offers."));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // And `state.resyncs` for the window that fell behind on the bus and was never told which
+    // server moved — see the MCP screen's copy of this effect and `RESYNC_EVENT_NAME`.
+  }, [state.mcpChange, state.resyncs]);
+
   // `indexOf` by identity: `reduce` prepends and keeps the existing row objects, so the mark
   // survives every later event until the cap evicts it. By the time it does, every row in the
   // list arrived after the mark anyway — which is what -1 means here.
@@ -303,8 +335,17 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
             </p>
           </>
         ) : (
-          <p className={announcementProblem ? "problem" : "muted"}>
-            {announcementProblem ?? "Reading what this computer offers."}
+          !announcementProblem && <p className="muted">Reading what this computer offers.</p>
+        )}
+        {/* Shown whether or not there is a list, which is the part that used to be missing. This
+            screen re-reads whenever a local MCP server moves, so a read failing *after* one has
+            succeeded is now an ordinary thing rather than a first-load case — and the list left on
+            the screen is then the last answer rather than the current one. Saying nothing would be
+            a correct-looking list that has quietly stopped being current. */}
+        {announcementProblem && (
+          <p className="problem note">
+            {announcementProblem}
+            {announcement && " What is listed above is the last answer this computer gave."}
           </p>
         )}
       </section>

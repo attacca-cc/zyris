@@ -30,13 +30,15 @@ Installs as an `.exe` on Windows and a `.deb` on Linux.
 read off a screenshot goes straight into `move_to`. Neither is announced when there is no display
 server to reach, because a tool that is always going to fail is worse than a tool that is absent.
 
-**Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live; MCP is
-still being written.** Between them that is twenty-five tools, and a capability is all or
-nothing — announcing `file_io` announces `remove`, and announcing `terminal` announces `exec`
-with whatever command an agent chooses. A path an agent sends without a leading slash starts in
+**Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live, and so is
+the promotion of local MCP servers — see [MCP servers](#mcp-servers) — though no agent on Attacca
+has yet called one of their tools end to end.** Between those five that is twenty-five tools —
+an MCP server adds however many its own tools come to, on top — and a capability is all or
+nothing: announcing `file_io` announces `remove`, and announcing `terminal` announces `exec` with
+whatever command an agent chooses. A path an agent sends without a leading slash starts in
 your home directory. That is where relative paths start rather than a fence around them: an
-absolute path goes where it says, and a command can work anywhere you can. What bounds this is
-the pause switch, the audit log, and what Attacca lets an agent call in the first place.
+absolute path goes where it says, and a command can work anywhere you can. What bounds this is the
+pause switch, the audit log, and what Attacca lets an agent call in the first place.
 
 `input` and `screen_capture` are announced together or not at all — an agent that can see the
 screen but not act on it is half useful, and one that can act but not see is guessing
@@ -128,6 +130,135 @@ no window on the screen: click the tray icon to get one, or just launch Zyris ag
 that means when you log in to a desktop, not when the computer boots.** The window and the tray
 icon need a graphical session to start into, so a Linux machine that is switched on with nobody
 logged in is not connected.
+
+## MCP servers
+
+An MCP server you already run on this computer is promoted to a capability of it, so its tools sit
+beside `terminal` and `file_io` and an agent calls them exactly the same way. A server you call
+`desk-notes` is announced as `mcp_desk-notes`, and its `search` tool is `mcp_desk-notes.search`.
+
+Which servers Zyris runs is a file you write:
+
+- `~/.local/share/zyris/mcp-servers.json` on Linux
+- `%APPDATA%\attacca\zyris\data\mcp-servers.json` on Windows
+
+It does not have to exist. A machine without one runs no MCP servers, which is the ordinary state
+of an ordinary machine and not something Zyris complains about.
+
+```json
+{
+  "servers": [
+    { "name": "desk-notes", "command": "notes-mcp", "args": ["--root", "/home/you/notes"] },
+    { "name": "calendar", "command": "calendar-mcp", "args": ["--ics", "/home/you/cal.ics"],
+      "enabled": false }
+  ]
+}
+```
+
+`name` and `command` are required, `args` defaults to none and `enabled` to true. **A field Zyris
+does not recognise makes the whole file invalid**, on purpose: the mistakes a hand-edited file
+collects are spelling ones, and an `"arg"` quietly ignored is a server that starts with none of
+the arguments you gave it. Each command is run directly and spoken to over its standard input and
+output — nothing goes through a shell, so each argument is passed exactly as written and none of
+them is split or expanded.
+
+**On Windows that means `command` has to name the file that actually exists.** A great many MCP
+servers are published to npm and started with `npx`, and on Windows `npx` is `npx.cmd` — a batch
+wrapper, not a program. Because nothing goes through a shell, the bare name does not find it and
+the server does not start; write the extension out:
+
+```json
+{ "name": "calendar", "command": "npx.cmd", "args": ["-y", "@example/calendar-mcp"] }
+```
+
+The same goes for `pnpm`, `yarn` and anything else that ships as `.cmd`. On Linux and macOS the
+bare `npx` is right and the extension would be wrong. When it is wrong, the MCP tab shows that
+server as not started, with the operating system's own "cannot find the file" as the reason, and
+nothing else on the machine is affected.
+
+Zyris reads this file when it starts and **never writes to it**. The MCP tab lists what is in it
+and what each server is doing; the switches there stop and start a server for as long as Zyris is
+running, and the file is what decides which servers come back after a restart.
+
+**Two mistakes cost more than the entry they are in.** A file that will not parse starts no MCP
+server at all — the MCP tab says why, the log says why, and nothing else on the machine is
+affected. Two entries sharing a name do the same, because both would be announced under one
+capability name, and a node that announces one name twice announces *nothing*: not `terminal`, not
+`file_io`. Everything else costs only its own entry — a command that is not there, a command that
+does not speak MCP, or a name with a dot in it, which can never be announced because an agent
+addresses a tool as `capability.tool` and everything before the first dot is read as the
+capability.
+
+A server whose process goes away is withdrawn within about a second: its tools stop being
+announced, and the MCP tab shows it as having stopped on its own rather than as one you turned
+off. A server that starts and never answers is given ten seconds before Zyris gives up on it and
+leaves it out.
+
+**Promoted tools are behind the same pause switch and the same audit log as everything else, with
+one difference worth knowing.** When a call finishes, the log records that an MCP tool was called —
+when, which server, which tool, and whether the call was allowed, refused or failed — and not what
+was asked of it. Zyris writes down some arguments for its own capabilities because it knows what
+they mean: `file_io`'s `path` is a file on this machine, `terminal`'s `command` is a command line.
+A field spelled `path` on a server somebody else wrote is a coincidence of spelling and could as
+easily be a password, so nothing an agent sends to an MCP server is written down.
+
+**A call that never finishes is not written down at all.** Zyris puts no time limit on an MCP
+server, so one that accepts a request and goes quiet waits until the agent gives up or the
+connection drops; the line is written when a call returns, and a call cut off before it returns
+never reaches it. Choosing a limit here would mean Zyris putting a clock on somebody else's tool,
+and a build or a fetch that was working would be the thing it cut off. This is not special to MCP:
+`terminal`'s `exec` with no `timeout_ms` has the same property, and so does any call an agent
+abandons.
+
+### Checking it against a real agent — this has not been run
+
+Everything above has tests behind it, up to and including a real MCP server started from a real
+`mcp-servers.json`, announced on a live node, and called by a peer on the other end of a real
+connection. **What no test on this side can reach is Attacca.** Whether an agent that was never
+told an MCP server exists picks a promoted tool out of the list and calls it like any other is the
+one claim on this page that only a person can check, and **nobody has checked it.** What follows
+is the procedure, written down rather than performed.
+
+It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
+today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
+the file-transfer check that roadmap step 5 left owed; if you are running that one too, this rides
+along with it on the same machine and the same agent. What it does need throughout is an agent on
+Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, and only steps 1, 2,
+5, 8 and 9 happen entirely on this computer.
+
+Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl` on Linux and
+`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the server list named above. A
+`--server` run keeps its own, in a `zyris-dev-…` directory of its own rather than in `zyris`.
+
+1. **Configure it.** Put one entry in the file named above, then **restart Zyris** — the file is
+   read at startup and never again.
+2. **Look at the MCP tab.** Pass: the server is listed as running, with the tools it promoted and
+   the capability name an agent will address (`mcp_<name>`). The log says the same thing on the
+   line reading `an MCP server is promoted`. If it says the server failed, that is the reason, and
+   there is nothing to check further until it starts.
+3. **Ask an agent on Attacca what this machine can do**, without mentioning MCP. Pass: the reply
+   names `mcp_<name>` beside `terminal` and `file_io`, with the server's own tool descriptions.
+   Fail: the agent lists the built-ins only, or describes the promoted one as something it cannot
+   use.
+4. **Ask it to do something only that server can do.** Pass: the answer is the server's own, and
+   the agent treats the call as ordinary — no "I do not have a tool for that", no asking you to
+   run something. That is the whole claim on the front page.
+5. **Read the audit tail on the Tools tab.** Pass: a line naming `mcp_<name>` and the tool, marked
+   allowed, **with no arguments on it** — and the argument you actually sent appears nowhere in
+   `audit.jsonl`. Fail, and it is the serious kind: an MCP server's arguments are being written to
+   disk.
+6. **Hit pause and ask again.** Pass: the agent reports that this machine is paused, in the same
+   words it would use for `terminal` — not that the tool is broken or missing.
+7. **Switch the server off on the MCP tab while the agent is connected**, then ask the agent what
+   it can do. Pass: the capability is gone from its list within a moment, without either end
+   reconnecting, and a call to it fails as not announced rather than hanging. Switch it back on
+   and it comes back.
+8. **Kill the server's process from outside Zyris** — Task Manager, or `kill` on Linux. Pass:
+   within about a second the MCP tab shows it as having stopped on its own, *not* as one you
+   switched off, and the capability is no longer announced to the agent.
+9. **Misspell a field in the file and restart.** Pass: Zyris starts, the MCP tab names the problem
+   and the path of the file, and `terminal` and `file_io` still work. Fail: Zyris does not start,
+   or the tab says you have configured no servers.
 
 ## Voice
 
@@ -234,7 +365,8 @@ lands in what order. Nothing here is ready to install yet.
 3. Tools — terminal, files, keyboard, mouse, screen capture, pause switch, audit log (done)
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
 5. File transfer — peer endpoint, inbox, approving a new machine's key from the window (done)
-6. MCP — local servers promoted to capabilities
+6. MCP — local servers promoted to capabilities (done, except for the
+   [check against a real agent](#checking-it-against-a-real-agent--this-has-not-been-run))
 7. Voice in — audio, echo cancellation, wake word, transcription
 8. Voice out — streaming speech, interruption
 
@@ -248,6 +380,8 @@ side of the connection regardless of what the server says:
   stops new calls only: a command already running and a stream already open finish.
 - **An audit log** of what ran — every call, allowed or refused, with what it was asked to touch
   but never what it read or wrote. On disk as one JSON line each, and as a tail on the Tools tab.
+  A tool from one of your [MCP servers](#mcp-servers) is recorded as having been called and
+  without its arguments, because Zyris has no idea what they mean on somebody else's server.
 
 A file can only arrive from a machine enrolled on your own Attacca account: a peer whose key is
 not on the account's node list is closed before the two ends have said anything to each other.

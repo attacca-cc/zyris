@@ -7,11 +7,31 @@
 //! platform or exit path. Anything that must happen before the process ends — publishing
 //! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
 //! Tauri delivers right before the process goes away.
+//!
+//! **And it ends the process with `std::process::exit`, so nothing is ever dropped.** Everything
+//! handed to `manage` lives until the process does and then simply stops existing: no destructor
+//! runs, on any exit path. For most of what is managed that costs nothing. It costs something for
+//! the MCP servers, which are child processes this run started — exiting closes their pipes, which
+//! is enough for one that quits on end-of-file and not for one that ignores it, and such a server
+//! is then left running and reparented until somebody finds it in a task manager. So
+//! [`Servers::stop_all`] is called explicitly, from the two places this process leaves from.
 
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus};
-use zyris_tools::{Tools, Transfers};
+use zyris_runtime::LiveCapabilities;
+use zyris_tools::{Servers, Tools, Transfers};
+
+/// Stop the MCP servers this run started, and wait for them, before the process goes away.
+///
+/// Not a method on anything: it is the one-line bridge between Tauri's two exits and the
+/// supervisor's own [`Servers::stop_all`], and it exists so that neither of those exits can be
+/// the one somebody forgot. Blocking, because both callers are on the main thread with the event
+/// loop already finished or never started — there is nothing left to keep responsive, and the wait
+/// is what makes the stop mean anything.
+fn stop_mcp_servers(servers: &Servers, runtime: &tokio::runtime::Handle) {
+    runtime.block_on(servers.stop_all());
+}
 
 use crate::cli::Mode;
 use crate::confirm::Pending;
@@ -22,6 +42,10 @@ pub fn run(
     runtime: tokio::runtime::Handle,
     connector: Connector,
     tools: Tools,
+    // What this node announces, and the only authority on it. The window's Tools screen reads it
+    // through this handle rather than through a list `main` wrote down once, so a promoted MCP
+    // server turned off, turned on, or dead is off that screen as soon as it is off the node.
+    live: LiveCapabilities,
     // Where a question about an unapproved peer waits. The same handle `main` gave the confirmer,
     // so what the window reads and answers is the question an agent's `send_to` is blocked on.
     pending: Pending,
@@ -29,6 +53,10 @@ pub fn run(
     // handle on the same wiring the announced capability is, not a second one — see `main`. `None`
     // is a machine with no peer identity, which announces no `file_transfer` and has no inbox.
     transfers: Option<Transfers>,
+    // The local MCP servers: what each is doing, and the switch that turns one on or off. The
+    // same supervisor the core is already watching for deaths with, so the window and the node
+    // cannot disagree about which servers are announced.
+    servers: Servers,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -44,6 +72,11 @@ pub fn run(
 
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
+    // For the other exit, the ordinary one. A handle taken here rather than looked up out of
+    // Tauri's state inside the closure: a `state::<T>()` that was never managed panics, and the
+    // last thing this program does is not the place to find that out.
+    let exit_servers = servers.clone();
+    let exit_runtime = runtime.clone();
     let setup_gate = tools.gate().clone();
     let setup_pending = pending.clone();
 
@@ -87,12 +120,14 @@ pub fn run(
         .manage(tools.gate().clone())
         .manage(tools.log().clone())
         // And the `Tools` itself, for the one command that asks what is announced. Managed last
-        // because it moves; it is a handle too, holding that same gate and that same log, and it
-        // carries the snapshot `main` recorded when it handed the capabilities to the node, so
-        // the Tools screen reports what was actually announced rather than what a fresh look
-        // would say now. Two of the four need a display server, so those are not the same
-        // question.
+        // because it moves; it is a handle too, holding that same gate and that same log.
         .manage(tools)
+        // The list that command actually reads. A handle on the announcement itself, not a copy
+        // of it: what the Tools screen lists is what this node is serving at the moment it asks,
+        // including the promoted MCP servers that come and go while it runs. Two capabilities
+        // need a display server, and this does not re-ask it — the values that decision produced
+        // are what is in here. See `zyris_runtime::LiveCapabilities::descriptors`.
+        .manage(live)
         // Built here rather than in `main`: it holds nothing, remembers nothing and reads the
         // machine on every call, so there is no state for the two runtimes to share. Headless
         // has no switch to move, and the CLI flags build their own — before the instance lock,
@@ -110,6 +145,10 @@ pub fn run(
         // registered: a machine with no peer identity has no inbox to read, which the window has
         // to say differently from an inbox nothing has arrived in. See `bridge::inbox`.
         .manage(transfers)
+        // The MCP servers. A handle on the same supervisor the death watcher holds, for the same
+        // reason the gate is: a window that read a second copy would show servers this node is
+        // not announcing, and its switch would move something nothing else could see.
+        .manage(servers)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -123,6 +162,8 @@ pub fn run(
             bridge::answer_peer,
             bridge::inbox,
             bridge::peer_fingerprint,
+            bridge::mcp_servers,
+            bridge::set_mcp_server_enabled,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:
@@ -145,6 +186,11 @@ pub fn run(
                 }
                 Ok(None) => {
                     tracing::info!("another Zyris is already running on this machine; exiting");
+                    // **This run has already started its MCP servers**: `main` starts them before
+                    // it builds anything with a window on it, because the first announcement has
+                    // to be complete. Leaving here without stopping them is a second copy of every
+                    // configured server left running, from a process that did nothing else.
+                    stop_mcp_servers(&app.state::<Servers>(), &setup_runtime);
                     std::process::exit(0);
                 }
                 Err(error) => {
@@ -258,6 +304,9 @@ pub fn run(
         // tray's Quit. This is the only place in this function that runs after `app.run` starts,
         // since `app.run` itself never returns.
         RunEvent::Exit => {
+            // Before `shutdown`, which only publishes. These are processes, and this is the last
+            // moment anything in this program can reach them.
+            stop_mcp_servers(&exit_servers, &exit_runtime);
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
         }

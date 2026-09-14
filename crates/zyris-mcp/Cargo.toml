@@ -1,0 +1,40 @@
+[package]
+name = "zyris-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+rmcp = { workspace = true }
+# The server list on disk is JSON a person wrote, and `derive` is what refuses a field nobody
+# defined rather than dropping it — which is the mistake that file actually collects.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `process` for the command a server is, `time` for the deadline `Server::spawn` puts on the
+# handshake. `rmcp`'s `transport-child-process` turns on `tokio/process` too; naming it here as
+# well is the convention in this workspace — a crate declares what it uses rather than relying on
+# somebody else's feature to supply it.
+tokio = { workspace = true, features = ["process", "time"] }
+tracing = { workspace = true }
+# The protocol side of the translation `promote.rs` performs: `ServeCapability`, the descriptor
+# types it answers with, and `WireError`. Nothing here dials or announces — that is `zyris-app`'s
+# job — so this is the wire vocabulary and not a node.
+zyris = { workspace = true }
+
+[dev-dependencies]
+# A directory to put a server list in, for the tests that read one. Nothing in this crate writes
+# to disk outside a test.
+tempfile = { workspace = true }
+# `rt-multi-thread`: `TokioChildProcess`'s `Drop` reaps the child with `tokio::spawn`, and a
+# current-thread runtime only gets to that at an await point of its own.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The server the tests talk to. An example rather than a `[[bin]]`, so `cargo build` does not
+# produce it and nothing ships it; the source sits under `tests/` because that is what it is for.
+# `cargo test` builds examples, which is what puts it on disk where `tests/one_server.rs` looks.
+[[example]]
+name = "probe_server"
+path = "tests/support/probe_server.rs"
