@@ -19,13 +19,13 @@ serde = { workspace = true }
 # **Every one of these is `optional`, and that is the whole design.** `members = ["crates/*"]`
 # means this crate is compiled by `cargo test --workspace` whichever way the feature goes, so
 # "off" can only mean "these are not pulled in". A cold build of them is 2m 06s at 253% CPU with
-# a 714 MB peak, against 1.4 s for a warm `cargo build --release` — measured on this machine,
+# a 714 MB peak, against 1.4 s for a warm `cargo build --release` â measured on this machine,
 # 2026-09-15, and the reason the flag exists.
 #
 # They are declared before any code calls them: tasks 3 to 6 of step 7 fill that in. Cargo
 # compiles an enabled optional dependency whether or not a line of Rust names it, which is what
 # makes the CI job in `.github/workflows/ci.yml` worth having now rather than in four tasks'
-# time — the thing that breaks on a runner is the *native* build, not our use of it.
+# time â the thing that breaks on a runner is the *native* build, not our use of it.
 [dependencies.cpal]
 workspace = true
 optional = true
@@ -75,6 +75,14 @@ optional = true
 workspace = true
 optional = true
 
+# One thing only: saying so when the stored voice settings cannot be read. That failure leaves
+# the microphone shut, which is the safe answer and also the silent one, so there has to be a
+# line somewhere. Behind the feature like everything else — the off build keeps its two
+# dependencies and nothing else.
+[dependencies.tracing]
+workspace = true
+optional = true
+
 [dev-dependencies]
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
@@ -107,6 +115,7 @@ voice = [
     "dep:rustls",
     "dep:sha2",
     "dep:serde_json",
+    "dep:tracing",
     "tokio/rt",
 ]
 
@@ -116,11 +125,11 @@ voice = [
 # today.** Established 2026-09-15, by reading rather than by hoping:
 #
 # - `webrtc-audio-processing` 2.1 wants pkg-config `webrtc-audio-processing-2` >= 2.1. **No
-#   Debian or Ubuntu ships 2.x at all** — noble, which *is* `ubuntu-latest`, has 0.3.1; plucky,
+#   Debian or Ubuntu ships 2.x at all** â noble, which *is* `ubuntu-latest`, has 0.3.1; plucky,
 #   questing and Debian stable/testing/unstable have 1.3. So the runner cannot install it and
 #   the `.deb` cannot name it in `Depends:`.
 # - The `bundled` feature shells out to **`meson`, which is on neither runner** (and is not on
-#   this development machine either, which has no Python at all — so `bundled` stays unverified
+#   this development machine either, which has no Python at all â so `bundled` stays unverified
 #   on every platform this project can reach).
 # - On Windows there is no supported build in any case: upstream issue #34 has been open since
 #   2023-09-27, the only CI matrix is `[ubuntu-latest, macos-latest]`, and PR #102 adding MSVC

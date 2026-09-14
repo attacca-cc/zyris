@@ -76,6 +76,11 @@ pub fn run(
     // same supervisor the core is already watching for deaths with, so the window and the node
     // cannot disagree about which servers are announced.
     servers: Servers,
+    // Speech. Built by `main` so that the instance's data directory names the file the answer to
+    // "should this listen?" is kept in. It has opened nothing yet: `resume` below is what acts
+    // on that stored answer, and it is called here and not in `headless.rs` because a run with
+    // no window has no push-to-talk key for anybody to hold.
+    voice: std::sync::Arc<zyris_voice::Voice>,
     // What this run calls itself: `main`'s `instance_name`, the same string the keychain and the
     // audit log are named by. Passed in rather than recomputed, because the lock taken below has
     // to name the same instance those two do.
@@ -109,6 +114,29 @@ pub fn run(
     let setup_runtime = runtime.clone();
     let exit_hotkey = hotkey.clone();
     let setup_hotkey = hotkey.clone();
+
+    // **The one thing that consumes the key**, and the whole of the wiring between the desktop
+    // session and the audio stack. `hotkey::HotkeyEvent` and `zyris_voice::Push` are two types
+    // on purpose — a global shortcut is a desktop concern and `--headless` has none — and this
+    // is the one line that maps between them. `Push` is declared in `zyris-voice`'s `lib.rs`
+    // rather than in its feature-gated session module precisely so that this line needs no
+    // `#[cfg]`.
+    //
+    // Started whether or not anything is listening. A key pressed with the switch off is
+    // discarded inside `Voice::push`; the alternative is a subscription that has to be taken and
+    // dropped as the switch moves, which is a race with nothing to gain.
+    let key_voice = voice.clone();
+    let mut keys = hotkey.events();
+    runtime.spawn(async move {
+        while let Ok(event) = keys.recv().await {
+            key_voice.push(match event {
+                hotkey::HotkeyEvent::Pressed => zyris_voice::Push::Pressed,
+                hotkey::HotkeyEvent::Released => zyris_voice::Push::Released,
+            });
+        }
+    });
+
+    let setup_voice = voice.clone();
     // For the other exit, the ordinary one. A handle taken here rather than looked up out of
     // Tauri's state inside the closure: a `state::<T>()` that was never managed panics, and the
     // last thing this program does is not the place to find that out.
@@ -191,6 +219,10 @@ pub fn run(
         // Wayland, where no application is allowed to choose the key — the exact line the person
         // has to add to their compositor configuration. The Voice screen reads it.
         .manage(hotkey)
+        // Speech, as a handle on the one this process built. The Voice screen reads everything
+        // through it — the device list, the model on disk, whether a microphone is open — and
+        // moves the one switch that opens one.
+        .manage(voice)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::latest_event,
@@ -206,6 +238,13 @@ pub fn run(
             bridge::peer_fingerprint,
             bridge::mcp_servers,
             bridge::set_mcp_server_enabled,
+            bridge::voice_state,
+            bridge::set_voice_listening,
+            bridge::set_voice_device,
+            bridge::fetch_speech_model,
+            bridge::forget_speech_model,
+            bridge::record_wake_take,
+            bridge::clear_wake_word,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:
@@ -306,6 +345,25 @@ pub fn run(
                 setup_pending.clone(),
                 &setup_runtime,
             );
+
+            // What the voice session says, on its own channel to the window. Not a `CoreEvent`:
+            // every variant of that union is something the node did about its connection to
+            // Attacca, and this is a microphone. Subscribed here, beside the bridge above and
+            // before `resume` below, for the same reason — `broadcast` never replays a send to
+            // a subscriber that shows up late, and a turn that happened before the window was
+            // listening is a turn nobody would ever be told about.
+            bridge::forward_voice(app.handle().clone(), setup_voice.events(), &setup_runtime);
+
+            // **Acting on an answer a person already gave.** Nothing is opened here unless the
+            // stored settings say it was asked for on some earlier run; on a machine nobody has
+            // turned this on, `resume` reads the file, finds `listen: false`, and returns.
+            //
+            // Spawned rather than blocked on: loading the speech model takes long enough to
+            // notice, and `setup` is what stands between this process and a window on the
+            // screen. The Voice screen reads the answer through `voice_state` whenever it is
+            // opened, so nothing is lost by it finishing late.
+            let resume_voice = setup_voice.clone();
+            setup_runtime.spawn(async move { resume_voice.resume().await });
 
             // Registered in **both** modes, unlike the enrolment watcher above, and for a reason
             // that is not about `--minimized`: closing the window hides it rather than quitting

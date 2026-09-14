@@ -64,6 +64,15 @@ pub mod session;
 #[cfg(feature = "voice")]
 pub mod wake;
 
+// The microphone that is open, the settings that say whether there should be one, and the
+// wake word recorder. Everything above is a piece; this is what puts them together.
+#[cfg(feature = "voice")]
+mod run;
+
+// What the Voice screen renders. **Not behind the feature**, because `zyris-app` may contain no
+// `#[cfg(feature = "voice")]` and therefore has to be able to name the answer on either build.
+pub mod view;
+
 /// Why a build with no `voice` feature will never hear anything.
 ///
 /// Worded for a person reading the window, not for a developer reading a log: whoever installed
@@ -71,17 +80,6 @@ pub mod wake;
 pub const NOT_COMPILED_IN: &str =
     "this build of Zyris was made without the audio stack, so it cannot listen";
 
-/// Why a build that *has* the audio stack still hears nothing today.
-///
-/// Temporary, and owed to step 7's later tasks. As of task 3 the microphone is there —
-/// `capture::Capture::open` delivers 16 kHz mono chunks — but nothing turns them into a
-/// [`VoiceEvent`] yet, and that is what this sentence is about. [`start`] stops returning it
-/// when task 6 gives it a session to start.
-///
-/// Public for the same reason [`NOT_COMPILED_IN`] is: it is a sentence the window renders, and
-/// the two builds have to be able to say different things about the same silence.
-pub const NOTHING_WIRED_YET: &str =
-    "the audio stack is compiled into this build, but nothing opens a microphone yet";
 
 /// Something the voice session did. The only thing that leaves this crate.
 ///
@@ -153,8 +151,12 @@ pub enum VoiceSupport {
     Unavailable { reason: String },
 }
 
-/// One voice session: a stream of [`VoiceEvent`], and an honest answer about whether anything
-/// will ever come out of it.
+/// One voice session: a stream of [`VoiceEvent`], an honest answer about whether anything will
+/// ever come out of it, and the switches a window moves.
+///
+/// **One set of method signatures in both feature states**, the accommodation `apm::Apm` makes:
+/// only the bodies read the feature, so `zyris-app` calls the same methods on either build and
+/// gets a different answer rather than a different program.
 pub struct Voice {
     /// `None` is a voice that will never publish. It is not "a sender nobody sends on": a
     /// subscriber to one of those waits forever, and waiting forever is indistinguishable from
@@ -162,6 +164,10 @@ pub struct Voice {
     /// `while let Ok(event) = rx.recv().await` loop needs in order to stop.
     events: Option<broadcast::Sender<VoiceEvent>>,
     support: VoiceSupport,
+    /// What is, or could be, listening. `None` on a [`Voice::disabled`]; always `Some` on one
+    /// [`start`] built, because `run::Engine::new` cannot fail and opens nothing.
+    #[cfg(feature = "voice")]
+    engine: Option<std::sync::Arc<run::Engine>>,
 }
 
 impl Voice {
@@ -169,7 +175,12 @@ impl Voice {
     ///
     /// `reason` is shown to a person, so it is a sentence rather than an error code.
     pub fn disabled(reason: impl Into<String>) -> Voice {
-        Voice { events: None, support: VoiceSupport::Unavailable { reason: reason.into() } }
+        Voice {
+            events: None,
+            support: VoiceSupport::Unavailable { reason: reason.into() },
+            #[cfg(feature = "voice")]
+            engine: None,
+        }
     }
 
     /// A new subscription. Each caller gets its own; none of them consumes another's.
@@ -177,6 +188,10 @@ impl Voice {
     /// On a disabled voice the receiver is already closed — `try_recv` and `recv` both answer
     /// "ended" immediately rather than blocking.
     pub fn events(&self) -> broadcast::Receiver<VoiceEvent> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.events();
+        }
         match &self.events {
             Some(tx) => tx.subscribe(),
             // The sender is dropped at the end of this expression, which closes the channel.
@@ -184,10 +199,121 @@ impl Voice {
         }
     }
 
-    /// Whether this can work, and what the person has to do about it. Cheap, and safe to call
-    /// repeatedly — the window asks on every render.
+    /// Whether this can work **at all** — a build with an audio stack, on a machine with a
+    /// microphone that answers. Cheap, and safe to call repeatedly.
+    ///
+    /// Not the same question as "is anything listening": that is
+    /// [`view::VoiceView::listening`], and the two are separate because a machine that *can*
+    /// listen and is not doing so has to read differently from one that never could.
     pub fn describe(&self) -> VoiceSupport {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.support();
+        }
         self.support.clone()
+    }
+
+    /// The push-to-talk key went down or came up.
+    ///
+    /// The one thing that goes *inward*, and the reason [`Push`] is declared in this file: the
+    /// key lives in `zyris-app`, which may contain no `#[cfg(feature = "voice")]`, so the type
+    /// it maps to has to be nameable on both builds. A key pressed on a build that cannot
+    /// listen is discarded here rather than refused; nobody pressed it expecting an error.
+    pub fn push(&self, push: Push) {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.push(push);
+        }
+        let _ = push;
+    }
+
+    /// Start listening if a person has already said to, on some earlier run.
+    ///
+    /// Called by the windowed branch and **not** by `--headless`, which has no push-to-talk key
+    /// and so has nothing that could start a turn.
+    pub async fn resume(&self) {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.resume().await;
+        }
+    }
+
+    /// Everything the Voice screen renders, read off this machine in one go.
+    pub async fn look(&self) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.look().await;
+        }
+        view::VoiceView::unavailable(match &self.support {
+            VoiceSupport::Unavailable { reason } => reason.clone(),
+            VoiceSupport::Ready => NOT_COMPILED_IN.to_string(),
+        })
+    }
+
+    /// Turn listening on or off, and answer with what that left the machine as.
+    ///
+    /// **What happened, not what was asked for.** Turning it on with no model downloaded leaves
+    /// [`view::ListeningState::Failed`] carrying the reason, and the answer says so.
+    pub async fn set_listening(&self, on: bool) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.set_listening(on).await;
+        }
+        let _ = on;
+        self.look().await
+    }
+
+    /// Choose which microphone to open, now and at the next launch.
+    pub async fn choose(&self, device: view::Choice) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose(device.clone()).await;
+        }
+        let _ = device;
+        self.look().await
+    }
+
+    /// Download the speech model. Answers `Err` with a sentence when it could not be had.
+    pub async fn fetch_model(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_model().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Delete the downloaded speech model, and any wreckage a killed download left beside it.
+    ///
+    /// Turns listening off first: the running session holds the model, and a switch left on
+    /// over a model that is gone is a screen claiming something it cannot do.
+    pub async fn forget_model(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.forget_model().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Record one take of the wake word from the chosen microphone, and keep it.
+    pub async fn record_wake_take(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.record_wake_take().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Forget every take of the wake word.
+    pub async fn clear_wake_word(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.clear_wake_word().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
     }
 }
 
@@ -195,20 +321,37 @@ impl Voice {
 ///
 /// **Never fails**, on any platform, in either feature state — the same shape `hotkey::start`
 /// and `announce.rs` use. A machine that cannot listen gets a [`Voice`] that says so, because
-/// the alternative is an application that refuses to start over a microphone.
+/// the alternative is an application that refuses to start over a microphone. **It opens
+/// nothing**: see `run`'s module documentation for why a microphone is not opened at launch.
+///
+/// `dir` is the instance's data directory, where the answer to "should this listen?" is kept.
+/// `None` is a machine that names no such directory: everything still works for this run and
+/// nothing is remembered for the next one.
 ///
 /// This is the whole of what `zyris-app` calls. The two arms below are the only place in the
 /// workspace that reads the feature.
-pub fn start() -> Voice {
+pub fn start(dir: Option<&std::path::Path>) -> Voice {
     #[cfg(not(feature = "voice"))]
     {
+        let _ = dir;
         Voice::disabled(NOT_COMPILED_IN)
     }
     #[cfg(feature = "voice")]
     {
-        Voice::disabled(NOTHING_WIRED_YET)
+        let events = broadcast::channel(EVENT_CAPACITY).0;
+        let engine = std::sync::Arc::new(run::Engine::new(dir, events.clone()));
+        Voice { events: None, support: engine.support(), engine: Some(engine) }
     }
 }
+
+/// How many [`VoiceEvent`]s a subscriber may fall behind before it loses the oldest.
+///
+/// A turn produces four at most — `Listening`, `Thinking`, and one of `Heard`, `HeardNothing`
+/// or `Failed` — and the window is the only subscriber. Generous by two orders of magnitude,
+/// like `zyris-app`'s `hotkey::EVENT_CAPACITY`, and for the same reason: `broadcast` needs a
+/// number, not a tuning decision.
+#[cfg(feature = "voice")]
+const EVENT_CAPACITY: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -257,7 +400,12 @@ mod tests {
     #[test]
     fn every_subscriber_gets_its_own_stream() {
         let (tx, _) = broadcast::channel(4);
-        let voice = Voice { events: Some(tx), support: VoiceSupport::Ready };
+        let voice = Voice {
+            events: Some(tx),
+            support: VoiceSupport::Ready,
+            #[cfg(feature = "voice")]
+            engine: None,
+        };
 
         let mut first = voice.events();
         let mut second = voice.events();
@@ -279,21 +427,51 @@ mod tests {
         );
     }
 
-    /// [`start`] answers in both feature states, and the answer names the right situation.
+    /// [`start`] answers in both feature states, and **opens nothing while doing it**.
     ///
-    /// The assertion is on the reason rather than only on the variant, because the two arms of
-    /// `start` differ in exactly that and a test that ignored it would pass for an off build
-    /// that claimed the stack was compiled in.
+    /// The off build is pinned exactly — the sentence matters, because it is what a person
+    /// reads. The on build is not pinned to a variant: it is the machine's own answer, and a
+    /// machine with no microphone is a legitimate `Unavailable` there. What both must agree on
+    /// is that nothing is listening, which is the decision this task took.
     #[test]
-    fn starting_always_answers_and_says_which_build_this_is() {
-        let expected =
-            if cfg!(feature = "voice") { NOTHING_WIRED_YET } else { NOT_COMPILED_IN };
+    fn starting_answers_on_every_build_and_opens_nothing() {
+        let voice = start(None);
+
+        if cfg!(not(feature = "voice")) {
+            assert_eq!(
+                voice.describe(),
+                VoiceSupport::Unavailable { reason: NOT_COMPILED_IN.into() },
+                "a build with no audio stack has to say so, in the sentence a person reads"
+            );
+        }
+
+        let view = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime")
+            .block_on(voice.look());
+        assert_eq!(
+            view.listening,
+            view::ListeningState::Off,
+            "`start` must not open a microphone: nothing listens until somebody asks"
+        );
+    }
+
+    /// The answer a person acts on is two answers, and the screen shows both. A machine that
+    /// **can** listen and is not doing so must not read like one that never could.
+    #[test]
+    fn being_able_to_listen_and_listening_are_two_different_answers() {
+        let voice = Voice::disabled("no microphone on this machine");
+
+        let view = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime")
+            .block_on(voice.look());
 
         assert_eq!(
-            start().describe(),
-            VoiceSupport::Unavailable { reason: expected.into() },
-            "`start` must answer on every build; only the reason differs"
+            view.support,
+            VoiceSupport::Unavailable { reason: "no microphone on this machine".into() }
         );
+        assert_eq!(view.listening, view::ListeningState::Off);
     }
 
     /// The wire shape the window switches on. Pinned here rather than discovered in TypeScript.

@@ -281,3 +281,10 @@ section { margin-bottom: 2rem; }
   color: var(--fg);
 }
 .button-quiet:hover { background: var(--card); opacity: 1; }
+
+/* The microphone list on the Voice tab. A radio and a device name on one line, wrapping rather
+   than pushing the screen sideways: names on Linux are routinely longer than this window is
+   wide, and a person picking a microphone should never have to scroll horizontally to read one.
+   Its own class rather than styling `.caps label`, which the MCP and Tools lists share. */
+.choices label { align-items: baseline; display: flex; gap: 0.5rem; overflow-wrap: anywhere; }
+.choices input { flex: none; }

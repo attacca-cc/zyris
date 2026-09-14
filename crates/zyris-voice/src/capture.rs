@@ -546,22 +546,16 @@ impl Conversion {
 // Devices
 // ---------------------------------------------------------------------------------------------
 
-/// Which end of a device this is, as the backend describes it.
+/// Which end of a device this is, which microphone to open, and what one looks like on a
+/// screen.
 ///
-/// Not a filter — see the module documentation. `Duplex` on PipeWire means a loudspeaker whose
-/// monitor can also be captured, and `Unknown` is what ALSA says about its own `default`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Direction {
-    /// A microphone.
-    Input,
-    /// A loudspeaker. Capturing one records what the computer is playing.
-    Output,
-    /// Both ends of one device. On PipeWire this is how a sink's monitor appears.
-    Duplex,
-    /// The backend will not say without opening it.
-    Unknown,
-}
+/// **Declared in [`crate::view`] and re-exported here**, which is the same accommodation
+/// [`crate::Push`] makes: this module is behind the `voice` feature, a window has to name all
+/// three in a build that does not have it, and [`Choice`] in particular is *stored* — it is
+/// written into the settings file beside whether to listen at all. This is where they are
+/// produced, so this is where the documentation about what the backend means by each of them
+/// lives: see the module documentation above.
+pub use crate::view::{Choice, Direction, InputDevice};
 
 impl From<cpal::DeviceDirection> for Direction {
     fn from(direction: cpal::DeviceDirection) -> Direction {
@@ -574,37 +568,6 @@ impl From<cpal::DeviceDirection> for Direction {
             _ => Direction::Unknown,
         }
     }
-}
-
-/// One thing a person could choose to listen with.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InputDevice {
-    /// `cpal`'s own `DeviceId`, as a string. Stable across runs and reboots where the platform
-    /// can manage it, which is why a choice is stored as this and not as a name — two devices
-    /// here are called "Built-in Audio Analog Stereo".
-    pub id: String,
-    /// What a person reads.
-    pub name: String,
-    /// The host's default input. Exactly one entry has this, unless the host has no default.
-    pub is_default: bool,
-    pub direction: Direction,
-}
-
-/// Which microphone to open.
-///
-/// [`Choice::Default`] is not a shorthand for "whatever is default right now": a stream built on
-/// the default device *follows* the default when it changes, and one built on a named device
-/// does not. See [`Capture::follows_default`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum Choice {
-    /// Whatever the system calls the default input, now and after it changes.
-    #[default]
-    Default,
-    /// This exact device, by [`InputDevice::id`].
-    #[serde(rename_all = "camelCase")]
-    Device { id: String },
 }
 
 /// Everything this machine could listen with, default and true inputs first.

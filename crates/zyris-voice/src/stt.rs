@@ -153,6 +153,16 @@ pub enum ModelState {
     /// a file this name until it has checked it — so reaching it means a copy that was made by
     /// hand, a disk that lost the file, or a different model dropped in under this name.
     Damaged { path: PathBuf, bytes: u64, expected: u64 },
+    /// Something is there and it could not be looked at: a directory where the file should be,
+    /// a permission this user does not have, a mount that has gone away.
+    ///
+    /// **Not [`ModelState::Absent`]**, and the difference is the whole reason this variant was
+    /// added in task 7 rather than in task 5. `std::fs::metadata` fails for more than one
+    /// reason, and reading every one of them as "nothing is there" put a **Download** button in
+    /// front of a person whose problem a download cannot fix — the confident false negative
+    /// this workspace has now shipped once per screen that guessed. Task 7's screen renders
+    /// these three separately, so the state it renders has to keep them apart.
+    Unreadable { path: PathBuf, detail: String },
     /// There is no directory to keep it in and none was named.
     Nowhere { reason: String },
 }
@@ -210,6 +220,13 @@ pub fn model_path_given(model: &Model, named: Option<std::ffi::OsString>) -> Opt
 /// program telling a person their own choice is broken.
 pub fn inspect(path: &Path, expected: Option<u64>) -> ModelState {
     match std::fs::metadata(path) {
+        // Something is there and it is not a file. `metadata` answers happily for a directory —
+        // with a length, which on Linux is 4096 and would read as a damaged model of exactly
+        // that size — so the one thing it does not say is the thing that matters here.
+        Ok(meta) if !meta.is_file() => ModelState::Unreadable {
+            path: path.to_path_buf(),
+            detail: "there is something at this path and it is not a file".to_string(),
+        },
         Ok(meta) => {
             let bytes = meta.len();
             match expected {
@@ -219,7 +236,16 @@ pub fn inspect(path: &Path, expected: Option<u64>) -> ModelState {
                 _ => ModelState::Ready { path: path.to_path_buf(), bytes },
             }
         }
-        Err(_) => ModelState::Absent { path: path.to_path_buf() },
+        // Only "it is not there" is absence. Everything else — a permission, a directory in the
+        // way, an I/O error on a failing disk — is a machine somebody has to look at, and
+        // offering to download 141 MB over it would be this program answering the wrong
+        // question confidently.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ModelState::Absent { path: path.to_path_buf() }
+        }
+        Err(error) => {
+            ModelState::Unreadable { path: path.to_path_buf(), detail: error.to_string() }
+        }
     }
 }
 
@@ -883,6 +909,44 @@ mod tests {
             inspect(&path, Some(10)),
             ModelState::Damaged { path: path.clone(), bytes: 3, expected: 10 },
             "a short file must not read as a missing one, or the next run fails inside whisper"
+        );
+    }
+
+    /// **The fourth answer, and it used to be the first one.** Everything `metadata` refused was
+    /// read as "nothing is there", which puts a Download button in front of a person a download
+    /// cannot help. A directory is the case that is reachable on both platforms: `metadata`
+    /// answers for one, with a length — 4096 on Linux — so it would otherwise have read as a
+    /// damaged model of exactly that size.
+    #[test]
+    fn something_that_is_not_a_file_is_not_a_missing_one() {
+        let dir = tempdir();
+        let path = dir.join("ggml-base.bin");
+        std::fs::create_dir(&path).expect("create a directory where the model should be");
+
+        assert!(
+            matches!(inspect(&path, Some(10)), ModelState::Unreadable { .. }),
+            "a directory in the model's place is neither absent nor a short download; it is \
+             something a person has to look at"
+        );
+    }
+
+    /// The other half of the same rule, and the half only one platform can decide.
+    ///
+    /// `metadata` on a path whose *parent* is a file fails with `ENOTDIR` on Unix — which is not
+    /// `NotFound`, and so is not an absence. Windows answers `ERROR_PATH_NOT_FOUND`, which `std`
+    /// maps to `NotFound`, so there the same situation genuinely reads as absent and this test
+    /// would be asserting the opposite of what the platform says. Hence `#[cfg(unix)]` rather
+    /// than a cleverer path: the arm is right on both and only one of them can show it.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_cannot_be_walked_is_not_a_missing_file() {
+        let dir = tempdir();
+        let blocking = dir.join("in-the-way");
+        std::fs::write(&blocking, b"not a directory").expect("write");
+
+        assert!(
+            matches!(inspect(&blocking.join("ggml-base.bin"), Some(10)), ModelState::Unreadable { .. }),
+            "only `not found` is an absence; everything else is a machine somebody has to look at"
         );
     }
 

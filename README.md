@@ -262,26 +262,70 @@ Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl
 
 ## Voice
 
-Speech runs on this machine. Whisper transcribes, Supertonic speaks, and the models are fetched
-on first run rather than shipped in the installer.
+Speech runs on this machine. Whisper transcribes, and the model is fetched on first run rather
+than shipped in the installer.
+
+**Nothing listens until you turn it on.** The switch is on the Voice tab. Opening a microphone
+and downloading 141 MB are not things to do to somebody who has not asked for either, and a
+feature that never starts on its own is not better — so it is asked once and then remembered:
+the answer is kept with the rest of this instance's settings and Zyris starts listening again the
+next time it runs. A run started with `--headless` never listens, because it has no window and no
+push-to-talk key for anybody to hold.
 
 - **Hold the hotkey and talk.** Everything you say is a command. No wake word, no false triggers.
-- **Or leave the microphone on** and call it by name. The wake word is one you record yourself,
-  so it is a sound rather than a phrase in a particular language.
-- **When the agent asks you something,** answer without calling it — that window opens on its own
-  and closes when you reply.
+- **While the switch is on** the microphone is open and nothing is recorded: a turn starts when
+  the key goes down and ends when it comes up, and the recording is gone once it has been turned
+  into text.
 
-Replies are spoken sentence by sentence as they stream in, so the wait is only ever for the first
-one. Code blocks are read as "code" and parenthetical asides are skipped, because an answer read
-aloud is not the same text as an answer on screen. Start talking and it stops to listen; what it
-had not yet said does not go into the transcript.
+The text does not go anywhere yet. It arrives in the window, and handing it to an agent is step 8
+below, along with speaking the answer back.
+
+### The push-to-talk key
+
+`Ctrl+Alt+Space`, on Windows and on an X11 session, where an application is allowed to ask for a
+key.
+
+**A Wayland session is different and Zyris cannot bind the key for you.** It registers a global
+shortcut called `push_to_talk` through the GlobalShortcuts portal, and which key points at it is
+your compositor's business — version 1 of that interface gives an application no way to choose
+one or even to offer you the choice. On Hyprland the line is
+
+```
+bind = CTRL ALT, space, global, :push_to_talk
+```
+
+and the Voice tab shows it, for the desktops whose spelling has actually been checked. On any
+other it names the shortcut and leaves the line to you rather than guessing: a wrong line pasted
+into a configuration file costs an evening. Zyris also cannot tell whether you have bound one —
+your compositor does not say.
+
+**Some desktops cannot do this at all.** XFCE, MATE, Cinnamon and LXQt fall back to
+`xdg-desktop-portal-gtk`, which implements no GlobalShortcuts interface, so no application can
+register a global key there. The Voice tab says so instead of offering a switch that could never
+work.
+
+**Not yet confirmed on Wayland: whether letting go of the key gets through.** The portal has a
+signal for the release, Zyris listens for it, and it has not been possible to check here —
+dispatching the shortcut by hand sends a press and never a release, so it takes a person holding
+a real key. If a turn does not end when you let go, Zyris ends it after 30 seconds and throws the
+recording away rather than sending half a sentence on.
+
+### The wake word
+
+You can record one on the Voice tab: five takes, kept as 16 kHz WAV files in this computer's data
+directory alongside a manifest that says what was recorded and how. **Nothing listens for one
+yet.** Matching is a separate piece of work; the recordings exist so that it can be added later
+without asking you to record them again, and recording one today does not make Zyris respond to
+it.
+
+### The model
 
 **The speech model is 141 MB and is downloaded once**, into this computer's cache directory
 (`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\zyris\cache\models` on Windows) rather than
 into the installer. It is checked against a published SHA-256 before it is put in place, so an
 interrupted or intercepted download leaves nothing behind and the next run simply offers to fetch
 it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it and no download
-happens at all.
+happens at all — Zyris then takes that file as given, and will neither replace it nor delete it.
 
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such
