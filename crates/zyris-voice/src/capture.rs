@@ -798,29 +798,58 @@ impl Capture {
 
 /// The audio callback: widen to `f32`, convert, chunk, send.
 ///
+/// **A type rather than a closure, and that is the only reason it is one.** `cpal` wants
+/// `FnMut(&[T], &InputCallbackInfo)`, and `InputCallbackInfo` has private fields — so a test
+/// cannot call the closure [`widen`] returns, and the four lines that join the widening, the
+/// conversion and the chunking together were the one stage of the audio path nothing could
+/// reach. `widen` is now the adaptor to `cpal`'s signature and adds nothing else;
+/// `tests/a_held_key_turns_a_recording_into_text.rs` drives this.
+///
 /// Generic over the device's sample type because Windows hands over its mix format and will not
 /// convert. The buffers are all allocated on the first call and reused, so the steady state is
 /// one allocation per chunk sent and nothing else.
-fn widen<T>(
-    mut conversion: Conversion,
-    mut chunker: Chunker,
-    sender: mpsc::UnboundedSender<Captured>,
-) -> impl FnMut(&[T], &cpal::InputCallbackInfo)
-where
-    T: cpal::SizedSample,
-    f32: FromSample<T>,
-{
-    let mut wide: Vec<f32> = Vec::new();
-    move |data: &[T], _: &cpal::InputCallbackInfo| {
-        wide.clear();
-        wide.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
-        for chunk in chunker.push(conversion.feed(&wide)) {
+pub struct Callback {
+    conversion: Conversion,
+    chunker: Chunker,
+    /// The device's samples as `f32`, before conversion. Kept across calls so the steady state
+    /// allocates nothing for it.
+    wide: Vec<f32>,
+}
+
+impl Callback {
+    /// The conversion from the device's format, and the chunk length the caller asked for.
+    pub fn new(conversion: Conversion, chunker: Chunker) -> Callback {
+        Callback { conversion, chunker, wide: Vec::new() }
+    }
+
+    /// One buffer from the device, as [`Captured::Audio`] chunks on `sender`.
+    pub fn deliver<T>(&mut self, data: &[T], sender: &mpsc::UnboundedSender<Captured>)
+    where
+        T: cpal::SizedSample,
+        f32: FromSample<T>,
+    {
+        self.wide.clear();
+        self.wide.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
+        for chunk in self.chunker.push(self.conversion.feed(&self.wide)) {
             // Nobody listening means the session ended; the stream is about to be dropped.
             if sender.send(Captured::Audio(chunk.to_vec())).is_err() {
                 return;
             }
         }
     }
+}
+
+fn widen<T>(
+    conversion: Conversion,
+    chunker: Chunker,
+    sender: mpsc::UnboundedSender<Captured>,
+) -> impl FnMut(&[T], &cpal::InputCallbackInfo)
+where
+    T: cpal::SizedSample,
+    f32: FromSample<T>,
+{
+    let mut callback = Callback::new(conversion, chunker);
+    move |data: &[T], _: &cpal::InputCallbackInfo| callback.deliver(data, &sender)
 }
 
 #[cfg(test)]

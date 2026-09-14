@@ -210,56 +210,6 @@ and a build or a fetch that was working would be the thing it cut off. This is n
 `terminal`'s `exec` with no `timeout_ms` has the same property, and so does any call an agent
 abandons.
 
-### Checking it against a real agent — this has not been run
-
-Everything above has tests behind it, up to and including a real MCP server started from a real
-`mcp-servers.json`, announced on a live node, and called by a peer on the other end of a real
-connection. **What no test on this side can reach is Attacca.** Whether an agent that was never
-told an MCP server exists picks a promoted tool out of the list and calls it like any other is the
-one claim on this page that only a person can check, and **nobody has checked it.** What follows
-is the procedure, written down rather than performed.
-
-It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
-today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
-the file-transfer check that roadmap step 5 left owed; if you are running that one too, this rides
-along with it on the same machine and the same agent. What it does need throughout is an agent on
-Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, and only steps 1, 2,
-5, 8 and 9 happen entirely on this computer.
-
-Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl` on Linux and
-`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the server list named above. A
-`--server` run keeps its own, in a `zyris-dev-…` directory of its own rather than in `zyris`.
-
-1. **Configure it.** Put one entry in the file named above, then **restart Zyris** — the file is
-   read at startup and never again.
-2. **Look at the MCP tab.** Pass: the server is listed as running, with the tools it promoted and
-   the capability name an agent will address (`mcp_<name>`). The log says the same thing on the
-   line reading `an MCP server is promoted`. If it says the server failed, that is the reason, and
-   there is nothing to check further until it starts.
-3. **Ask an agent on Attacca what this machine can do**, without mentioning MCP. Pass: the reply
-   names `mcp_<name>` beside `terminal` and `file_io`, with the server's own tool descriptions.
-   Fail: the agent lists the built-ins only, or describes the promoted one as something it cannot
-   use.
-4. **Ask it to do something only that server can do.** Pass: the answer is the server's own, and
-   the agent treats the call as ordinary — no "I do not have a tool for that", no asking you to
-   run something. That is the whole claim on the front page.
-5. **Read the audit tail on the Tools tab.** Pass: a line naming `mcp_<name>` and the tool, marked
-   allowed, **with no arguments on it** — and the argument you actually sent appears nowhere in
-   `audit.jsonl`. Fail, and it is the serious kind: an MCP server's arguments are being written to
-   disk.
-6. **Hit pause and ask again.** Pass: the agent reports that this machine is paused, in the same
-   words it would use for `terminal` — not that the tool is broken or missing.
-7. **Switch the server off on the MCP tab while the agent is connected**, then ask the agent what
-   it can do. Pass: the capability is gone from its list within a moment, without either end
-   reconnecting, and a call to it fails as not announced rather than hanging. Switch it back on
-   and it comes back.
-8. **Kill the server's process from outside Zyris** — Task Manager, or `kill` on Linux. Pass:
-   within about a second the MCP tab shows it as having stopped on its own, *not* as one you
-   switched off, and the capability is no longer announced to the agent.
-9. **Misspell a field in the file and restart.** Pass: Zyris starts, the MCP tab names the problem
-   and the path of the file, and `terminal` and `file_io` still work. Fail: Zyris does not start,
-   or the tab says you have configured no servers.
-
 ## Voice
 
 Speech runs on this machine. Whisper transcribes, and the model is fetched on first run rather
@@ -308,7 +258,9 @@ work.
 signal for the release, Zyris listens for it, and it has not been possible to check here —
 dispatching the shortcut by hand sends a press and never a release, so it takes a person holding
 a real key. If a turn does not end when you let go, Zyris ends it after 30 seconds and throws the
-recording away rather than sending half a sentence on.
+recording away rather than sending half a sentence on. The check is written out under
+[What nobody has checked by hand](#a-microphone-a-key-and-windows), with the rest of what is
+owed.
 
 ### The wake word
 
@@ -331,6 +283,116 @@ happens at all — Zyris then takes that file as given, and will neither replace
 transcription engine is compiled without `-march=native` so that the release runs on every such
 machine rather than only on the one that built it; on anything older it will not start. Nothing
 else in Zyris has that requirement.
+
+## What nobody has checked by hand
+
+Everything on this page has tests behind it, and two kinds of claim are outside what any test on
+this machine can reach: **an agent on Attacca**, and **a person at a real keyboard and a real
+microphone, on a desktop that is not this one**. What follows is both lists, written down rather
+than performed. **None of it has been run.** They are together so they can be done in one sitting.
+
+### An agent, and a promoted MCP tool
+
+The MCP path is tested up to and including a real server started from a real `mcp-servers.json`,
+announced on a live node, and called by a peer on the other end of a real connection. **What no
+test on this side can reach is Attacca.** Whether an agent that was never told an MCP server
+exists picks a promoted tool out of the list and calls it like any other is a claim only a person
+can check, and **nobody has checked it.**
+
+It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
+today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
+the file-transfer check that roadmap step 5 left owed; if you are running that one too, this rides
+along with it on the same machine and the same agent. What it does need throughout is an agent on
+Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, and only steps 1, 2,
+5, 8 and 9 happen entirely on this computer.
+
+Step 5 reads the audit log. Zyris writes it to `~/.local/share/zyris/audit.jsonl` on Linux and
+`%APPDATA%\attacca\zyris\data\audit.jsonl` on Windows — beside the `mcp-servers.json` described
+under **MCP servers** above. A `--server` run keeps its own, in a `zyris-dev-…` directory of its
+own rather than in `zyris`.
+
+1. **Configure it.** Put one entry in `mcp-servers.json`, then **restart Zyris** — the file is
+   read at startup and never again.
+2. **Look at the MCP tab.** Pass: the server is listed as running, with the tools it promoted and
+   the capability name an agent will address (`mcp_<name>`). The log says the same thing on the
+   line reading `an MCP server is promoted`. If it says the server failed, that is the reason, and
+   there is nothing to check further until it starts.
+3. **Ask an agent on Attacca what this machine can do**, without mentioning MCP. Pass: the reply
+   names `mcp_<name>` beside `terminal` and `file_io`, with the server's own tool descriptions.
+   Fail: the agent lists the built-ins only, or describes the promoted one as something it cannot
+   use.
+4. **Ask it to do something only that server can do.** Pass: the answer is the server's own, and
+   the agent treats the call as ordinary — no "I do not have a tool for that", no asking you to
+   run something. That is the whole claim on the front page.
+5. **Read the audit tail on the Tools tab.** Pass: a line naming `mcp_<name>` and the tool, marked
+   allowed, **with no arguments on it** — and the argument you actually sent appears nowhere in
+   `audit.jsonl`. Fail, and it is the serious kind: an MCP server's arguments are being written to
+   disk.
+6. **Hit pause and ask again.** Pass: the agent reports that this machine is paused, in the same
+   words it would use for `terminal` — not that the tool is broken or missing.
+7. **Switch the server off on the MCP tab while the agent is connected**, then ask the agent what
+   it can do. Pass: the capability is gone from its list within a moment, without either end
+   reconnecting, and a call to it fails as not announced rather than hanging. Switch it back on
+   and it comes back.
+8. **Kill the server's process from outside Zyris** — Task Manager, or `kill` on Linux. Pass:
+   within about a second the MCP tab shows it as having stopped on its own, *not* as one you
+   switched off, and the capability is no longer announced to the agent.
+9. **Misspell a field in the file and restart.** Pass: Zyris starts, the MCP tab names the problem
+   and the path of the file, and `terminal` and `file_io` still work. Fail: Zyris does not start,
+   or the tab says you have configured no servers.
+
+### A microphone, a key, and Windows
+
+Speech is tested as far as a file can stand in for a microphone: a recording goes in at the
+48 kHz stereo an ordinary device delivers, through the real rate conversion, the real silence
+rule and real whisper, and the sentence comes back out of the same `VoiceEvent` the window
+renders. What no test here has is a microphone, a finger on a key, a Wayland compositor, or a
+Windows machine. Six things are owed, and **the first can still change what the product is.**
+
+1. **Does letting go of the key get through? — Wayland only, and it is the one that matters.**
+   Bind the shortcut as the Voice tab describes, turn listening on, hold the key for about two
+   seconds while saying a sentence, then let go. Three times, unhurried.
+   Pass: each hold ends *when you let go* — the window leaves Listening within a moment and the
+   text arrives.
+   Fail: nothing happens when you let go, and about thirty seconds later the turn is thrown away
+   saying the key was held for more than thirty seconds without coming up. That is the portal
+   never delivering the release.
+   **If it fails, hold-to-talk is impossible on a Wayland session** and the interaction has to
+   change — press to start and press again to stop is a different product, not a bug fix.
+   Nothing else depends on it: an X11 session and Windows both report the release themselves.
+   The Voice tab says today that this is unconfirmed; if it passes, that sentence should go.
+2. **With the window closed.** Close the window to the tray, hold the key, say something, and
+   open the window again. Pass: the transcript is there and the microphone never stopped —
+   speech lives in the core and the window is a reader of it, which is the claim. A run started
+   with `--headless` is the opposite case and is meant to listen to nothing at all: it has no
+   key for anybody to hold.
+3. **Windows: one hold is one turn.** Hold the key for about five seconds and say a sentence in
+   the middle of it. Pass: the window enters Listening once and the whole sentence comes back as
+   one transcript. Fail: several turns, or a transcript that begins in the middle of what you
+   said — which would mean a held key is repeating. Windows is asked not to repeat the hotkey
+   while it is held; that request has been read in the source and never seen work. Tap the key
+   on its own too: a tap should come back as "nobody spoke", not as a turn that never ends.
+4. **Windows: the microphone, including a refused one.** Pass: the Voice tab lists devices with
+   readable names, and the one you pick is the one that records. Then turn microphone access off
+   for desktop applications in Windows' privacy settings and turn listening on. Pass: Zyris says
+   Windows has not given it access and offers the settings page. Fail: any other wording, and
+   especially a bare error number — the sound library does not classify a refusal, so Zyris reads
+   the message text, and the spellings it looks for were read out of the Windows sources rather
+   than produced by a real refusal.
+5. **A wake word take while listening is on.** Turn listening on, then record the five takes on
+   the same tab, and hold the push-to-talk key between them. Pass: every take records and the key
+   goes on producing turns. Fail: a take that will not start, a take that comes back silent, or a
+   key that stops working afterwards — recording a take opens a **second** input stream on the
+   same device without closing the first, and no machine has been asked to do that yet.
+6. **Korean.** Say something in Korean and read the transcript. **Only English has ever been
+   measured**, and one thing about this is already known rather than owed: Zyris *tells* whisper
+   the audio is English instead of asking it to work the language out, because detection measured
+   over three times slower on this machine. That is a bias and a cost rather than a switch —
+   telling it the wrong language was tried here on an English recording and it still produced the
+   English sentence, six times more slowly — so what a Korean sentence comes back as could be
+   anything from usable to nonsense, and nobody knows which. What this check is for is deciding
+   whether the answer is a language setting and what it should cost, and that decision belongs
+   with the step that hands the text to an agent rather than here.
 
 ## Install
 
@@ -422,8 +484,10 @@ lands in what order. Nothing here is ready to install yet.
 4. Autostart — Windows Task Scheduler, systemd user units (at desktop login, not at boot), installers (done)
 5. File transfer — peer endpoint, inbox, approving a new machine's key from the window (done)
 6. MCP — local servers promoted to capabilities (done, except for the
-   [check against a real agent](#checking-it-against-a-real-agent--this-has-not-been-run))
-7. Voice in — audio, echo cancellation, wake word, transcription
+   [check against a real agent](#an-agent-and-a-promoted-mcp-tool))
+7. Voice in — audio, wake word recording, transcription (done, except for the
+   [checks that need a person](#a-microphone-a-key-and-windows); echo cancellation is built and
+   cancels nothing until there is something to speak)
 8. Voice out — streaming speech, interruption
 
 ## Security
