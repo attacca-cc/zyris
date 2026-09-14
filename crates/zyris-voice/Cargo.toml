@@ -64,6 +64,12 @@ optional = true
 workspace = true
 optional = true
 
+# The wake word manifest. Already in this graph through `reqwest`; naming it here is what
+# makes it usable, and it is behind the feature like everything else heavy.
+[dependencies.serde_json]
+workspace = true
+optional = true
+
 # The digest that says the bytes are the model and not a proxy's error page.
 [dependencies.sha2]
 workspace = true
@@ -100,6 +106,7 @@ voice = [
     "dep:reqwest",
     "dep:rustls",
     "dep:sha2",
+    "dep:serde_json",
     "tokio/rt",
 ]
 

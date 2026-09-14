@@ -55,6 +55,15 @@ pub mod vad;
 #[cfg(feature = "voice")]
 pub mod stt;
 
+// The state machine: Idle -> Listening -> Thinking, and what a push-to-talk key does to it.
+// Everything above is a piece; this is the only thing that publishes a `VoiceEvent`.
+#[cfg(feature = "voice")]
+pub mod session;
+
+// Recording a wake word, and keeping it. Nothing matches it -- see the module.
+#[cfg(feature = "voice")]
+pub mod wake;
+
 /// Why a build with no `voice` feature will never hear anything.
 ///
 /// Worded for a person reading the window, not for a developer reading a log: whoever installed
@@ -102,6 +111,25 @@ pub enum VoiceEvent {
     /// The turn ended because something failed, and this is what to tell the person.
     #[serde(rename_all = "camelCase")]
     Failed { reason: String },
+}
+
+/// What the push-to-talk key did.
+///
+/// The same two things `zyris-app`.s `hotkey::HotkeyEvent` carries, and deliberately a second
+/// type rather than a shared one: a global shortcut is a desktop-session concern, it lives in
+/// `zyris-app` because `--headless` has none, and `zyris-app` is the crate that depends on this
+/// one. `zyris-app` maps between them in one line.
+///
+/// **Declared here rather than in [`session`], which is where it is used, and that is the
+/// point.** `session` is behind the `voice` feature and `zyris-app` may contain no
+/// `#[cfg(feature = "voice")]` anywhere — so a hotkey event has to be nameable in both builds
+/// or the mapping could not be written at all. Same accommodation [`VoiceEvent`] makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Push {
+    /// The key went down.
+    Pressed,
+    /// The key came up.
+    Released,
 }
 
 /// Whether speech can work here at all, and what to say when it cannot.
