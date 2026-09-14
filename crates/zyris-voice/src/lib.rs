@@ -19,6 +19,13 @@
 //! is **2m 07s at 291% CPU with a 717 MB peak** on this machine, against a 1.4 s warm
 //! `cargo build --release`.
 //!
+//! # What else is public, and why it is not a second data path
+//!
+//! `capture` (present only with the `voice` feature) is public for the same reason [`Voice::describe`] is, below: a window has to be
+//! able to list the microphones a person can choose between and say which one is in use, and an
+//! event stream cannot say it. Nothing in it publishes a [`VoiceEvent`] — task 6's session is
+//! what turns audio into events, and it is the only caller of `capture::Capture::open`.
+//!
 //! # Why `describe()` exists beside the stream
 //!
 //! The design says this crate exposes one thing outward, and the *events* really are one
@@ -29,6 +36,11 @@
 
 use tokio::sync::broadcast;
 
+// The microphone. Behind the feature because every line of it is `cpal` or `rubato`, and the
+// off build has neither — see this module's own documentation for what that costs.
+#[cfg(feature = "voice")]
+pub mod capture;
+
 /// Why a build with no `voice` feature will never hear anything.
 ///
 /// Worded for a person reading the window, not for a developer reading a log: whoever installed
@@ -38,8 +50,10 @@ pub const NOT_COMPILED_IN: &str =
 
 /// Why a build that *has* the audio stack still hears nothing today.
 ///
-/// Temporary, and owed to step 7's later tasks: the dependencies are compiled in and nothing is
-/// wired to them yet. [`start`] stops returning it as soon as capture exists.
+/// Temporary, and owed to step 7's later tasks. As of task 3 the microphone is there —
+/// `capture::Capture::open` delivers 16 kHz mono chunks — but nothing turns them into a
+/// [`VoiceEvent`] yet, and that is what this sentence is about. [`start`] stops returning it
+/// when task 6 gives it a session to start.
 ///
 /// Public for the same reason [`NOT_COMPILED_IN`] is: it is a sentence the window renders, and
 /// the two builds have to be able to say different things about the same silence.
@@ -87,7 +101,10 @@ pub enum VoiceSupport {
     /// The audio stack is compiled in and this machine can be listened to. Events arrive on
     /// [`Voice::events`].
     ///
-    /// **Not yet reachable.** Capture is task 3 of step 7; until it exists, [`start`] answers
+    /// **Not yet what [`start`] answers.** Capture exists as of task 3 of step 7 and
+    /// `capture::support()` returns this on a machine with a microphone — but a session that
+    /// turns audio into [`VoiceEvent`]s is task 6, and until there is one, [`start`] would be
+    /// claiming a stream that nothing publishes to. So it still answers
     /// [`VoiceSupport::Unavailable`] on both builds, with different reasons.
     Ready,
     /// Nothing will ever arrive on the stream, and this is why.
