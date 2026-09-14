@@ -78,12 +78,14 @@ struct State {
     /// every build, so a handle on a node that has been given up on is dropped rather than
     /// written to.
     node: Option<zyris::Capabilities>,
+    /// How many times the list has been replaced. See [`LiveCapabilities::generation`].
+    generation: u64,
 }
 
 impl LiveCapabilities {
     /// What this node announces when it starts.
     pub fn new(capabilities: Vec<Arc<dyn ServeCapability>>) -> LiveCapabilities {
-        LiveCapabilities(Arc::new(Mutex::new(State { announced: capabilities, node: None })))
+        LiveCapabilities(Arc::new(Mutex::new(State { announced: capabilities, node: None, generation: 0 })))
     }
 
     /// The names announced right now, in announcement order.
@@ -112,6 +114,23 @@ impl LiveCapabilities {
     /// loop; it is meant for a person asking a question, not for a request path.
     pub async fn descriptors(&self) -> Vec<zyris::CapabilityDescriptor> {
         self.0.lock().await.announced.iter().map(|c| c.descriptor()).collect()
+    }
+
+    /// How many times what this node announces has changed, counting from zero.
+    ///
+    /// **One change is one list on the wire.** `zyris.announce` is full replacement — there is no
+    /// way to say "and also this" — so every change here is a whole capability list sent to every
+    /// live connection, and this counts them. Nothing on the wire carries such a number and
+    /// [`zyris::Connection`] answers only with the peer's current list, so from outside this type
+    /// there is no way to tell one change from three that ended in the same place.
+    ///
+    /// That difference is the whole reason [`Self::remove_all`] exists rather than a loop over
+    /// [`Self::remove`], and this is what makes it assertable: the lists in between a loop's
+    /// withdrawals advertise capabilities the caller has already decided are gone.
+    ///
+    /// A change that is refused or that removes nothing does not count, because nothing was sent.
+    pub async fn generation(&self) -> u64 {
+        self.0.lock().await.generation
     }
 
     /// Announce one more thing.
@@ -227,6 +246,9 @@ impl State {
             node.replace(next.clone()).await?;
         }
         self.announced = next;
+        // After the node accepted it, for the same reason the list is written after: a change the
+        // node refused was never sent and must not be counted as though it had been.
+        self.generation += 1;
         Ok(())
     }
 }

@@ -786,3 +786,36 @@ async fn leaving_a_machine_with_no_servers_is_not_a_wait() {
 
     assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
 }
+
+#[tokio::test]
+async fn three_deaths_rebuild_the_announcement_once_rather_than_three_times() {
+    // The half the test above cannot see. Both versions end with the same list, so the end state
+    // proves nothing about what went out on the way there — and what went out is the whole point:
+    // `zyris.announce` is full replacement, so three withdrawals made one at a time are three
+    // lists, the first two of them still advertising servers this machine has already found dead.
+    //
+// Counted on this side, because there is nothing to watch on the other: nothing on the wire
+    // carries a generation, and `zyris::Connection` answers only with the peer's current list.
+    // `LiveCapabilities::generation` counts the lists that went out, which is exactly the question.
+    let machine = Machine::with(vec![
+        entry("one", &["--exit-after", "100"]),
+        entry("two", &["--exit-after", "100"]),
+        entry("three", &["--exit-after", "100"]),
+    ])
+    .await;
+    let (agent, _node) = agent_connected_to(&machine.live).await;
+    machine.peer_sees(&agent, &["mcp_one", "mcp_two", "mcp_three"]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = machine.live.generation().await;
+    assert_eq!(machine.servers.reap().await, 3);
+    let lists = machine.live.generation().await - before;
+
+    assert_eq!(
+        lists, 1,
+        "reaping three dead servers sent {lists} capability lists; the first {} of them still \
+         advertised servers this machine had already found dead",
+        lists.saturating_sub(1)
+    );
+    machine.peer_sees(&agent, &[]).await;
+}

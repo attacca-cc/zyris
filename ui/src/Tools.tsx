@@ -335,8 +335,17 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
             </p>
           </>
         ) : (
-          <p className={announcementProblem ? "problem" : "muted"}>
-            {announcementProblem ?? "Reading what this computer offers."}
+          !announcementProblem && <p className="muted">Reading what this computer offers.</p>
+        )}
+        {/* Shown whether or not there is a list, which is the part that used to be missing. This
+            screen re-reads whenever a local MCP server moves, so a read failing *after* one has
+            succeeded is now an ordinary thing rather than a first-load case — and the list left on
+            the screen is then the last answer rather than the current one. Saying nothing would be
+            a correct-looking list that has quietly stopped being current. */}
+        {announcementProblem && (
+          <p className="problem note">
+            {announcementProblem}
+            {announcement && " What is listed above is the last answer this computer gave."}
           </p>
         )}
       </section>

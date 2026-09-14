@@ -33,11 +33,12 @@ server to reach, because a tool that is always going to fail is worse than a too
 **Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live, and so is
 the promotion of local MCP servers — see [MCP servers](#mcp-servers) — though no agent on Attacca
 has yet called one of their tools end to end.** Between those five that is twenty-five tools —
-an MCP server adds however many its own tools come to, on top — and a capability is all or nothing — announcing `file_io` announces `remove`, and announcing `terminal`
-announces `exec` with whatever command an agent chooses. A path an agent sends without a leading
-slash starts in your home directory. That is where relative paths start rather than a fence around
-them: an absolute path goes where it says, and a command can work anywhere you can. What bounds
-this is the pause switch, the audit log, and what Attacca lets an agent call in the first place.
+an MCP server adds however many its own tools come to, on top — and a capability is all or
+nothing: announcing `file_io` announces `remove`, and announcing `terminal` announces `exec` with
+whatever command an agent chooses. A path an agent sends without a leading slash starts in
+your home directory. That is where relative paths start rather than a fence around them: an
+absolute path goes where it says, and a command can work anywhere you can. What bounds this is the
+pause switch, the audit log, and what Attacca lets an agent call in the first place.
 
 `input` and `screen_capture` are announced together or not at all — an agent that can see the
 screen but not act on it is half useful, and one that can act but not see is guessing
@@ -220,8 +221,8 @@ is the procedure, written down rather than performed.
 
 It needs one enrolled machine and one stdio MCP server you already trust — whichever you run
 today; nothing here depends on which. **No second computer is involved anywhere in it**, unlike
-the file-transfer check that step 5 left owed; if you are running that one too, this rides along
-with it on the same machine and the same agent. What it does need throughout is an agent on
+the file-transfer check that roadmap step 5 left owed; if you are running that one too, this rides
+along with it on the same machine and the same agent. What it does need throughout is an agent on
 Attacca talking to this node: steps 3, 4, 6 and 7 are all asked of the agent, and only steps 1, 2,
 5, 8 and 9 happen entirely on this computer.
 

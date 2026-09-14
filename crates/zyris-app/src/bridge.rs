@@ -93,40 +93,70 @@ pub fn forward(
                 // over a live link, with no command to ask again.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "the window fell behind on core events; resyncing");
-                    if let Some(event) = bus.latest() {
-                        if let Err(error) = app.emit(EVENT_NAME, &event) {
-                            tracing::warn!(%error, "could not resend the catch-up event");
+                    for message in after_falling_behind(&bus, &gate, &pending) {
+                        let sent = match &message {
+                            Resend::Core(event) => app.emit(EVENT_NAME, event),
+                            Resend::AskAgain => app.emit(RESYNC_EVENT_NAME, ()),
+                        };
+                        if let Err(error) = sent {
+                            tracing::warn!(%error, ?message, "could not resync the window");
                         }
-                    }
-                    let paused = CoreEvent::Paused { paused: gate.is_paused() };
-                    if let Err(error) = app.emit(EVENT_NAME, &paused) {
-                        tracing::warn!(%error, "could not resend the switch");
-                    }
-                    // And the question, for the same reason and read the same way: off the thing
-                    // that owns it rather than off the bus, because a transient publish leaves
-                    // nothing behind. Losing this one costs more than losing a tool call — an
-                    // agent's `send_to` is blocked on it, and it answers itself with a refusal
-                    // three quarters of a minute later if nobody is shown it. Absent is the
-                    // ordinary case and says nothing: `question()` is `None` whenever there is
-                    // no question, which is almost always.
-                    if let Some(question) = pending.question() {
-                        if let Err(error) = app.emit(EVENT_NAME, peer_question_event(&question)) {
-                            tracing::warn!(%error, "could not resend the waiting peer question");
-                        }
-                    }
-                    // And everything that cannot be named. An MCP server change is published
-                    // transiently and nothing holds the last one, so there is no way to say
-                    // *which* server moved — only that the window's idea of them is no longer
-                    // worth anything. The screens that read through a command ask again; see
-                    // [`RESYNC_EVENT_NAME`].
-                    if let Err(error) = app.emit(RESYNC_EVENT_NAME, ()) {
-                        tracing::warn!(%error, "could not ask the window to read again");
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
+}
+
+/// One thing a window that fell behind is told.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// A core event, named again on [`EVENT_NAME`].
+    Core(CoreEvent),
+    /// [`RESYNC_EVENT_NAME`]: everything that could not be named.
+    AskAgain,
+}
+
+/// Everything to tell a window that missed a stretch of the bus.
+///
+/// **A list rather than four `emit` calls in a row, because the list is the claim.** What a
+/// window that fell behind gets back is the whole of what stops it rendering something untrue,
+/// and the one way to be wrong here is to leave something out — which is invisible in a sequence
+/// of statements and plain in a value. `forward` emits whatever comes back; the tests below say
+/// what has to be in it.
+///
+/// Each item is read off the thing that owns it rather than off the bus, because the bus is what
+/// was just lost: the catch-up value is the only event it still holds, the switch is the gate's,
+/// and a waiting peer question is [`Pending`]'s. `reduce` on the other side is idempotent for
+/// every arm reachable this way, so re-sending something the window already had costs nothing.
+///
+/// [`Resend::AskAgain`] is last and is **not** conditional. It is for everything with no owner to
+/// read: an MCP server change is published transiently and nothing keeps the last one, so there
+/// is no way to say which server moved — only that the window's idea of them is worth nothing.
+/// Sending it when nothing in fact changed costs two commands being re-read; not sending it when
+/// something did leaves a dead server listed as running, and a capability advertised on the Tools
+/// screen that this node has withdrawn, until somebody navigates away and back.
+pub fn after_falling_behind(bus: &EventBus, gate: &Gate, pending: &Pending) -> Vec<Resend> {
+    let mut messages = Vec::new();
+    // Lagged drops a contiguous range of whatever was in the ring, so the window did not merely
+    // miss some tool calls — it may have missed the state change that decides which screen it
+    // renders. Without this a lost `Connected` leaves the window claiming "Not connected" over a
+    // live link, with no command to ask again.
+    if let Some(event) = bus.latest() {
+        messages.push(Resend::Core(event));
+    }
+    // Off the gate, not the bus: `Paused` is published transiently and is never in that slot.
+    messages.push(Resend::Core(CoreEvent::Paused { paused: gate.is_paused() }));
+    // Losing this one costs more than losing a tool call — an agent's `send_to` is blocked on it,
+    // and it answers itself with a refusal three quarters of a minute later if nobody is shown
+    // it. Absent is the ordinary case and says nothing: `question()` is `None` whenever there is
+    // no question, which is almost always.
+    if let Some(question) = pending.question() {
+        messages.push(Resend::Core(peer_question_event(&question)));
+    }
+    messages.push(Resend::AskAgain);
+    messages
 }
 
 /// What the core last published, for a window whose listener came up too late to see it live.
@@ -520,6 +550,67 @@ mod tests {
         // which is exactly the failure this channel exists to fix.
         assert_eq!(RESYNC_EVENT_NAME, "core-resync");
         assert_ne!(RESYNC_EVENT_NAME, EVENT_NAME);
+    }
+
+    #[test]
+    fn a_window_that_fell_behind_is_asked_to_read_again() {
+        // **The item with no owner to read it off, and the reason this channel exists.** The
+        // other three are recoverable because something holds them: the bus keeps one catch-up
+        // value, the gate holds the switch, `Pending` holds a waiting question. An MCP server
+        // change is published transiently and nothing keeps the last one, so a window that
+        // missed one cannot be told which server moved — only that its idea of them is worth
+        // nothing. Leave this out and such a window shows a dead server as running, and lists a
+        // capability this node has withdrawn, until somebody navigates away and back.
+        let bus = EventBus::new(8);
+        let gate = Gate::running();
+        let pending = Pending::new();
+
+        let messages = after_falling_behind(&bus, &gate, &pending);
+
+        assert!(
+            messages.contains(&Resend::AskAgain),
+            "a window that fell behind was told nothing about what could not be named: \
+             {messages:?}"
+        );
+        // Last, so the screens re-read after they have been given everything that could be
+        // named rather than in the middle of it.
+        assert_eq!(messages.last(), Some(&Resend::AskAgain));
+    }
+
+    #[test]
+    fn a_window_that_fell_behind_is_told_the_switch_and_whatever_the_bus_still_holds() {
+        // The rest of the list, asserted here rather than left to `forward`, which needs a
+        // `tauri::AppHandle` and so cannot be reached from a unit test at all. Every one of these
+        // is something a window would otherwise render untruthfully: a lost `Connected` reads as
+        // "Not connected" over a live link, and a lost `Paused` reads as a machine that is
+        // running when it is not.
+        let bus = EventBus::new(8);
+        bus.publish(CoreEvent::Connected {
+            node_id: "n-1".to_string(),
+            node_name: "this-machine".to_string(),
+        });
+        let gate = Gate::running();
+        gate.set_paused(true);
+
+        let messages = after_falling_behind(&bus, &gate, &Pending::new());
+
+        assert!(
+            messages.iter().any(|m| matches!(m, Resend::Core(CoreEvent::Connected { .. }))),
+            "{messages:?}"
+        );
+        assert!(
+            messages.contains(&Resend::Core(CoreEvent::Paused { paused: true })),
+            "the switch is read off the gate, not the bus, because `Paused` is transient: \
+             {messages:?}"
+        );
+        // And nothing about a question, because there is not one. A window handed an absence
+        // would have nothing to do with it; the reducer has no action that carries one.
+        assert!(
+            !messages
+                .iter()
+                .any(|m| matches!(m, Resend::Core(CoreEvent::NeedsPeerApproval { .. }))),
+            "{messages:?}"
+        );
     }
 
     #[test]

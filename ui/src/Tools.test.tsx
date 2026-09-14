@@ -43,8 +43,8 @@ function announcing(capabilities: Announced[]) {
   });
 }
 
-function showing(mcpChange: McpServerEvent | null = null): State {
-  return { ...initialState, screen: "tools", mcpChange };
+function showing(mcpChange: McpServerEvent | null = null, resyncs = 0): State {
+  return { ...initialState, screen: "tools", mcpChange, resyncs };
 }
 
 function readable(): string {
@@ -84,6 +84,41 @@ describe("Tools", () => {
     expect(readable()).toContain("terminal");
   });
 
+  it("asks again when this window is told it fell behind", async () => {
+    // The half `mcpChange` cannot cover. The forwarder drops a contiguous range of events when
+    // the window falls behind; a server change is published transiently and nothing keeps the
+    // last one, so it can say only that something moved. Without a read on that alone, this
+    // screen goes on listing a capability the node has withdrawn.
+    announcing([capability("terminal", ["exec"]), capability("mcp_desk-notes")]);
+    const { rerender } = render(<Tools state={showing()} dispatch={() => {}} />);
+    await waitFor(() => expect(readable()).toContain("mcp_desk-notes"));
+
+    announcing([capability("terminal", ["exec"])]);
+    rerender(<Tools state={showing(null, 1)} dispatch={() => {}} />);
+
+    await waitFor(() => expect(readable()).not.toContain("mcp_desk-notes"));
+    expect(readable()).toContain("terminal");
+  });
+
+  it("stops showing a message from a read that failed once one comes back", async () => {
+    // An answer is an answer. A message left above a fresh list reads as a broken screen, and
+    // this screen re-reads often enough now for that to be an ordinary sequence rather than a
+    // rare one.
+    invoke.mockImplementation((command: string) =>
+      command === "announced_tools"
+        ? Promise.reject("the bridge is gone")
+        : Promise.resolve(command === "recent_tool_calls" ? [] : null),
+    );
+    const { rerender } = render(<Tools state={showing()} dispatch={() => {}} />);
+    await screen.findByText("the bridge is gone");
+
+    announcing([capability("terminal", ["exec"])]);
+    rerender(<Tools state={showing(null, 1)} dispatch={() => {}} />);
+
+    await waitFor(() => expect(readable()).toContain("terminal"));
+    expect(readable()).not.toContain("the bridge is gone");
+  });
+
   it("keeps showing what it last heard when a later read fails", async () => {
     // A read that did not come back is not a computer that offers nothing. The list on the screen
     // is still the last thing this computer said about itself.
@@ -103,8 +138,11 @@ describe("Tools", () => {
       />,
     );
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("announced_tools"));
+    await waitFor(() => expect(readable()).toContain("the bridge is gone"));
+    // The list stays — it is still the last thing this computer said about itself — and it is
+    // said to be that rather than left to look current.
     expect(readable()).toContain("terminal");
+    expect(readable()).toMatch(/last answer this computer gave/i);
   });
 
   it("says a read failed rather than that this computer offers nothing", async () => {
