@@ -87,6 +87,17 @@ function commandLine(server: ServerView): string {
   return [server.command, ...server.args].join(" ");
 }
 
+// What to call a row on the screen.
+//
+// `{ "name": "", "command": "x" }` is a server list this code accepts — `name` is required and an
+// empty string is a string — and such an entry can never be announced, so it is listed here as
+// something to fix like any other. Rendered as its own name it is a row with a blank heading, an
+// empty `aria-label` and an empty React key, identifiable only by the command underneath it. Two
+// of them cannot happen: the server list refuses two entries sharing a name, and "" is a name.
+function rowName(server: ServerView): string {
+  return server.name === "" ? "(this entry has no name)" : server.name;
+}
+
 export function Mcp({ state }: { state: State }) {
   // The list, or `undefined` while the first read is in flight. Never `[]` for a read that has not
   // answered, and never `[]` for one that failed: see `problem`.
@@ -228,9 +239,9 @@ export function Mcp({ state }: { state: State }) {
               const { label, className } = badge(server.state);
               const inFlight = moving === server.name;
               return (
-                <li key={server.name} aria-label={server.name}>
+                <li key={rowName(server)} aria-label={rowName(server)}>
                   <div className="call-head">
-                    <span className="mono call-what">{server.name}</span>
+                    <span className="mono call-what">{rowName(server)}</span>
                     <span className="call-when">
                       <span className={`badge ${className}`}>{label}</span>
                       {/* No switch for a server that can never be announced: starting it fails for

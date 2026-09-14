@@ -68,9 +68,14 @@
 //! - **The same tool name twice inside one server.** Nothing in MCP forbids it. The second is
 //!   unreachable by construction — `CapabilityDescriptor::tool` takes the first, and so does
 //!   [`Promoted::dispatch`] — so announcing it would put a schema in front of an agent that no
-//!   call can ever reach. The first is kept, the rest are dropped, and each drop is recorded in
+//!   call can ever reach. The first is kept, the rest are dropped, and the drop is recorded in
 //!   [`Promoted::dropped`] so the log and the window can say which and why. **Silence is the one
 //!   answer the plan rules out**, and an agent cannot be told mid-announcement, so the person can.
+//!
+//!   **One record per name, not per extra copy.** A server offering `search` three times produces
+//!   one absence and not two: they carry the same name and the same sentence, so a second is a
+//!   duplicate line on the screen rather than a second thing to know — and a list of them keyed by
+//!   name, which is what `ui/src/Mcp.tsx` renders, would have two children under one key.
 //!
 //! Everything else a server name can be — uppercase, spaces, hundreds of characters, a duplicate
 //! of another server's — is carried or is not this file's problem. A capability name is an opaque
@@ -318,14 +323,18 @@ fn translate(server: &str, tools: &[rmcp::model::Tool]) -> (Vec<ToolDescriptor>,
     for tool in tools {
         let name = tool.name.to_string();
         if descriptors.iter().any(|seen| seen.name == name) {
-            dropped.push(DroppedTool {
-                name,
-                reason: format!(
-                    "the MCP server `{server}` offers more than one tool called `{}`, and only \
-                     the first can ever be called",
-                    tool.name
-                ),
-            });
+            // Once per name. A third `search` says nothing the second did not, and `dropped` is
+            // rendered as a list keyed by name.
+            if !dropped.iter().any(|seen: &DroppedTool| seen.name == name) {
+                dropped.push(DroppedTool {
+                    name,
+                    reason: format!(
+                        "the MCP server `{server}` offers more than one tool called `{}`, and only \
+                         the first can ever be called",
+                        tool.name
+                    ),
+                });
+            }
             continue;
         }
         descriptors.push(ToolDescriptor {

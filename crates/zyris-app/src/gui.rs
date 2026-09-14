@@ -7,12 +7,31 @@
 //! platform or exit path. Anything that must happen before the process ends — publishing
 //! `ShuttingDown`, in particular — runs from inside its callback, on `RunEvent::Exit`, which
 //! Tauri delivers right before the process goes away.
+//!
+//! **And it ends the process with `std::process::exit`, so nothing is ever dropped.** Everything
+//! handed to `manage` lives until the process does and then simply stops existing: no destructor
+//! runs, on any exit path. For most of what is managed that costs nothing. It costs something for
+//! the MCP servers, which are child processes this run started — exiting closes their pipes, which
+//! is enough for one that quits on end-of-file and not for one that ignores it, and such a server
+//! is then left running and reparented until somebody finds it in a task manager. So
+//! [`Servers::stop_all`] is called explicitly, from the two places this process leaves from.
 
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus};
 use zyris_runtime::LiveCapabilities;
 use zyris_tools::{Servers, Tools, Transfers};
+
+/// Stop the MCP servers this run started, and wait for them, before the process goes away.
+///
+/// Not a method on anything: it is the one-line bridge between Tauri's two exits and the
+/// supervisor's own [`Servers::stop_all`], and it exists so that neither of those exits can be
+/// the one somebody forgot. Blocking, because both callers are on the main thread with the event
+/// loop already finished or never started — there is nothing left to keep responsive, and the wait
+/// is what makes the stop mean anything.
+fn stop_mcp_servers(servers: &Servers, runtime: &tokio::runtime::Handle) {
+    runtime.block_on(servers.stop_all());
+}
 
 use crate::cli::Mode;
 use crate::confirm::Pending;
@@ -53,6 +72,11 @@ pub fn run(
 
     let setup_bus = bus.clone();
     let setup_runtime = runtime.clone();
+    // For the other exit, the ordinary one. A handle taken here rather than looked up out of
+    // Tauri's state inside the closure: a `state::<T>()` that was never managed panics, and the
+    // last thing this program does is not the place to find that out.
+    let exit_servers = servers.clone();
+    let exit_runtime = runtime.clone();
     let setup_gate = tools.gate().clone();
     let setup_pending = pending.clone();
 
@@ -162,6 +186,11 @@ pub fn run(
                 }
                 Ok(None) => {
                     tracing::info!("another Zyris is already running on this machine; exiting");
+                    // **This run has already started its MCP servers**: `main` starts them before
+                    // it builds anything with a window on it, because the first announcement has
+                    // to be complete. Leaving here without stopping them is a second copy of every
+                    // configured server left running, from a process that did nothing else.
+                    stop_mcp_servers(&app.state::<Servers>(), &setup_runtime);
                     std::process::exit(0);
                 }
                 Err(error) => {
@@ -275,6 +304,9 @@ pub fn run(
         // tray's Quit. This is the only place in this function that runs after `app.run` starts,
         // since `app.run` itself never returns.
         RunEvent::Exit => {
+            // Before `shutdown`, which only publishes. These are processes, and this is the last
+            // moment anything in this program can reach them.
+            stop_mcp_servers(&exit_servers, &exit_runtime);
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
         }

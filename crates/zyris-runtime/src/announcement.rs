@@ -166,6 +166,33 @@ impl LiveCapabilities {
         state.publish(next).await.is_ok()
     }
 
+    /// Stop announcing all of these, in one re-announce, and say how many were there.
+    ///
+    /// **One publish, not one per name.** `zyris.announce` is full replacement, so withdrawing
+    /// three capabilities one at a time sends the peer three lists — and the first two still
+    /// advertise capabilities the caller has already decided are gone. An agent reading the first
+    /// of them acts on something the machine knows is untrue. That is the whole difference between
+    /// this and calling [`Self::remove`] in a loop.
+    ///
+    /// A name that is not announced costs nothing and is not counted, so this is as idempotent as
+    /// `remove` is.
+    pub async fn remove_all(&self, names: &[String]) -> usize {
+        let mut state = self.0.lock().await;
+        let next: Vec<Arc<dyn ServeCapability>> = state
+            .announced
+            .iter()
+            .filter(|capability| !names.contains(&capability.descriptor().name))
+            .cloned()
+            .collect();
+        let gone = state.announced.len() - next.len();
+        if gone == 0 {
+            return 0;
+        }
+        // A removal cannot produce a duplicate, so the only way this fails is the node's
+        // connection being gone — which `publish` already tolerates.
+        if state.publish(next).await.is_ok() { gone } else { 0 }
+    }
+
     /// Build a node from what is announced and take its handle, with nothing able to slip in
     /// between.
     ///
@@ -404,6 +431,56 @@ mod tests {
             .await
             .expect("the others keep working");
         assert_eq!(still_there.to_json().unwrap()["who"], "terminal");
+    }
+
+    #[tokio::test]
+    async fn several_capabilities_can_be_withdrawn_without_a_list_going_out_in_between() {
+        // `zyris.announce` is full replacement, so three withdrawals made one at a time are three
+        // lists on the wire — and the first two still advertise capabilities the caller has
+        // already decided are gone. `zyris_tools::Servers::reap` is the caller that matters:
+        // several MCP servers dying in one tick is usually one event, a parent that quit or a
+        // session that ended.
+        let live = LiveCapabilities::new(vec![
+            Named::new("terminal"),
+            Named::new("mcp_one"),
+            Named::new("mcp_two"),
+            Named::new("mcp_three"),
+        ]);
+        let node = build(&live).await;
+        let peer = bare("agent");
+        let (agent, _node_side) = zyris::testing::duplex(&peer, &node).await.expect("they connect");
+        wait_until_announced(&agent, &["terminal", "mcp_one", "mcp_two", "mcp_three"]).await;
+
+        let gone = live
+            .remove_all(&[
+                "mcp_one".to_string(),
+                "mcp_two".to_string(),
+                "mcp_three".to_string(),
+                // A name nothing announces costs nothing and is not counted, exactly as it does
+                // for the one-at-a-time version.
+                "mcp_never-existed".to_string(),
+            ])
+            .await;
+
+        assert_eq!(gone, 3);
+        assert_eq!(live.names().await, ["terminal"]);
+        wait_until_announced(&agent, &["terminal"]).await;
+        let still_there = agent
+            .call_raw("terminal.who", Payload::default())
+            .await
+            .expect("withdrawing three things is still about those three things");
+        assert_eq!(still_there.to_json().unwrap()["who"], "terminal");
+    }
+
+    #[tokio::test]
+    async fn withdrawing_nothing_announces_nothing() {
+        // The tick on which no server died, which is almost every tick. A re-announce for a change
+        // that did not happen is a list on the wire per second, for the life of the process.
+        let live = LiveCapabilities::new(vec![Named::new("terminal")]);
+
+        assert_eq!(live.remove_all(&[]).await, 0);
+        assert_eq!(live.remove_all(&["mcp_never-existed".to_string()]).await, 0);
+        assert_eq!(live.names().await, ["terminal"]);
     }
 
     #[tokio::test]

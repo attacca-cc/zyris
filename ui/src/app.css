@@ -81,8 +81,8 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; min-width: 0; }
 
-/* Navigation. Three screens and an equality check; see the comment in App.tsx for why there
-   is no router. */
+/* Navigation. The tabs are `TABS` in state.ts and an equality check; see the comment in App.tsx
+   for why there is no router. */
 .shell { display: flex; min-height: 100vh; }
 /* `min-width: 0` is what keeps a long path in the log from widening the screen instead of
    wrapping inside it: a flex item's default minimum is its content. */
@@ -120,7 +120,12 @@ h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
 
 h2 { font-size: 1.02rem; margin: 0 0 0.6rem; font-weight: 620; }
 section { margin-bottom: 2rem; }
-.note { font-size: 0.9rem; }
+/* Server-supplied text lands in these: a dropped tool's reason and a `ServerState::Failed`
+   reason are both written by something outside this program. One long unbroken token — a path, a
+   URL, a package name — would be the only thing on the MCP screen that could scroll it sideways,
+   which the screen rules forbid at any width. Everywhere else foreign text is rendered sets the
+   same rule. */
+.note { font-size: 0.9rem; overflow-wrap: anywhere; }
 
 .panel {
   background: var(--card);
@@ -158,8 +163,11 @@ section { margin-bottom: 2rem; }
 .button:disabled { cursor: default; opacity: 0.5; }
 
 .caps, .calls { list-style: none; margin: 0; padding: 0; }
-.caps li, .call { border-top: 1px solid var(--line); padding: 0.6rem 0; }
-.caps li:first-child, .call:first-child { border-top: none; padding-top: 0; }
+/* `>`, not a descendant: the MCP screen nests a `.dropped` list inside a `.caps` row, and a
+   descendant selector drew every absence with the same full-width rule that separates one server
+   from the next — so the indentation `.dropped` exists for was undone by the thing above it. */
+.caps > li, .call { border-top: 1px solid var(--line); padding: 0.6rem 0; }
+.caps > li:first-child, .call:first-child { border-top: none; padding-top: 0; }
 .cap-head { margin: 0; }
 .cap-tools { color: var(--muted); font-size: 0.9rem; margin: 0.15rem 0 0; overflow-wrap: anywhere; }
 
@@ -217,9 +225,11 @@ section { margin-bottom: 2rem; }
    audit line's outcome and a server's state are different facts, and one set of names for both
    would make a rename on either side silently repaint the other.
 
-   The three that are not running are three colours because they are three different situations —
-   a switch somebody moved, a process that fell over, and one that never started. The words on the
-   badge say which; the colour only has to keep them from being scanned as one thing. */
+   The three that are not running are **two** colours, not three. A switch somebody moved is muted;
+   a process that fell over and one that never started are both the problem colour, because both
+   are something to act on and a reader scanning eight rows only has to see which ones are wrong.
+   The words tell them apart — "turned off", "stopped", "did not start" — and the sentence under
+   the row carries the rest. */
 .badge-on { border-color: var(--on); color: var(--on); }
 .badge-off { border-color: var(--off); color: var(--muted); }
 .badge-down { border-color: var(--problem); color: var(--problem); }

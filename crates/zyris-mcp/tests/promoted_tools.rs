@@ -308,9 +308,18 @@ async fn a_duplicate_tool_name_is_dropped_and_said_so_rather_than_announced_twic
 
     // Dropped, and said so. An agent cannot be told, but the person at the window can, and a
     // silent drop is the thing the plan rules out.
+    //
+    // **One record, though the server offers `search` three times.** A record per extra copy
+    // carries the same name and the same sentence twice — a duplicate line in the window and, since
+    // `ui/src/Mcp.tsx` renders these keyed by name, two children under one key.
     let dropped = promoted.dropped();
     assert_eq!(dropped.len(), 1, "expected one dropped tool, got {dropped:?}");
     assert_eq!(dropped[0].name, "search");
+    let mut names: Vec<&str> = dropped.iter().map(|tool| tool.name.as_str()).collect();
+    names.sort_unstable();
+    let unique = names.len();
+    names.dedup();
+    assert_eq!(names.len(), unique, "two absences under one name: {dropped:?}");
     // The reason has to be actionable on its own, because it is what a person reads in the log
     // or the window with no other context: which server, which tool, and what the consequence is.
     let reason = &dropped[0].reason;

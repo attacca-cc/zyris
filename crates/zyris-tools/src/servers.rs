@@ -57,6 +57,15 @@ use crate::announce::Tools;
 /// this is a latency decision with nothing on the other side of it.
 pub const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long [`Servers::stop_all`] waits for the processes to actually go before giving up.
+///
+/// On the way out of the program, so it is a ceiling on how long a misbehaving MCP server can
+/// keep a window on the screen rather than a budget anything spends: a server that is working is
+/// gone in milliseconds. Giving up is logged with the names, because a process that outlived this
+/// one is the thing somebody would otherwise find in a task manager with no idea where it came
+/// from.
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+
 /// Why an entry the file asked for is not running, when all this type knows is that it is not.
 ///
 /// **Two sentences, because the two situations offer a person different things to do.** Whether
@@ -192,11 +201,18 @@ struct Inner {
     /// What the node announces. Changing this is the whole job.
     live: LiveCapabilities,
     bus: EventBus,
-    /// **One lock over the whole list, held across starting a process.** That means a `list()`
-    /// waits while a server is starting, up to `zyris_mcp::STARTUP_DEADLINE` for one that never
-    /// speaks. The trade is deliberate: the alternative is an in-progress state that every reader
-    /// has to handle, and the failure it would prevent is a window that waits rather than a window
-    /// that lies.
+    /// **One lock over the whole list, held across starting a process.** That means everything
+    /// else waits while a server is starting, up to `zyris_mcp::STARTUP_DEADLINE` for one that
+    /// never speaks. The trade is deliberate: the alternative is an in-progress state that every
+    /// reader has to handle, and the failure it would prevent is a window that waits rather than a
+    /// window that lies.
+    ///
+    /// **"Everything else" is not only [`Servers::list`].** [`Servers::reap`] takes this lock too,
+    /// so a server that dies while an unrelated one is being started stays announced until that
+    /// start finishes or gives up — ten seconds, worst case, of a capability advertised over a
+    /// process that is gone. That is the real cost of the trade and it is worse than a window that
+    /// waits, so it is written down here rather than left to be found. It is bounded by the same
+    /// deadline and it ends by itself; what it is not is invisible.
     entries: Mutex<Vec<Entry>>,
 }
 
@@ -356,27 +372,89 @@ impl Servers {
     ///
     /// Asked on a timer by [`Self::watch`]. Idempotent: a server already withdrawn is no longer
     /// running, so it is not counted or reported twice.
+    ///
+    /// **The whole tick is one re-announce.** `zyris.announce` is full replacement, so withdrawing
+    /// three dead servers one at a time would put three lists on the wire, and the first two would
+    /// still advertise servers this method had already found dead — an agent reading one of them
+    /// acts on something this machine knows is untrue. Three deaths in one tick is not exotic:
+    /// they are usually the same event, a parent that quit or a session that ended.
     pub async fn reap(&self) -> usize {
         let mut entries = self.0.entries.lock().await;
-        let mut withdrawn = 0;
-        for entry in entries.iter_mut() {
-            let gone = entry
-                .running
-                .as_ref()
-                .is_some_and(|promoted| !promoted.is_running());
-            if !gone {
-                continue;
-            }
+        let dead: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.running.as_ref().is_some_and(|promoted| !promoted.is_running())
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if dead.is_empty() {
+            return 0;
+        }
+
+        for &index in &dead {
             tracing::warn!(
-                server = entry.config.name,
-                capability = entry.capability.as_deref().unwrap_or("<none>"),
+                server = entries[index].config.name,
+                capability = entries[index].capability.as_deref().unwrap_or("<none>"),
                 "an MCP server's process is gone, so its tools are no longer announced; nobody \
                  asked for this. Nothing else on this machine is affected."
             );
-            self.withdraw(entry, ServerState::Died).await;
-            withdrawn += 1;
         }
-        withdrawn
+        // The announcement first, all of it at once, for the reason [`Self::withdraw`] gives:
+        // nothing new can be routed into a process that is about to be let go of.
+        let names: Vec<String> =
+            dead.iter().filter_map(|&index| entries[index].capability.clone()).collect();
+        self.0.live.remove_all(&names).await;
+        for &index in &dead {
+            self.0.release(&mut entries[index], ServerState::Died);
+        }
+        dead.len()
+    }
+
+    /// Stop every server this run started, and wait for the processes to go.
+    ///
+    /// **For the one exit that runs no destructors.** Tauri's `App::run` ends the process with
+    /// `std::process::exit`, so nothing managed by the app is ever dropped and the `Arc<Promoted>`
+    /// values here are not either. Exiting closes the pipes, which is enough for a server that
+    /// quits on end-of-file — but one that does not is left running, reparented, and a second copy
+    /// of it is spawned by the next launch.
+    ///
+    /// Bounded, because this is on the way out and a server that will not go must not be able to
+    /// keep the window on the screen. [`Server::stop`](zyris_mcp::Server::stop) returns as soon as
+    /// it has cancelled: the teardown runs on `rmcp`'s own task, which closes the child's stdin,
+    /// waits briefly, and then kills it — so what is waited for here is that task getting far
+    /// enough to matter, which for a working server is milliseconds.
+    ///
+    /// Nothing is re-announced and no [`CoreEvent::McpServer`] is published. The node is going
+    /// away and so is the window; a state change nobody can read is not a state change.
+    pub async fn stop_all(&self) {
+        let entries = self.0.entries.lock().await;
+        let running: Vec<Arc<Promoted>> =
+            entries.iter().filter_map(|entry| entry.running.clone()).collect();
+        if running.is_empty() {
+            return;
+        }
+        tracing::info!(servers = running.len(), "stopping the local MCP servers");
+        for promoted in &running {
+            promoted.stop();
+        }
+
+        let deadline = std::time::Instant::now() + SHUTDOWN_DEADLINE;
+        while running.iter().any(|promoted| promoted.is_running()) {
+            if std::time::Instant::now() >= deadline {
+                let left: Vec<&str> = running
+                    .iter()
+                    .filter(|promoted| promoted.is_running())
+                    .map(|promoted| promoted.server().name())
+                    .collect();
+                tracing::warn!(
+                    servers = ?left,
+                    "gave up waiting for these MCP servers to stop; they may outlive this process"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Ask after every server, for as long as this runs.
@@ -413,14 +491,24 @@ impl Servers {
         if let Some(capability) = &entry.capability {
             self.0.live.remove(capability).await;
         }
-        if let Some(promoted) = &entry.running {
-            promoted.stop();
-        }
-        self.0.set(entry, state, None);
+        self.0.release(entry, state);
     }
 }
 
 impl Inner {
+    /// The half of a withdrawal that is about the entry rather than the announcement: stop the
+    /// process, and record what happened.
+    ///
+    /// Split out because [`Servers::reap`] withdraws several capabilities in **one** re-announce
+    /// and then does this for each of them, while [`Servers::withdraw`] does one of each. The stop
+    /// is asked for rather than left to the last handle going away — see [`Servers::withdraw`].
+    fn release(&self, entry: &mut Entry, state: ServerState) {
+        if let Some(promoted) = &entry.running {
+            promoted.stop();
+        }
+        self.set(entry, state, None);
+    }
+
     /// Move an entry to a new state and tell everything watching, in that order.
     ///
     /// One place, so a state that changed without anybody being told is not something a caller can

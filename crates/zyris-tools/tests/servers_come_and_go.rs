@@ -717,3 +717,72 @@ async fn the_tools_screen_lists_what_is_announced_now_and_not_what_was_announced
     on_the_wire.sort();
     assert_eq!(announced, on_the_wire);
 }
+
+#[tokio::test]
+async fn several_servers_dying_at_once_produce_one_announcement() {
+    // **Three deaths in one tick is the ordinary case, not the exotic one**: they are usually the
+    // same event — a parent that quit, a session that ended, a machine going to sleep. Withdrawing
+    // them one at a time puts three lists on the wire, and `zyris.announce` is full replacement,
+    // so the first two still advertise servers this machine has already found dead. An agent
+    // reading one of those acts on something the node knows is untrue.
+    //
+    // What is asserted is what can be seen from here: one `reap` accounts for all three, and the
+    // peer is left with this machine's own capabilities and nothing else. The single re-announce
+    // is `LiveCapabilities::remove_all`, which has its own test.
+    let machine = Machine::with(vec![
+        entry("one", &["--exit-after", "100"]),
+        entry("two", &["--exit-after", "100"]),
+        entry("three", &["--exit-after", "100"]),
+    ])
+    .await;
+    let (agent, _node) = agent_connected_to(&machine.live).await;
+    machine.peer_sees(&agent, &["mcp_one", "mcp_two", "mcp_three"]).await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(machine.servers.reap().await, 3, "all three in one tick");
+
+    machine.peer_sees(&agent, &[]).await;
+    for name in ["one", "two", "three"] {
+        assert_eq!(machine.state(name).await, ServerState::Died, "{name}");
+    }
+    assert!(machine.window_lists().await.iter().all(|name| !name.starts_with("mcp_")));
+}
+
+#[tokio::test]
+async fn leaving_stops_the_servers_this_run_started() {
+    // **The exit that runs no destructors.** Tauri ends the process with `std::process::exit`, so
+    // an `Arc<Promoted>` in its managed state is never dropped and the child is never reaped by
+    // going out of scope. Exiting closes the pipes, which is enough for a server that quits on
+    // end-of-file — and a server that ignores it is left running, reparented, with the next launch
+    // spawning a second copy.
+    //
+    // The handles held here are the test's own, on purpose and for the reason the withdrawal test
+    // gives: asking a process about itself through the last handle that keeps it alive proves
+    // nothing about a program that has let go of it.
+    let machine = Machine::with(vec![entry("desk-notes", &[]), entry("calendar", &[])]).await;
+    assert_eq!(machine.started.len(), 2);
+    assert!(machine.started.iter().all(|promoted| promoted.is_running()));
+
+    machine.servers.stop_all().await;
+
+    for promoted in &machine.started {
+        assert!(
+            !promoted.is_running(),
+            "`{}` was still running after everything was asked to stop",
+            promoted.server().name()
+        );
+    }
+}
+
+#[tokio::test]
+async fn leaving_a_machine_with_no_servers_is_not_a_wait() {
+    // The ordinary machine. Nothing to stop is nothing to wait for, and a quit that paused for
+    // `SHUTDOWN_DEADLINE` on a computer with no MCP servers would be the feature costing something
+    // to everybody who does not use it.
+    let machine = Machine::with(Vec::new()).await;
+
+    let started = std::time::Instant::now();
+    machine.servers.stop_all().await;
+
+    assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
+}

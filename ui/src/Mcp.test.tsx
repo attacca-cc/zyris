@@ -226,6 +226,30 @@ describe("Mcp", () => {
     expect(row.textContent).toContain("The reason was written to the log when Zyris started.");
   });
 
+  it("gives an entry with no name something to be called on the screen", async () => {
+    // `{ "name": "", "command": "x" }` is a server list this code accepts, and such an entry can
+    // never be announced — so it is listed here as something to fix, like a name with a dot in it.
+    // Rendered as its own name it is a row with a blank heading, an empty `aria-label` and an
+    // empty React key, identifiable only by the command underneath it.
+    answers({
+      servers: [
+        server("", {
+          capability: null,
+          state: { state: "failed", reason: "Nothing tried to start it." },
+          tools: [],
+        }),
+      ],
+    });
+
+    render(<Mcp state={showing()} />);
+
+    const row = await screen.findByRole("listitem", { name: /no name/i });
+    // The command is still there, because it is the only other thing identifying the entry.
+    expect(row.textContent).toContain("notes-mcp");
+    // And the rename is still what it is told to do about it.
+    expect(row.textContent).toMatch(/rename/i);
+  });
+
   it("renders what the switch answered rather than what it was asked for", async () => {
     // Turning a server on is the case that proves it: the command may not be there any more, and
     // the honest answer is the failure rather than the "running" the click asked for.

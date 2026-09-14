@@ -125,6 +125,14 @@ fn odd_tools() -> Value {
             },
         },
         {
+            // And a **third**, so that what `promote.rs` records about the name is exercised as a
+            // record per name rather than a record per extra copy. Two says nothing about which of
+            // those it is; three does.
+            "name": "search",
+            "description": "The third tool called `search`.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
             // No `description` and no `title`: MCP makes both optional, `ToolDescriptor` makes
             // neither.
             "name": "untitled",
