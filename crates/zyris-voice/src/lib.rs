@@ -36,10 +36,19 @@
 
 use tokio::sync::broadcast;
 
+// What happens to a frame between the microphone and everything that reads it. Present in
+// both feature states with one set of signatures; only the bodies read `aec`. See the module.
+#[cfg(feature = "voice")]
+pub mod apm;
+
 // The microphone. Behind the feature because every line of it is `cpal` or `rubato`, and the
 // off build has neither — see this module's own documentation for what that costs.
 #[cfg(feature = "voice")]
 pub mod capture;
+
+// Knowing when somebody stopped talking. `earshot`, and the rule that ends Listening.
+#[cfg(feature = "voice")]
+pub mod vad;
 
 /// Why a build with no `voice` feature will never hear anything.
 ///
