@@ -829,7 +829,7 @@ impl Callback {
         f32: FromSample<T>,
     {
         self.wide.clear();
-        self.wide.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
+        self.wide.extend(data.iter().map(|sample| sane(sample.to_sample::<f32>())));
         for chunk in self.chunker.push(self.conversion.feed(&self.wide)) {
             // Nobody listening means the session ended; the stream is about to be dropped.
             if sender.send(Captured::Audio(chunk.to_vec())).is_err() {
@@ -837,6 +837,34 @@ impl Callback {
             }
         }
     }
+}
+
+/// One sample from the device, made into a number the rest of this crate is written against.
+///
+/// **The widening is not bounded and half of `dasp`'s conversions are.** `to_sample::<f32>()`
+/// for `i8`/`i16`/`i32`/`i64` and the unsigned kinds divides by the type's range, so those
+/// arrive inside `[-1, 1]` and cannot be `NaN` — but `f32 -> f32` is the *identity* and
+/// `f64 -> f32` is a cast, and those two are the arms that run in production: PipeWire's default
+/// capture format on this machine and WASAPI's mix format on Windows are both `f32`. A float
+/// capture stream is not clipped for us, so a sample past full scale is ordinary at high
+/// microphone gain, and a driver fault can put a `NaN` in one.
+///
+/// **Where that goes if nothing stops it here**, traced rather than assumed: `downmix_into`
+/// averages it, `rubato`'s FFT smears one `NaN` across a whole block, `Apm::process_capture`
+/// checks the *length* and not the values — and with `aec` on, one `NaN` into the high-pass
+/// filter's and the noise suppressor's IIR state makes every later output `NaN` for the life of
+/// the `Apm`, which is built once per session. `Endpointer::push` clamps into its own buffer, so
+/// the *detector* survives; the copy kept in `Turn::buffer` is the raw frame, so what reaches
+/// whisper is the poisoned audio, and whisper answers with nothing, which `stt::clean` turns
+/// into an empty string and `Session` publishes as [`crate::VoiceEvent::HeardNothing`]. **A
+/// broken microphone reported to a person as "nobody spoke"** — the exact shape `vad.rs` argues
+/// its own clamp from, one stage upstream of where that clamp is.
+///
+/// So it is done once, here, before any of them. It does **not** replace the endpointer's clamp:
+/// this runs before the resampler, and `rubato` can ring past full scale afterwards on audio
+/// that was perfectly in range when it arrived.
+fn sane(sample: f32) -> f32 {
+    if sample.is_finite() { sample.clamp(-1.0, 1.0) } else { 0.0 }
 }
 
 fn widen<T>(
@@ -1096,6 +1124,67 @@ mod tests {
         let out = feed_in_callbacks(&mut conversion, &clip, 1024);
 
         assert_eq!(out, clip);
+    }
+
+    /// **The device's own numbers are not promised to be numbers.**
+    ///
+    /// `dasp`'s integer conversions divide by the type's range, so an `i16` device cannot hand
+    /// over a `NaN` or anything outside `[-1, 1]`. `f32 -> f32` is the identity, and `f32` is
+    /// what PipeWire gives here and what WASAPI's mix format gives on Windows — so the only two
+    /// arms that run in production are the two with no bound on them at all.
+    ///
+    /// This drives [`Callback`] rather than `Conversion` or `Chunker`, because `deliver` is
+    /// where the widening happens and it is the only place all of this can be fixed once. What
+    /// it rules out is the whole of what one bad sample does downstream: `rubato` smearing it
+    /// over an FFT block, the `aec` build's IIR state carrying it for the life of the session,
+    /// and — the one a person would actually meet — a poisoned recording reaching whisper and
+    /// coming back as [`crate::VoiceEvent::HeardNothing`], which reads as "nobody spoke".
+    ///
+    /// The assertion is over **every sample that comes out**, not over the ones that went in
+    /// wrong: a fix that special-cased `NaN` and let `2.5` through would satisfy a narrower one.
+    #[test]
+    fn a_device_that_hands_over_nonsense_does_not_put_it_into_the_pipeline() {
+        // 16 kHz mono, so the conversion is a pass-through and what comes out is what `sane`
+        // made of what went in — nothing else can have touched it.
+        let conversion = Conversion::new(SAMPLE_RATE, 1).expect("16 kHz mono is ordinary");
+        let mut callback = Callback::new(conversion, Chunker::new(APM_FRAME));
+        let (sender, mut received) = mpsc::unbounded_channel();
+
+        let mut buffer = vec![0.25f32; APM_FRAME * 2];
+        buffer[0] = f32::NAN;
+        buffer[1] = f32::INFINITY;
+        buffer[2] = f32::NEG_INFINITY;
+        buffer[3] = 2.5;
+        buffer[4] = -3.0;
+        // And one that is exactly at full scale, which is legal and must survive untouched.
+        buffer[5] = -1.0;
+
+        callback.deliver(&buffer, &sender);
+
+        let mut out: Vec<f32> = Vec::new();
+        while let Ok(Captured::Audio(chunk)) = received.try_recv() {
+            out.extend_from_slice(&chunk);
+        }
+        assert_eq!(out.len(), APM_FRAME * 2, "both chunks were emitted");
+        for (at, sample) in out.iter().enumerate() {
+            assert!(
+                sample.is_finite() && (-1.0..=1.0).contains(sample),
+                "sample {at} left the callback as {sample}; the APM's IIR state, `rubato`'s FFT \
+                 and whisper are all downstream of this and none of them says a word about it"
+            );
+        }
+        // **Non-finite is silence and out-of-range is clipped, and they are different rules.**
+        // The first is `vad.rs`'s, made once here instead of once per stage: an infinity has no
+        // meaningful loudness and a `NaN` has no sign, so neither can be clipped towards
+        // anything without inventing a number nobody measured. A sample of 2.5 is a real sample
+        // recorded too loud, and clipping is what every other part of an audio chain does to it.
+        assert_eq!(out[0], 0.0, "a sample that is not a number is silence, not a loud one");
+        assert_eq!(out[1], 0.0, "and an infinity is not full scale either");
+        assert_eq!(out[2], 0.0);
+        assert_eq!(out[3], 1.0, "but a real sample recorded too loud is clipped, not silenced");
+        assert_eq!(out[4], -1.0);
+        assert_eq!(out[5], -1.0, "full scale is not nonsense and is not changed");
+        assert_eq!(out[6], 0.25, "an ordinary sample passes through");
     }
 
     /// Nothing is lost between callbacks, whatever length they come in. Three backends' worth of
