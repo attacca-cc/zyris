@@ -215,7 +215,8 @@ impl Engine {
     /// Blocking for as long as 141 MB takes, which is why the screen shows what it is doing
     /// rather than a button that appears to do nothing.
     pub async fn fetch_model(&self) -> Result<(), String> {
-        let dir = stt::cache_dir().ok_or_else(|| stt::Fault::NoCacheDirectory.to_string())?;
+        let dir = stt::cache_dir()
+            .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
         {
             let mut live = self.live.lock().await;
             live.state = ListeningState::Starting {
@@ -284,14 +285,15 @@ impl Engine {
         }
         self.set_listening(false).await;
 
-        let dir = stt::cache_dir().ok_or_else(|| stt::Fault::NoCacheDirectory.to_string())?;
+        let dir = stt::cache_dir()
+            .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
         let model = dir.join(stt::BASE.file);
         match std::fs::remove_file(&model) {
             Ok(()) => {}
             // Nothing to delete is not a failure: it is what the screen already says is there.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(stt::Fault::Storage { path: model, detail: error.to_string() }
+                return Err(crate::model::Fault::Storage { path: model, detail: error.to_string() }
                     .to_string());
             }
         }

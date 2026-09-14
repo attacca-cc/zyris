@@ -46,6 +46,45 @@ futures-util = { version = "0.3.34", default-features = false, features = ["std"
 global-hotkey = "0.8.0"
 keyring = "4.2.0"
 open = "5.4.4"
+# ONNX Runtime, for Supertonic 3 — the one thing in this workspace that is not pure Rust or a
+# vendored C source tree. **`=2.0.0-rc.10`, and the default features are taken on purpose.**
+#
+# The features are a choice between two costs and only one of them can be paid on Windows, where
+# the `.exe` ships alone:
+#
+# - `download-binaries` fetches a prebuilt ONNX Runtime **at build time** — one `.tgz` per target
+#   from `cdn.pyke.io`, pinned by URL and checked against a SHA-256 in `ort-sys`'s own
+#   `dist.txt`, cached per machine — and **links it statically**. Nothing has to ship beside the
+#   binary and nothing has to be set at runtime.
+# - `load-dynamic` fetches nothing and needs `ORT_DYLIB_PATH` pointing at an `onnxruntime` shared
+#   library **on the user's machine, at run time**. Nothing sets that for somebody who
+#   double-clicked an installer, and the `.deb` cannot name a package either: ONNX Runtime is not
+#   in Ubuntu 22.04 or 24.04 at all.
+#
+# So the download is taken, and **this reverses a decision this project made once**: `earshot` was
+# chosen over Silero partly to keep a build-time binary fetch out of the tree. That argument was
+# about a component with a dependency-free alternative; Supertonic is ONNX or it is nothing, so the
+# cost here can only be moved, not avoided — and moving it to the user is worse than paying it in
+# CI. `ORT_LIB_LOCATION` and `ORT_SKIP_DOWNLOAD` are the escape hatch for a distribution that
+# wants to link its own copy. It is behind `zyris-voice`'s `voice` feature, so a default build
+# still fetches nothing.
+#
+# `copy-dylibs` is kept although the CPU distribution is static: it is a no-op when there is no
+# dylib, and it is what would carry one if a target's distribution ever ships one.
+#
+# **`ort-sys` tries `pkg_config` for `libonnxruntime` *before* it considers downloading anything**
+# (measured 2026-09-15, not read off the feature list). On this NixOS machine that succeeds —
+# `libonnxruntime` 1.24.4 is in the global environment — so a local build quietly links
+# *dynamically* against a `/nix/store` path and fetches nothing at all. That is a different build
+# from the one that ships, and CI now sets `LIBONNXRUNTIME_NO_PKG_CONFIG=1` on **both** runners so
+# that it is not: the Windows runner has Strawberry Perl's fake `pkg-config.bat` on PATH, which is
+# exactly the trap this repository already documents for `-sys` crates, and it now has a crate in
+# the `voice` build that walks into it.
+#
+# `=2.0.0-rc.10` rather than the newer rc.13: rc.10 is the version every timing in
+# `zyris-voice`'s `tts` module was measured against, and a release candidate is not a place to
+# take a free upgrade.
+ort = "=2.0.0-rc.10"
 # `default-features = false` on purpose. `rmcp`'s defaults are `base64`, `macros` and `server`,
 # and this workspace is only ever an MCP *client*: it spawns somebody else's server and asks what
 # it has. Taking the defaults would compile the server half, its `schemars` schema generation and
@@ -98,6 +137,12 @@ time = { version = "0.3.44", features = ["formatting"] }
 tokio = "1.53.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# NFKD. **Not a convenience and not only about Korean**: every precomposed Hangul syllable and
+# every precomposed accented Latin letter is absent from Supertonic's codepoint table, while the
+# jamo and the base-plus-combining-mark pairs they decompose to are in it. Hangul decomposition is
+# arithmetic and could have been written here; `é` could not. Measured 2026-09-15; see
+# `zyris-voice`'s `tts` module.
+unicode-normalization = "0.1.24"
 # Echo cancellation. Behind `zyris-voice`'s `aec` feature rather than its `voice` one, because
 # no runner and no Debian release can supply it — that manifest carries the evidence.
 webrtc-audio-processing = "2.1.0"

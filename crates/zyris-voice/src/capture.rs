@@ -226,7 +226,7 @@ pub struct DeviceProblem {
 }
 
 impl DeviceProblem {
-    fn new(recovery: Recovery, reason: impl Into<String>) -> DeviceProblem {
+    pub(crate) fn new(recovery: Recovery, reason: impl Into<String>) -> DeviceProblem {
         DeviceProblem { recovery, reason: reason.into(), settings: None }
     }
 
@@ -863,7 +863,7 @@ impl Callback {
 /// So it is done once, here, before any of them. It does **not** replace the endpointer's clamp:
 /// this runs before the resampler, and `rubato` can ring past full scale afterwards on audio
 /// that was perfectly in range when it arrived.
-fn sane(sample: f32) -> f32 {
+pub(crate) fn sane(sample: f32) -> f32 {
     if sample.is_finite() { sample.clamp(-1.0, 1.0) } else { 0.0 }
 }
 

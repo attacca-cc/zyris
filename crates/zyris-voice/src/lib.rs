@@ -50,10 +50,25 @@ pub mod capture;
 #[cfg(feature = "voice")]
 pub mod vad;
 
+// Every model file this crate downloads, and the one `.part`-hash-rename shape that puts it
+// on disk. Shared by `stt` and `tts`, which is the whole reason it is not inside either.
+#[cfg(feature = "voice")]
+pub mod model;
+
 // Whisper: the model on disk, the one parameter that makes it fast enough to talk to, and
 // the settings that are decisions rather than defaults.
 #[cfg(feature = "voice")]
 pub mod stt;
+
+// Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
+// of the world’s text is silently unsayable.
+#[cfg(feature = "voice")]
+pub mod tts;
+
+// The speaker: the output stream, the queue in front of it, and the tap that keeps what was
+// played so the echo canceller can be told what to subtract.
+#[cfg(feature = "voice")]
+pub mod playback;
 
 // The state machine: Idle -> Listening -> Thinking, and what a push-to-talk key does to it.
 // Everything above is a piece; this is the only thing that publishes a `VoiceEvent`.

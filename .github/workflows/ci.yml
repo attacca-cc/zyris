@@ -136,6 +136,19 @@ jobs:
           # and the value that reached CMake would be the string `false`. It happens to mean the
           # same thing to CMake, which is exactly why an unquoted one would never be noticed.
           GGML_NATIVE: "OFF"
+          # **`ort-sys` calls `pkg_config` before it considers `download-binaries`**, and this
+          # file already carries the reason that is dangerous: `windows-latest` has Strawberry
+          # Perl's `pkg-config.bat` on PATH, a pure-Perl reimplementation reporting version 0.26,
+          # and the Rust `pkg-config` crate stopped skipping MSVC in 2018. So the voice build can
+          # get a stale or imaginary `libonnxruntime` hit on Windows and link against nothing.
+          # `<CRATE>_NO_PKG_CONFIG=1` is the documented guard; set on **both** runners so the two
+          # build ONNX Runtime the same way — the way a release does, which is the pinned,
+          # SHA-256-checked archive `ort-sys` downloads and links statically.
+          #
+          # CLAUDE.md said the only crate here that would call `pkg_config` is
+          # `webrtc-audio-processing-sys`, behind `aec` and built nowhere. That stopped being
+          # true the day `ort` arrived.
+          LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
         run: |
           cargo test -p zyris-voice --features voice
           cargo build -p zyris-app --features voice

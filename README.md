@@ -280,6 +280,20 @@ offers to fetch it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHIS
 and no download happens at all — Zyris then takes that file as given, and will neither replace it
 nor delete it.
 
+### The voice
+
+**Speaking aloud needs a second model, 401 MB, downloaded the same way** and into the same
+directory: [Supertonic 3](https://huggingface.co/supertone-oss-archive/supertonic-3), sixteen
+files — four ONNX graphs, two small configuration files and ten voice styles — each pinned to one
+published revision and each checked against its own SHA-256 before it is put in place. Set
+`ZYRIS_TTS_MODELS` to a directory you have already unpacked it into and nothing is downloaded.
+
+**The voice weights are not Apache-2.0.** Supertonic's example code is MIT and its **weights are
+licensed BigScience OpenRAIL-M**: free to use and to redistribute, including commercially, with
+use-based restrictions that must be passed on with any copy. Zyris does not ship them — they are
+fetched onto your machine on request — but anyone redistributing a build with the models beside
+it is redistributing those weights and takes that licence with them.
+
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such
 machine rather than only on the one that built it; on anything older it will not start. Nothing
