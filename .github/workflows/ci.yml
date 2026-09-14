@@ -34,6 +34,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # `libasound2-dev` and `libclang-dev` at the end are the voice build's, and nothing
+          # else here needs them: `cpal` depends on `alsa-sys` unconditionally on Linux, and
+          # both `whisper-rs-sys` and `pipewire-sys` generate their bindings with `bindgen`,
+          # which needs a real `libclang.so` — the runner image ships clang without the `-dev`
+          # package that carries it.
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libjavascriptcoregtk-4.1-dev \
@@ -50,7 +55,9 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-1 \
             libpipewire-0.3-dev \
-            libgbm-dev
+            libgbm-dev \
+            libasound2-dev \
+            libclang-dev
 
       - uses: pnpm/action-setup@v4
 
@@ -82,3 +89,53 @@ jobs:
       - run: pnpm --filter zyris-ui test
 
       - run: cargo test --workspace
+
+      - name: Point bindgen at libclang
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # Both `whisper-rs-sys` and `pipewire-sys` generate their bindings with `bindgen`.
+        # `clang-sys` looks for the library under `lib`; on this image the DLL is in `bin`.
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      # **Without the step below the voice build is compiled by nothing.** `cargo test --workspace`
+      # above passes no feature flags, and `release.yml` calls `pnpm tauri build` with none
+      # either, so every line behind `voice` could rot for as long as it took somebody to turn
+      # the flag on — which is the failure the whole layout of `zyris-voice` is arranged to
+      # prevent, and it would be the one part of that arrangement nothing checked.
+      #
+      # A step in this job rather than a job of its own: the matrix is already both platforms,
+      # and the system libraries, the frontend and the cargo cache are all already in place
+      # here. A separate job would repeat every one of them and cold-build the workspace twice.
+      #
+      # `cargo test -p zyris-voice --features voice` and not just a build: it is the only thing
+      # anywhere that runs the `#[cfg(feature = "voice")]` arm of `zyris_voice::start`.
+      # `cargo build -p zyris-app --features voice` is what proves the forwarding — the
+      # application's own feature is one line that must resolve, and a build of `zyris-voice`
+      # alone would pass with it broken or deleted.
+      #
+      # **What this does not cover: `zyris-voice`'s `aec` feature**, and there is no honest way
+      # to make it. `webrtc-audio-processing` 2.1 wants pkg-config `webrtc-audio-processing-2`
+      # >= 2.1; noble — which *is* `ubuntu-latest` — ships 0.3.1 and no Debian or Ubuntu release
+      # ships 2.x at all, so the package cannot be installed. Its `bundled` feature shells out
+      # to `meson`, which is on neither runner. And on Windows upstream has no supported build:
+      # issue #34 open since 2023-09-27, a CI matrix of `[ubuntu-latest, macos-latest]`, and the
+      # MSVC pull request unmerged and unverified at runtime by its own author. So the echo
+      # canceller is a separate feature that CI does not build, said out loud here rather than
+      # hidden inside a job that looks like it covers everything. See `crates/zyris-voice/
+      # Cargo.toml`.
+      - name: Build the voice feature
+        env:
+          # **`GGML_NATIVE` defaults to ON**, which bakes `-march=native` into whisper.cpp and
+          # produces a binary that SIGILLs on any CPU older than the one that built it. No test
+          # on the build machine can catch that, because the build machine is the one CPU it
+          # works on. `whisper-rs-sys/build.rs` forwards any `WHISPER_`/`GGML_`/`CMAKE_`
+          # environment variable to CMake, so this one line is the whole fix. AVX2 is still
+          # required either way.
+          #
+          # Quoted, and that is not cosmetic: YAML 1.1 reads a bare `OFF` as the boolean false,
+          # and the value that reached CMake would be the string `false`. It happens to mean the
+          # same thing to CMake, which is exactly why an unquoted one would never be noticed.
+          GGML_NATIVE: "OFF"
+        run: |
+          cargo test -p zyris-voice --features voice
+          cargo build -p zyris-app --features voice

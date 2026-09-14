@@ -108,6 +108,18 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
+    // What this build can do about speech, said once, in both modes and on every platform.
+    //
+    // **This is one line and it is the same line in both feature states**, which is the whole
+    // point of it. The audio stack is off by default — a cold build of it is two minutes
+    // against a warm 1.4 seconds — so almost every run of this program is the build that cannot
+    // listen, and a build that cannot listen has to say so rather than being silently
+    // indistinguishable from one that can. `zyris_voice::start` answers on every platform and
+    // never fails, exactly as `hotkey::start` does, and the reason it gives is the sentence a
+    // person can act on. Nothing in this crate asks whether the audio stack was compiled in;
+    // `tests/the_app_never_asks_whether_voice_is_compiled_in.rs` fails if anything ever starts.
+    tracing::info!(support = ?zyris_voice::start().describe(), "speech");
+
     let bus = EventBus::new(EVENT_CAPACITY);
     // Not `#[tokio::main]`: the GUI runtime has to own the main thread synchronously, so the
     // runtime is built by hand and only driven with `block_on` on the branch that needs that.

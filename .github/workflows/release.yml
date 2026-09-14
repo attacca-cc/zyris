@@ -65,7 +65,10 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} matches \"version\": \"${configured}\" in ${config}"
 
-      # The same list `ci.yml` installs, which was arrived at by building rather than guessing.
+      # The same list `ci.yml` installs, which was arrived at by building rather than guessing,
+      # minus `libasound2-dev` and `libclang-dev`: those two are the voice build's, and these
+      # bundles are built with no features. They move here the day `pnpm tauri build` is given
+      # `--features voice`.
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |

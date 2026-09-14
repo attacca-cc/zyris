@@ -18,6 +18,11 @@ zyris-autostart = { path = "../zyris-autostart" }
 zyris-mcp = { path = "../zyris-mcp" }
 zyris-runtime = { path = "../zyris-runtime" }
 zyris-tools = { path = "../zyris-tools" }
+# Speech. **Present on every build, and the feature below is the only thing that changes.**
+# With `voice` off this crate still exports `VoiceEvent` and a stream that has already ended,
+# so nothing in `zyris-app` has to ask which build it is in — see `zyris_voice`'s module
+# documentation, and the test that fails if a `#[cfg(feature = ..)]` ever appears here.
+zyris-voice = { path = "../zyris-voice" }
 anyhow = { workspace = true }
 clap = { workspace = true }
 directories = { workspace = true }
@@ -69,3 +74,9 @@ tauri-build = { workspace = true }
 # loads the frontend from `devUrl` and shows a connection error when no dev server is running.
 # `tauri build` enables it for you; a plain `cargo build --release` does not.
 custom-protocol = ["tauri/custom-protocol"]
+
+# The audio stack, off by default. **It forwards and does nothing else.** There is deliberately
+# no `#[cfg(feature = "voice")]` anywhere in this crate: the on build and the off build run the
+# same lines, so the on build cannot quietly stop compiling while everybody develops against
+# the off one. `tests/the_app_never_asks_whether_voice_is_compiled_in.rs` is what holds that.
+voice = ["zyris-voice/voice"]
