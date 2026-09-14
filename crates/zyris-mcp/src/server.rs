@@ -217,6 +217,13 @@ impl Server {
     /// the reason in `content`) and a call that never happened (a JSON-RPC error), and flattening
     /// the two would throw away the reason. Deciding what an agent sees is the promotion layer's
     /// job; this one reports.
+    ///
+    /// **No deadline, and [`STARTUP_DEADLINE`] does not supply one** — that bounds the handshake
+    /// and the first `tools/list`, and nothing after. `call_tool_once` goes out with
+    /// `PeerRequestOptions::default()`, whose `timeout` is `None`, so a server that accepts a
+    /// request and never answers waits here until the caller gives up or the connection goes
+    /// down. The reasoning for leaving it that way, and what it costs the audit log, is on
+    /// `promote.rs`'s `call_limit`.
     pub async fn call(&self, tool: &str, arguments: Value) -> anyhow::Result<Value> {
         let arguments: Option<JsonObject> = match arguments {
             Value::Null => None,

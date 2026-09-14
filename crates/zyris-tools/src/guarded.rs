@@ -125,6 +125,27 @@ impl<C: ServeCapability> ServeCapability for Guarded<C> {
         self.inner.descriptor()
     }
 
+    /// **A line is written when the call finishes, one way or another — and only then.**
+    ///
+    /// A refusal is written before the capability is reached, and an answer or a failure is
+    /// written when `inner.dispatch` returns. A call that never gets to return therefore leaves
+    /// nothing: `zyris-core` holds an `AbortHandle` per call in flight and aborts the task when
+    /// the peer sends a cancel, when the connection goes down, and when the capability is revoked
+    /// (`connection.rs` in that crate, measured at rev 274e9af). An aborted future does not run
+    /// its continuation, so the `record` below never happens.
+    ///
+    /// That is a real hole and it is deliberately left open here, because closing it honestly is
+    /// not a change to this function. It would take a second kind of line — one at the start and
+    /// one at the end — or a drop guard writing a fourth [`Outcome`] for "began and did not
+    /// finish", and either one changes the shape of the file, the audit tail on the Tools screen,
+    /// and every sentence anybody has written about what a line means. It is also not new and not
+    /// about MCP: `terminal.exec` with no `timeout_ms` has had exactly this property since it was
+    /// announced, and [`crate::gate`] names it.
+    ///
+    /// What is **not** left open is the copy. `ui/src/Mcp.tsx` and `README.md` both describe this
+    /// log, and both now say a line is written when a call finishes and that a call cut off
+    /// before it finished has none. See
+    /// [`a_call_that_never_finishes_leaves_no_line`](tests::a_call_that_never_finishes_leaves_no_line).
     async fn dispatch(&self, call: IncomingCall) -> zyris::Result<Outgoing> {
         // Both of these are read before the call is handed on, because `dispatch` consumes it.
         let tool = call.tool.clone();
@@ -929,5 +950,78 @@ mod tests {
         assert_eq!(entry.capability, "file_transfer");
         assert_eq!(entry.tool, "inbox_list");
         assert_eq!(entry.detail, "");
+    }
+
+    /// A capability that starts and does not come back, so a test can interfere with a call while
+    /// it is genuinely running rather than hoping it is.
+    struct NeverAnswers {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[zyris::async_trait]
+    impl ServeCapability for NeverAnswers {
+        fn descriptor(&self) -> CapabilityDescriptor {
+            CapabilityDescriptor {
+                name: "mcp_desk-notes".to_string(),
+                version: 1,
+                tools: vec![zyris::ToolDescriptor {
+                    name: "search".to_string(),
+                    description: "Somebody else's tool, and it does not answer.".to_string(),
+                    transfer: zyris::Transfer::Unary,
+                    request_schema: serde_json::json!({}),
+                    response_schema: None,
+                    item_schema: None,
+                    call_limit: None,
+                }],
+            }
+        }
+
+        async fn dispatch(&self, _call: IncomingCall) -> zyris::Result<Outgoing> {
+            self.started.notify_waiters();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_that_never_finishes_leaves_no_line() {
+        // **What the log does not record, pinned so the copy cannot drift back into claiming it
+        // does.** A line is written when a call finishes; a call that is cut off before it
+        // finishes writes nothing at all, because the task carrying it is aborted and an aborted
+        // future does not run its continuation. `zyris-core` does exactly that on a peer's cancel,
+        // on the connection going down, and on the capability being revoked — so this is the
+        // ordinary way an MCP call ends when an agent gives up on a slow server, not an exotic
+        // one.
+        //
+        // Asserted against a promoted name because that is where the sentence lives, but it is
+        // `Guarded`'s behaviour and `terminal.exec` with no `timeout_ms` has it too.
+        let dir = tempfile::tempdir().unwrap();
+        let log = crate::AuditLog::new(dir.path().join("audit.jsonl"));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cap = Arc::new(Guarded::new(
+            NeverAnswers { started: started.clone() },
+            crate::Gate::running(),
+            log.clone(),
+        ));
+
+        let waiting = started.notified();
+        let calling = {
+            let cap = cap.clone();
+            tokio::spawn(async move { cap.dispatch(call("search", serde_json::json!({}))).await })
+        };
+        // Not a sleep: the call has to have reached the capability, or this would be asserting
+        // about a call that never started.
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the call reaches the capability");
+
+        calling.abort();
+        let ended = calling.await;
+        assert!(ended.is_err_and(|why| why.is_cancelled()), "the call was cut off mid-flight");
+
+        assert!(
+            log.recent(10).unwrap().is_empty(),
+            "a call cut off mid-flight wrote a line; the copy in Mcp.tsx and README.md says it \
+             does not, and one of the two is now wrong"
+        );
     }
 }

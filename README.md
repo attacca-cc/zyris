@@ -180,12 +180,20 @@ off. A server that starts and never answers is given ten seconds before Zyris gi
 leaves it out.
 
 **Promoted tools are behind the same pause switch and the same audit log as everything else, with
-one difference worth knowing.** The log records that an MCP tool was called — when, which server,
-which tool, and whether the call was allowed, refused or failed — and not what was asked of it.
-Zyris writes down some arguments for its own capabilities because it knows what they mean:
-`file_io`'s `path` is a file on this machine, `terminal`'s `command` is a command line. A field
-spelled `path` on a server somebody else wrote is a coincidence of spelling and could as easily be
-a password, so nothing an agent sends to an MCP server is written down.
+one difference worth knowing.** When a call finishes, the log records that an MCP tool was called —
+when, which server, which tool, and whether the call was allowed, refused or failed — and not what
+was asked of it. Zyris writes down some arguments for its own capabilities because it knows what
+they mean: `file_io`'s `path` is a file on this machine, `terminal`'s `command` is a command line.
+A field spelled `path` on a server somebody else wrote is a coincidence of spelling and could as
+easily be a password, so nothing an agent sends to an MCP server is written down.
+
+**A call that never finishes is not written down at all.** Zyris puts no time limit on an MCP
+server, so one that accepts a request and goes quiet waits until the agent gives up or the
+connection drops; the line is written when a call returns, and a call cut off before it returns
+never reaches it. Choosing a limit here would mean Zyris putting a clock on somebody else's tool,
+and a build or a fetch that was working would be the thing it cut off. This is not special to MCP:
+`terminal`'s `exec` with no `timeout_ms` has the same property, and so does any call an agent
+abandons.
 
 ### Checking it against a real agent — this has not been run
 

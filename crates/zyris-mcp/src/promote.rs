@@ -336,9 +336,20 @@ fn translate(server: &str, tools: &[rmcp::model::Tool]) -> (Vec<ToolDescriptor>,
             response_schema: Some(response_schema(tool)),
             // Nothing about MCP streams: `tools/call` is one request and one answer.
             item_schema: None,
-            // Not this layer's to set. A per-tool deadline would have to come from the server's
-            // own words, and MCP has none; `Server::spawn`'s deadline covers startup, which is
-            // the part that otherwise hangs forever.
+            // **Absent, which means the caller's own default** — `CallLimit` is what a tool asks
+            // of the *caller's* clock, not a deadline this side enforces, and MCP gives a server
+            // no way to say anything about one. Choosing a number here would be this code putting
+            // a clock on somebody else's tool: too short cuts off a build or a fetch that was
+            // working, and too long is the caller's default by another name.
+            //
+            // What that costs, said rather than implied, because an earlier version of this
+            // comment claimed `Server::spawn`'s deadline covered it and that is false —
+            // `STARTUP_DEADLINE` bounds the handshake and the first `tools/list`, and bounds
+            // nothing about a call. [`super::Server::call`] has no deadline of its own, so a
+            // server that accepts a request and never answers holds the dispatch task until the
+            // caller gives up or the connection goes down. Both of those abort the task, and an
+            // aborted task writes no audit line: see `zyris_tools::guarded`, which is where that
+            // is pinned and where the copy that has to agree with it is named.
             call_limit: None,
         });
     }

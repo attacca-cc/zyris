@@ -316,6 +316,23 @@ describe("Mcp", () => {
     expect(readable()).toMatch(/not what was asked/i);
   });
 
+  it("does not claim a line for a call that never finished", async () => {
+    // The fifth time this copy claimed more than the code does, and the first time a test
+    // guarded it. `Guarded::dispatch` writes its line when the call returns; a call cut off
+    // before it returns is carried by a task `zyris-core` aborts, and nothing is written. The
+    // screen has to say that rather than let a reader take "the log records that an MCP tool was
+    // called" as covering every call that started.
+    answers({ servers: [server("desk-notes")] });
+
+    render(<Mcp state={showing()} />);
+    await screen.findByRole("listitem", { name: "desk-notes" });
+
+    expect(readable()).toMatch(/when a call finishes/i);
+    expect(readable()).toMatch(/call that never finishes is not written down/i);
+    // And why it can happen at all: nothing on this side stops a server waiting forever.
+    expect(readable()).toMatch(/no time limit/i);
+  });
+
   it("says how long a switch moved here lasts", async () => {
     // Nothing is written to the server list, so a server turned off here is back at the next
     // start. A switch that forgot silently would be a screen that lied.

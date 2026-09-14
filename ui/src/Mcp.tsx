@@ -329,12 +329,27 @@ export function Mcp({ state }: { state: State }) {
               `path` or `command` shares the spelling with this machine's own and none of the
               meaning — it could as easily be a password. The three words are `Outcome`'s three and
               nothing more: `allowed` there means the call was accepted, which for an MCP tool says
-              nothing about whether the server was happy with it. */}
+              nothing about whether the server was happy with it.
+
+              The second sentence is the fifth thing this copy got wrong, and it was found by
+              reading `Guarded::dispatch` rather than by running anything: the line is written
+              *when the call finishes*, and a call that is cut off before it finishes — an agent
+              that gave up on a slow server, a connection that dropped — is carried by a task
+              `zyris-core` aborts, which never reaches the line. Saying "the log records that an
+              MCP tool was called" claimed more than that. */}
           <p className="muted note">
             A promoted tool goes through the same pause switch and the same audit log as this
-            computer's own. The log records that an MCP tool was called — when, which server, which
-            tool, and whether the call was allowed, refused or failed — and not what was asked of
-            it. Nothing an agent sends to one of these servers is written down.
+            computer's own. When a call finishes, the log records that an MCP tool was called —
+            when, which server, which tool, and whether the call was allowed, refused or failed —
+            and not what was asked of it. Nothing an agent sends to one of these servers is
+            written down.
+          </p>
+          <p className="muted note">
+            A call that never finishes is not written down either. These servers are given no time
+            limit, so one that accepts a request and goes quiet waits until the agent gives up or
+            the connection drops — and a call cut off that way leaves no line at all. The same is
+            true of this computer's own <span className="mono">terminal.exec</span> with no
+            timeout.
           </p>
 
           {/* The switch is a real switch and it really is only for this run. A toggle that forgot
