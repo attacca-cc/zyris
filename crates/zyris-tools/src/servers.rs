@@ -57,6 +57,28 @@ use crate::announce::Tools;
 /// this is a latency decision with nothing on the other side of it.
 pub const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Why an entry the file asked for is not running, when all this type knows is that it is not.
+///
+/// **Two sentences, because the two situations offer a person different things to do.** Whether
+/// the name can be announced decides which: [`zyris_mcp::config::start_one`] checks it before it
+/// spawns anything, so an entry whose name has a dot in it was never attempted and there is no
+/// log line about it to go and read.
+///
+/// Both are written to be **the whole of what the row says**. The badge already reads "did not
+/// start" and `ui/src/Mcp.tsx` renders this on its own, so a sentence beginning "it did not start"
+/// would be the row saying that twice. And neither of them instructs an action the screen does not
+/// offer: a [`ServerState::Failed`] row has one button on it and it says **Turn on**, and a name
+/// that can never be announced has no button at all — its row carries the rename instead, which is
+/// the only thing that would help.
+fn startup_failure(can_be_announced: bool) -> String {
+    if can_be_announced {
+        "The reason was written to the log when Zyris started. Turn it on here to try again, and          this row will say what happened."
+            .to_string()
+    } else {
+        "Nothing tried to start it, because its name cannot be announced.".to_string()
+    }
+}
+
 /// What one configured MCP server is doing.
 ///
 /// Tagged on `state` so the window switches on one field, and carrying its own detail where it has
@@ -211,13 +233,9 @@ impl Servers {
                 let state = match (&promoted, config.enabled) {
                     (Some(_), _) => ServerState::Running,
                     (None, false) => ServerState::Disabled,
-                    (None, true) => ServerState::Failed {
-                        reason: format!(
-                            "`{}` did not start when Zyris did; the reason was written to the log \
-                             at the time. Turning it off and on again here will say why.",
-                            config.name
-                        ),
-                    },
+                    (None, true) => {
+                        ServerState::Failed { reason: startup_failure(capability.is_some()) }
+                    }
                 };
                 Entry { config, capability, state, running: promoted }
             })
@@ -279,6 +297,12 @@ impl Servers {
     ///
     /// Asking for the state it is already in is not an error and does nothing — a second click on
     /// a button that was never redrawn is not a fresh instruction.
+    ///
+    /// **`Err` is reserved for a request this cannot act on at all**, which is exactly one thing:
+    /// a name the server list does not have. A server that was asked to start and would not is not
+    /// that — it is an answer, and the answer is the row, carrying [`ServerState::Failed`] and the
+    /// reason. Returning both an `Err` *and* that row put the same string on the screen twice: once
+    /// under the row as its state, and again beside it as a rejected request.
     pub async fn set_enabled(&self, name: &str, enabled: bool) -> Result<ServerView, String> {
         let mut entries = self.0.entries.lock().await;
         let index = entries
@@ -301,19 +325,19 @@ impl Servers {
                         // `mcp_` prefixing is injective — so this is reported rather than
                         // recovered from, and the process is dropped instead of being left
                         // running behind nothing.
-                        let reason = format!(
-                            "`{name}` started but could not be announced: {}",
-                            error.message
-                        );
-                        self.0.set(&mut entries[index], ServerState::Failed { reason: reason.clone() }, None);
-                        return Err(reason);
+                        let reason =
+                            format!("It started but could not be announced: {}", error.message);
+                        self.0.set(&mut entries[index], ServerState::Failed { reason }, None);
+                        return Ok(entries[index].view());
                     }
                     self.0.set(&mut entries[index], ServerState::Running, Some(promoted));
                 }
                 Err(error) => {
-                    let reason = format!("{error:#}");
-                    self.0.set(&mut entries[index], ServerState::Failed { reason: reason.clone() }, None);
-                    return Err(reason);
+                    // The row is the answer. It says which server, because it is that server's
+                    // row, so the sentence only has to say what went wrong.
+                    let reason = format!("It would not start: {error:#}");
+                    self.0.set(&mut entries[index], ServerState::Failed { reason }, None);
+                    return Ok(entries[index].view());
                 }
             }
         } else {

@@ -350,6 +350,9 @@ pub async fn mcp_servers(servers: State<'_, Servers>) -> Result<ServerList, Stri
 /// Turning one on is the case that proves it — the command may not be there any more, and the
 /// answer is a `Failed` carrying the reason rather than the `Running` the click asked for.
 ///
+/// So a server that would not start comes back here as `Ok`, not `Err`. `Err` is a request that
+/// could not be acted on at all, which is one thing: a name the server list does not have.
+///
 /// **Nothing is written to the server list on disk, and the window says so.** This switch lasts
 /// as long as this run; the file decides what the next one starts. `zyris_tools::Servers::
 /// set_enabled` records the three things that decided that, the first of which is that the file is

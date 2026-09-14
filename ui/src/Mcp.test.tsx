@@ -202,6 +202,30 @@ describe("Mcp", () => {
     expect(row.querySelector("button")).toBe(null);
   });
 
+  it("shows a failed server's reason once and does not say it did not start twice", async () => {
+    // The row used to be rendered behind a fixed "It did not start.", and the reason the core
+    // stamps for a startup failure began the same way — so the sentence repeated its own first
+    // clause. The badge already carries those words; the paragraph carries the reason.
+    answers({
+      servers: [
+        server("desk-notes", {
+          state: {
+            state: "failed",
+            reason: "The reason was written to the log when Zyris started.",
+          },
+          tools: [],
+        }),
+      ],
+    });
+
+    render(<Mcp state={showing()} />);
+
+    const row = await screen.findByRole("listitem", { name: "desk-notes" });
+    expect(row.textContent).toContain("did not start");
+    expect(row.textContent?.match(/did not start/g)).toHaveLength(1);
+    expect(row.textContent).toContain("The reason was written to the log when Zyris started.");
+  });
+
   it("renders what the switch answered rather than what it was asked for", async () => {
     // Turning a server on is the case that proves it: the command may not be there any more, and
     // the honest answer is the failure rather than the "running" the click asked for.

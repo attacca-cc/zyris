@@ -289,8 +289,13 @@ export function Mcp({ state }: { state: State }) {
                     </p>
                   )}
 
+                  {/* The reason on its own. The badge beside the name already reads "did not
+                      start", and this used to be rendered behind a second "It did not start." —
+                      so a row whose reason began the same way said it twice. `zyris_tools`'s
+                      `startup_failure` is where the wording lives now, and it is written to be
+                      the whole of what the row says. */}
                   {server.state.state === "failed" && (
-                    <p className="note problem">It did not start. {server.state.reason}</p>
+                    <p className="note problem">{server.state.reason}</p>
                   )}
 
                   {server.capability === null && (

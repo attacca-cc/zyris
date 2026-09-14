@@ -321,15 +321,22 @@ async fn turning_on_a_server_that_will_not_start_costs_that_server_and_nothing_e
     let (agent, _node) = agent_connected_to(&machine.live).await;
     machine.peer_sees(&agent, &["mcp_desk-notes"]).await;
 
-    let failure = machine
+    // **An answer, not a rejection.** A server that would not start is a state this row can be
+    // in, and the row is where it is said; returning an `Err` as well put the same sentence on
+    // the screen twice, once as the row's state and once as a request that was refused.
+    let answered = machine
         .servers
         .set_enabled("calendar", true)
         .await
-        .expect_err("a command that is not there cannot be started");
-    assert!(
-        failure.contains("calendar") && failure.contains(MISSING_COMMAND),
-        "the failure has to say which server and what it ran: {failure}"
-    );
+        .expect("a command that is not there is an answer about that server, not a bad request");
+    match &answered.state {
+        ServerState::Failed { reason } => assert!(
+            reason.contains(MISSING_COMMAND),
+            "the row has to say what it ran: {reason}"
+        ),
+        other => panic!("a command that is not there cannot have started: {other:?}"),
+    }
+    assert_eq!(answered.name, "calendar", "the row says which server; the sentence need not");
 
     // The one that was running is untouched, and so is this machine's own.
     machine.peer_sees(&agent, &["mcp_desk-notes"]).await;
@@ -518,9 +525,53 @@ async fn a_server_that_would_not_start_reads_as_failed_rather_than_as_turned_off
     assert_eq!(machine.state("desk-notes").await, ServerState::Disabled);
     match machine.state("calendar").await {
         ServerState::Failed { reason } => {
-            assert!(reason.contains("calendar"), "which server: {reason}");
+            // **The sentence has to be one the screen can honour.** It said "turning it off and
+            // on again here will say why", and a `Failed` row has exactly one button on it,
+            // reading Turn on. A row cannot instruct an action it does not offer.
+            assert!(
+                !reason.to_lowercase().contains("off and on"),
+                "the row tells a person to do something it gives them no way to do: {reason}"
+            );
+            assert!(
+                reason.to_lowercase().contains("turn it on"),
+                "the one thing the row does offer has to be the thing it asks for: {reason}"
+            );
+            // And it does not repeat the badge beside it, which already reads "did not start".
+            assert!(
+                !reason.to_lowercase().starts_with("it did not start"),
+                "the row says this twice: {reason}"
+            );
         }
         other => panic!("an entry that was asked for and did not start is not off: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_name_that_can_never_be_announced_is_not_told_to_try_again() {
+    // The other half of the sentence above, and the one where the screen offers **no** button at
+    // all: `ui/src/Mcp.tsx` hides the switch for a server whose name can never make a capability,
+    // because starting it would fail the same way every time. Telling such a row to turn itself on
+    // is instructing a control that is not on the screen.
+    //
+    // It is also not true that it failed to start. `zyris_mcp::config::start_one` checks the name
+    // before it spawns anything, so nothing was attempted and there is no log line to go and read.
+    let machine = Machine::with(vec![entry("my.notes", &[])]).await;
+
+    let view = machine.servers.list().await;
+    let server = &view[0];
+    assert_eq!(server.capability, None, "a dot makes a name nothing can address");
+    match &server.state {
+        ServerState::Failed { reason } => {
+            assert!(
+                !reason.to_lowercase().contains("turn it on"),
+                "the row has no such button on it: {reason}"
+            );
+            assert!(
+                reason.to_lowercase().contains("cannot be announced"),
+                "the reason has to be the real one: {reason}"
+            );
+        }
+        other => panic!("an entry that was asked for and is not running is not off: {other:?}"),
     }
 }
 
