@@ -409,6 +409,15 @@ Windows machine. Six things are owed, and **the first can still change what the 
    whether the answer is a language setting and what it should cost, and that decision belongs
    with the step that hands the text to an agent rather than here.
 
+**The Windows echo canceller is not one of the six, and that is deliberate.** Windows cannot build
+the echo canceller Linux uses, so it has one of its own — the Voice Capture DSP that ships with
+Windows itself. It has been built and measured on Windows 11: **56 dB of a synthetic echo removed
+with the loudspeaker signal fed to it, against 4 dB without**, holding steady over twenty seconds.
+But that echo is a delayed copy of the loudspeaker and nothing else — no room, no reflections, no
+second voice — and **nothing is wired to it yet**, so there is nothing on any screen to check and
+no way to try it. What it is owed is a real room, and that goes on this list the day the microphone
+actually goes through it.
+
 ## Install
 
 Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the

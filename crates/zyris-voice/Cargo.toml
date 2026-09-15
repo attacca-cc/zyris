@@ -123,6 +123,20 @@ optional = true
 workspace = true
 optional = true
 
+
+# The Windows echo canceller. **Target-gated as well as optional**: a Linux build of `voice`
+# enables this feature and cargo still builds nothing, because the dependency is declared for
+# `cfg(windows)` only. That is what lets `win_aec.rs` sit behind plain `voice` rather than
+# behind `aec` — see the feature list below for why those are not the same thing.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+optional = true
+
+# The same copy again under the name `#[implement]` writes into the code it generates.
+[target.'cfg(windows)'.dependencies.windows-core]
+workspace = true
+optional = true
+
 [dev-dependencies]
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
@@ -160,6 +174,9 @@ voice = [
     "dep:tracing",
     "dep:zyris-attacca",
     "dep:futures-util",
+    # Windows only, and built by nothing anywhere else: see the target section above.
+    "dep:windows",
+    "dep:windows-core",
     "tokio/rt",
 ]
 

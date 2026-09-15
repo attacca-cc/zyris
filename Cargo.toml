@@ -155,6 +155,41 @@ webrtc-audio-processing = "2.1.0"
 # screenful of model parameters and timings to stderr on every load, and in `--headless` that is
 # the process log. `zyris_voice::stt::Stt::load` installs the hooks once per process.
 whisper-rs = { version = "0.16.0", features = ["tracing_backend"] }
+# The Windows echo canceller, which is the operating system's own: the Voice Capture DSP,
+# `CWMAudioAEC`. **Only `zyris-voice` names this, only on Windows, behind `voice`**; nothing
+# here is built on Linux and `cargo tree` on a Linux target does not carry it.
+#
+# The feature list is the whole cost — win32metadata is generated per module and every module
+# named here is compiled — so it is the smallest set that reaches the DSP:
+#
+# - `Win32_Media_DxMediaObjects`       `IMediaObject`, `IMediaBuffer`, `DMO_MEDIA_TYPE`
+# - `Win32_Media_Audio`                `WAVEFORMATEX`
+# - `Win32_UI_Shell_PropertiesSystem`  `IPropertyStore`, which is how the DSP is configured
+# - `Win32_System_Com` and `_StructuredStorage` and `Win32_System_Variant`  `CoCreateInstance`,
+#   `PROPVARIANT`
+#
+# **`Win32_Media_MediaFoundation` is deliberately absent**, and it is the largest module any of
+# this could have pulled in. The only things needed from it were three well-known GUIDs —
+# `MEDIATYPE_Audio`, `MEDIASUBTYPE_PCM`, `FORMAT_WaveFormatEx`. They are transcribed from a real
+# `wmsdkidl.h` instead, and `win_aec.rs` carries the header's own text beside each one.
+#
+# There is no `implement` feature to ask for: `windows::core::implement` is unconditional in
+# 0.62, which is what writes the `IMediaBuffer` vtable.
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_DxMediaObjects",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+# The same crate `windows` re-exports as `windows::core`, named a second time **because
+# `#[implement]` emits `::windows_core::` — an absolute path**, and an absolute path needs the
+# crate to be a direct dependency. `use windows::core as windows_core` does not satisfy it;
+# measured on Windows, 2026-09-15, as `could not find windows_core in the list of imported
+# crates`. It is the same compiled copy, so this costs one manifest line and nothing else.
+windows-core = "0.62.2"
 # `=0.2.0`, not `^0.2.0`, for the six that come from the registry. Each of them depends on one of
 # the crates patched below — `zyris-caps`, `zyris-core` — with a plain caret, and
 # `[patch.crates-io]` pins those to a git rev whose version is 0.2.0. The day upstream publishes

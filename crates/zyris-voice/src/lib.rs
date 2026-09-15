@@ -92,6 +92,14 @@ mod fixture;
 #[cfg(feature = "voice")]
 pub mod session;
 
+// The Windows echo canceller: the operating system's own Voice Capture DSP. **Behind `voice`
+// rather than `aec`**, and the module documentation argues why: `aec` exists because nothing
+// that ships can build `webrtc-audio-processing`, and this needs nothing built at all — the
+// canceller is a DLL that is already on every Windows machine and `windows-rs` is generated
+// Rust. So unlike `aec`, this is compiled and unit-tested by CI, on `windows-latest`.
+#[cfg(all(windows, feature = "voice"))]
+pub mod win_aec;
+
 // Recording a wake word, and keeping it. Nothing matches it -- see the module.
 #[cfg(feature = "voice")]
 pub mod wake;
