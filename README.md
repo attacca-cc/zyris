@@ -297,7 +297,8 @@ it is redistributing those weights and takes that licence with them.
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such
 machine rather than only on the one that built it; on anything older it will not start. Nothing
-else in Zyris has that requirement.
+else in Zyris needs it — but the published installers are built with speech in them, so in
+practice it is a requirement of the whole application. See [Install](#install).
 
 ## What nobody has checked by hand
 
@@ -458,6 +459,13 @@ Every `v*` tag builds the installers on GitHub's runners and attaches them to a 
 downloads are on the [releases page](https://github.com/attacca-cc/zyris/releases): a
 `Zyris_<version>_amd64.deb` for Debian and Ubuntu, a `Zyris_<version>_x64-setup.exe` for
 Windows. **Nothing is tagged yet** — see Status below for what is still being written.
+
+**These need a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on anything
+older Zyris will not start at all.** Not the speech alone: the transcription engine is compiled
+into the binary, so an older machine gets a process that dies before its first window, with no
+message. Nothing else in Zyris has that requirement, and a build without `--features voice`
+would not either; the published installers carry it because an app that cannot be spoken to is
+not this one.
 
 ```bash
 sudo apt install ./Zyris_0.1.0_amd64.deb

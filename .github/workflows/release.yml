@@ -21,10 +21,10 @@ env:
   # binary that dies with SIGILL — before `main`, with no message — on any CPU older than the
   # runner that built it. **No test can catch it**: the machine running the tests is the one CPU
   # where it works. `crates/zyris-voice/build.rs` refuses a release build without this, which is
-  # what makes the rule survive somebody editing this file; the line is here so that the day
-  # `pnpm tauri build` is given `--features voice` it is already right rather than failing.
+  # what makes the rule survive somebody editing this file.
   #
-  # These bundles carry no features today, so it currently reaches nothing. Quoted because YAML
+  # **It reaches the bundles now** — they are built with `--features voice` since 2026-09-19, so
+  # this is load-bearing rather than waiting. Quoted because YAML
   # 1.1 reads a bare `OFF` as the boolean false — which CMake happens to accept, which is
   # exactly why an unquoted one would never be noticed. AVX2 is still required either way, and
   # the README says so.
@@ -44,10 +44,17 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact: zyris-deb
+            # Speech, and the echo canceller with it. `aec` implies `voice`; it is spelled out
+            # so a reader of this file can see both without opening a manifest.
+            features: voice,aec
             # The filenames carry the version and the architecture, so glob rather than guess.
             bundles: target/release/bundle/deb/*.deb
           - os: windows-latest
             artifact: zyris-nsis
+            # No `aec`: `webrtc-audio-processing` has no supported Windows build upstream. The
+            # canceller Windows gets is `win_aec.rs`, the DSP that ships with the OS, which is
+            # behind plain `voice` and needs nothing built.
+            features: voice
             bundles: target/release/bundle/nsis/*.exe
 
     steps:
@@ -78,10 +85,12 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} matches \"version\": \"${configured}\" in ${config}"
 
-      # The same list `ci.yml` installs, which was arrived at by building rather than guessing,
-      # minus `libasound2-dev` and `libclang-dev`: those two are the voice build's, and these
-      # bundles are built with no features. They move here the day `pnpm tauri build` is given
-      # `--features voice`.
+      # The same list `ci.yml` installs, arrived at by building rather than guessing. The last
+      # four are the voice build's: `libasound2-dev` because cpal depends on `alsa-sys`
+      # unconditionally here, `libclang-dev` because `whisper-rs-sys` and `pipewire-sys` both run
+      # `bindgen` and the runner ships clang without the `.so`, and `meson`/`ninja-build` because
+      # the echo canceller is vendored — no Debian or Ubuntu ships `webrtc-audio-processing` 2.x,
+      # so there is no system copy to link against and a `.deb` could not name one.
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
@@ -102,7 +111,11 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-1 \
             libpipewire-0.3-dev \
-            libgbm-dev
+            libgbm-dev \
+            libasound2-dev \
+            libclang-dev \
+            meson \
+            ninja-build
 
       - uses: pnpm/action-setup@v4
 
@@ -123,8 +136,23 @@ jobs:
       # `tauri.conf.json` runs `pnpm --filter zyris-ui build` as its `beforeBuildCommand`, which
       # is what puts `ui/dist` in place for `tauri-build`; it is not committed. No code signing:
       # it needs certificates nobody has, and the bundler's warning about that is expected.
+      # clang-sys looks in `lib` and the runner image puts the DLL in `bin`. Windows-only rather
+      # than in the job `env`: an empty value on Linux points clang-sys at nothing.
+      - name: Point bindgen at libclang
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$GITHUB_ENV"
+
       - name: Build the bundles
-        run: pnpm tauri build
+        shell: bash
+        env:
+          # `ort-sys` probes `pkg_config` for `libonnxruntime` before it considers downloading,
+          # and a hit there links dynamically against a library the installer does not carry.
+          # Forced off so the bundle links the statically-linked copy `ort` fetches — on both
+          # runners, because `windows-latest` has Strawberry Perl's pure-Perl `pkg-config.bat`
+          # on PATH and it answers.
+          LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+        run: pnpm tauri build --features ${{ matrix.features }}
 
       - name: Report what the bundler produced
         shell: bash
