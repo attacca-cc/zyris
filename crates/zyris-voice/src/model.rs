@@ -658,7 +658,29 @@ mod tests {
             !dir.join(model.file).exists(),
             "a failed download must never leave a file under the model's own name"
         );
-        assert!(parts_in(dir).is_empty(), "a part file was left behind: {:?}", parts_in(dir));
+
+        // **Windows deletes lazily and this assertion has to know that.** `remove_file` on a
+        // file another handle still holds does not unlink it; it marks it delete-pending, and
+        // the entry stays enumerable until the last handle closes. On Linux the unlink is
+        // immediate. The first version of this read the directory once for the condition and
+        // again for the message and printed `a part file was left behind: []` — the file had
+        // gone between the two reads, which is the whole tell.
+        //
+        // So the rule being asserted is "nothing is left behind", not "nothing is visible on
+        // this instruction", and a bounded wait is what states it on both platforms. A real
+        // leak still fails: the file never goes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let left = parts_in(dir);
+            if left.is_empty() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a part file was left behind: {left:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// One HTTP response on loopback. Enough to exercise the real `reqwest` path without a
