@@ -80,3 +80,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # same lines, so the on build cannot quietly stop compiling while everybody develops against
 # the off one. `tests/the_app_never_asks_whether_voice_is_compiled_in.rs` is what holds that.
 voice = ["zyris-voice/voice"]
+
+# Echo cancellation on top, vendored rather than linked. Forwards and does nothing else, like
+# `voice`. **Linux only** — see `zyris-voice`'s `aec-bundled` for why, and note Windows gets a
+# canceller regardless, from the DSP that ships with the operating system.
+aec = ["voice", "zyris-voice/aec-bundled"]

@@ -57,7 +57,9 @@ jobs:
             libpipewire-0.3-dev \
             libgbm-dev \
             libasound2-dev \
-            libclang-dev
+            libclang-dev \
+            meson \
+            ninja-build
 
       - uses: pnpm/action-setup@v4
 
@@ -123,6 +125,32 @@ jobs:
       # canceller is a separate feature that CI does not build, said out loud here rather than
       # hidden inside a job that looks like it covers everything. See `crates/zyris-voice/
       # Cargo.toml`.
+      # **The echo canceller, statically linked, on Linux only.** Measured on a development
+      # machine on 2026-09-19 rather than assumed: `webrtc-audio-processing`'s `bundled` feature
+      # **does** build — 6m 02s — links **statically** (no `libwebrtc` in `ldd`, so the `.deb`
+      # names nothing in `Depends:`), and passes the whole suite including the one test that
+      # measures cancellation rather than compilation. Until today it had never been built on any
+      # platform, and this file said so.
+      #
+      # All it ever needed was `meson` and `ninja`, which the apt line above now installs. What
+      # made that look bigger than it was: no Debian or Ubuntu ships `webrtc-audio-processing`
+      # 2.x, so the *system* library is genuinely unavailable — and `bundled` was written off with
+      # it rather than tried separately.
+      #
+      # **Linux only, and that is upstream's position rather than ours**: issue #34 (Windows
+      # build) has been open since 2023-09-27, the MSVC pull request is unmerged, and its author
+      # says he has never verified the audio processing behaves correctly at run time. Windows
+      # has its own canceller — `win_aec.rs`, the DSP that ships with the OS — which the step
+      # above already compiles and runs.
+      - name: Build the echo canceller
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GGML_NATIVE: "OFF"
+          LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+        run: |
+          cargo test -p zyris-voice --features aec,webrtc-audio-processing/bundled
+
       - name: Build the voice feature
         env:
           # **`GGML_NATIVE` defaults to ON**, which bakes `-march=native` into whisper.cpp and

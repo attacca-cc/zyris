@@ -202,3 +202,19 @@ voice = [
 #
 # Implies `voice`: cancelling the echo out of a microphone nobody opened is not a thing.
 aec = ["voice", "dep:webrtc-audio-processing"]
+
+# The same canceller, built from source rather than linked against a system copy — and this is
+# the one a release uses, because there is no system copy to link against: **no Debian or Ubuntu
+# ships `webrtc-audio-processing` 2.x**, so a `.deb` naming it in `Depends:` would name a
+# package that does not exist.
+#
+# Measured on 2026-09-19 rather than assumed, because this repository said for four sections that
+# it had never been built anywhere: it builds in **6m 02s** on a 3.6 GB machine, links
+# **statically** (no `libwebrtc` in `ldd`, so the `.deb` gains no dependency at all), and passes
+# the suite including the test that measures cancellation rather than compilation. All it wanted
+# was `meson` and `ninja`, one apt line away on the runner.
+#
+# Linux only. Upstream has no supported Windows build — issue #34 open since 2023-09-27, the MSVC
+# pull request unmerged, and its author saying he has never verified the processing behaves
+# correctly at run time — so Windows uses `win_aec.rs`, the DSP that ships with the OS.
+aec-bundled = ["aec", "webrtc-audio-processing/bundled"]
