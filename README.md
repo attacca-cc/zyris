@@ -362,7 +362,9 @@ Speech is tested as far as a file can stand in for a microphone: a recording goe
 48 kHz stereo an ordinary device delivers, through the real rate conversion, the real silence
 rule and real whisper, and the sentence comes back out of the same `VoiceEvent` the window
 renders. What no test here has is a microphone, a finger on a key, a Wayland compositor, or a
-Windows machine. Six things are owed, and **the first can still change what the product is.**
+Windows machine. Ten things are owed, and **the first can still change what the product is.** The
+last four are about speaking rather than hearing, and need an Attacca session named in
+`voice.json` — there is no control for that on any screen yet, and the Voice tab says so.
 
 1. **Does letting go of the key get through? — Wayland only, and it is the one that matters.**
    Bind the shortcut as the Voice tab describes, turn listening on, hold the key for about two
@@ -408,6 +410,38 @@ Windows machine. Six things are owed, and **the first can still change what the 
    anything from usable to nonsense, and nobody knows which. What this check is for is deciding
    whether the answer is a language setting and what it should cost, and that decision belongs
    with the step that hands the text to an agent rather than here.
+
+7. **An answer read aloud at all.** Put a session id in `voice.json`, restart, and ask an
+   agent something with a few sentences in the reply.
+   Pass: it starts speaking while the text is still arriving, and stops at the end.
+   Fail: silence, or it waits for the whole answer first.
+   **Expect gaps between sentences.** Synthesis here runs slower than speech — a real-time factor
+   of 1.2 to 1.9 measured on the development machine — so the speaker catches up with the queue
+   and waits. That is the engine and the hardware, not the splitter, and no arrangement of
+   fragments removes it.
+
+8. **Korean, spoken.** Ask for an answer in Korean and listen to it. **Nobody has ever heard this
+   voice say a Korean word.** What is proven is narrower than it sounds: the model's character
+   table has no entry for any of the 11,172 composed Hangul syllables and does have entries for
+   the 69 conjoining jamo, so Zyris decomposes the text before handing it over and a test fails
+   if it stops. Whether the result is good Korean, accented Korean or nonsense is unknown.
+
+9. **Interrupting it.** While it is speaking, press and hold the push-to-talk key.
+   Pass: the speaking stops at once, and the conversation on Attacca gains a line saying which
+   sentences were heard, which was cut off and how far in.
+   Note what this is *not*: **the agent's own record of that answer is not shortened**, because
+   the protocol's cancel carries no delivery point — [an issue asking for
+   one](https://github.com/attacca-cc/zyris-protocol/issues/42) is open. The line Zyris posts is
+   the whole of the repair.
+   **The key is the only way to interrupt, and that is a decision rather than a limitation of the
+   microphone.** Echo cancellation is behind a build flag that nothing releases, so a shipping
+   build hears its own loudspeaker; a microphone allowed to interrupt would cut the answer off on
+   its first word.
+
+10. **Both models at once.** With listening on and an answer being spoken, look at how much memory
+    Zyris is using. Measured separately: about 213 MB for the listening half and 451 MB for the
+    speaking half. **Nobody has run them together**, and the development machine has 3.6 GB with a
+    browser engine also resident.
 
 **The Windows echo canceller is not one of the six, and that is deliberate.** Windows cannot build
 the echo canceller Linux uses, so it has one of its own — the Voice Capture DSP that ships with

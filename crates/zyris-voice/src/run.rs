@@ -46,7 +46,7 @@ use crate::session::{Session, Speaking, Stopped};
 use crate::turn::Feed;
 use crate::vad::{Endpointer, Listening};
 use crate::view::{
-    DeviceList, ListeningState, ModelView, VoiceView, WakeState, WakeView, show,
+    DeviceList, ListeningState, ModelView, SpeakingState, VoiceView, WakeState, WakeView, show,
 };
 use crate::{Push, VoiceEvent, VoiceSupport, stt, wake};
 
@@ -193,6 +193,17 @@ impl Engine {
             chosen: live.settings.device.clone(),
             model: model_view(stt::state(&stt::BASE)),
             model_env: std::env::var(stt::MODEL_ENV).ok().filter(|named| !named.is_empty()),
+            speaking: match live.settings.session.clone() {
+                Some(id) => SpeakingState::Session { id },
+                // Not a failure, and not silence without a reason: the file is named so a
+                // person can put an id in it, and there is no control here that would.
+                None => SpeakingState::NoSession {
+                    settings: match &self.settings_path {
+                        Some(path) => show(path),
+                        None => SETTINGS_FILE.to_string(),
+                    },
+                },
+            },
             wake: wake_view(),
         }
     }

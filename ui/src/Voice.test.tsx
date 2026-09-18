@@ -22,23 +22,27 @@ const { invoke, listen, emitVoice } = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
-import { Voice } from "./Voice";
+import { Voice, type VoiceScreen } from "./Voice";
 
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
 const TAKES = "/home/ada/.local/share/zyris/wake-word";
 
-type Screen = Record<string, unknown>;
+// The real shape, not a loose record. A field added to `VoiceView` in Rust and mirrored in
+// `Voice.tsx` is then a compile error here until the fixture carries it, which is the only thing
+// that stops a new part of the screen going untested by default.
+type Screen = VoiceScreen;
 
 // A machine where everything works, which every test below then breaks one thing of.
 function machine(over: {
-  support?: unknown;
-  listening?: unknown;
-  devices?: unknown;
-  chosen?: unknown;
-  model?: unknown;
+  support?: VoiceScreen["voice"]["support"];
+  listening?: VoiceScreen["voice"]["listening"];
+  devices?: VoiceScreen["voice"]["devices"];
+  chosen?: VoiceScreen["voice"]["chosen"];
+  model?: VoiceScreen["voice"]["model"];
   modelEnv?: string | null;
-  wake?: unknown;
-  hotkey?: unknown;
+  wake?: VoiceScreen["voice"]["wake"];
+  speaking?: VoiceScreen["voice"]["speaking"];
+  hotkey?: VoiceScreen["hotkey"];
 }): Screen {
   return {
     voice: {
@@ -64,6 +68,7 @@ function machine(over: {
       chosen: over.chosen ?? { kind: "default" },
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
       modelEnv: over.modelEnv ?? null,
+      speaking: over.speaking ?? { state: "session", id: "s-1" },
       wake: over.wake ?? {
         state: { state: "nothing" },
         dir: TAKES,
@@ -259,7 +264,7 @@ describe("Voice", () => {
   it("gives each of the four listening states its own word", async () => {
     // Four states and four words. "Asked for and not working" is the one a switch must never
     // paint the same as "nobody asked", and nothing but this decides it.
-    const words: [unknown, string][] = [
+    const words: [VoiceScreen["voice"]["listening"], string][] = [
       [{ state: "off" }, "off"],
       [{ state: "starting", detail: "the speech model is being downloaded" }, "starting"],
       [{ state: "on", device: "Built-in" }, "listening"],
@@ -478,13 +483,47 @@ describe("Voice", () => {
   // The wake word
   // ------------------------------------------------------------------------------------------
 
+  it("tells a reader a machine that hears and cannot answer apart from one that can", async () => {
+    // The two halves fail apart, and only this says which half is missing. A machine with no
+    // session listens, transcribes and publishes exactly as before and never says a word.
+    answers(machine({ speaking: { state: "noSession", settings: "/home/you/.local/share/zyris/voice.json" } }));
+    render(<Voice />);
+    expect(await screen.findByText(/nothing is read aloud/i)).toBeTruthy();
+
+    // It names the file and the field, because there is no control here that would do it.
+    const page = document.body.textContent ?? "";
+    expect(page).toContain("/home/you/.local/share/zyris/voice.json");
+    expect(page).toMatch(/session/);
+    expect(page).toMatch(/no control for that here/i);
+
+    cleanup();
+    answers(machine({ speaking: { state: "session", id: "sess-42" } }));
+    render(<Voice />);
+    expect(await screen.findByText(/read aloud/i)).toBeTruthy();
+    expect(document.body.textContent ?? "").toContain("sess-42");
+  });
+
+  it("does not claim the agent's own record is cut short, and does not promise smooth speech", async () => {
+    // Two things measured rather than assumed: synthesis runs slower than speech, so there are
+    // gaps between sentences; and `cancel_turn` carries no delivery point, so the transcript
+    // keeps the whole answer. Copy that said otherwise would be the seventh time in this project.
+    answers(machine({ speaking: { state: "session", id: "sess-42" } }));
+    render(<Voice />);
+    await screen.findByText(/read aloud/i);
+    const page = document.body.textContent ?? "";
+    expect(page).toMatch(/pauses between sentences/i);
+    expect(page).toMatch(/record of the answer stays whole/i);
+    expect(page).not.toMatch(/without a pause|seamless|smoothly/i);
+  });
+
   it("says nothing reads the wake word, in every state it can be in", async () => {
-    for (const state of [
+    const states: VoiceScreen["voice"]["wake"]["state"][] = [
       { state: "nothing" },
       { state: "partial", recorded: 2 },
       { state: "complete", recorded: 5 },
       { state: "unreadable", reason: "wake-word.json could not be read" },
-    ]) {
+    ];
+    for (const state of states) {
       cleanup();
       answers(
         machine({

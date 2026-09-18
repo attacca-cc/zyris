@@ -79,6 +79,14 @@ type WakeView = {
 // `crate::hotkey::HotkeySupport`, internally tagged on `state`. **Three answers, and this screen
 // must not flatten them**: a key that works, a key the desktop will only let the *person* bind,
 // and a desktop where no application can register one at all.
+// `zyris_voice::view::SpeakingState`. Kept apart from `Listening` because the two halves fail
+// apart: a machine can hear perfectly and answer never, and one screen showing only the first
+// would leave somebody wondering why it is silent.
+type Speaking =
+  | { state: "notHere"; reason: string }
+  | { state: "noSession"; settings: string }
+  | { state: "session"; id: string };
+
 type HotkeySupport =
   | { state: "working"; trigger: string }
   | { state: "needsAKeyBound"; shortcutId: string; desktop: string; line: string | null; how: string }
@@ -87,7 +95,7 @@ type HotkeySupport =
 // `bridge::VoiceScreen`. One answer rather than two commands, because the two halves have to
 // agree: "nothing is listening" read against a hotkey answer from a different moment is exactly
 // what somebody would work out their next move from.
-type VoiceScreen = {
+export type VoiceScreen = {
   voice: {
     support: Support;
     listening: Listening;
@@ -96,6 +104,7 @@ type VoiceScreen = {
     model: ModelView;
     modelEnv: string | null;
     wake: WakeView;
+    speaking: Speaking;
   };
   hotkey: HotkeySupport;
 };
@@ -367,6 +376,40 @@ export function Voice() {
               no recording is kept once it has been turned into text. A run started with{" "}
               <span className="mono">--headless</span> never listens — it has no window and no key
               for anybody to hold.
+            </p>
+          </>
+        )}
+      </section>
+
+      <section>
+        <h2>Reading answers aloud</h2>
+
+        {voice.speaking.state === "notHere" && <p>{voice.speaking.reason}</p>}
+
+        {voice.speaking.state === "noSession" && (
+          <>
+            <p>
+              Nothing is read aloud. This computer hears you, writes down what you said and hands
+              it on &mdash; it just has no Attacca session to answer from.
+            </p>
+            <p className="note">
+              There is no control for that here yet. Put a session id in{" "}
+              <span className="mono">{voice.speaking.settings}</span> under{" "}
+              <span className="mono">session</span> and restart Zyris.
+            </p>
+          </>
+        )}
+
+        {voice.speaking.state === "session" && (
+          <>
+            <p>
+              Answers from session <span className="mono">{voice.speaking.id}</span> are read aloud
+              as they are written.
+            </p>
+            <p className="note">
+              Speaking runs behind writing, so there are pauses between sentences. Pressing the
+              push-to-talk key stops the speaking: your side of the conversation records where it
+              was cut off, and the agent&rsquo;s own record of the answer stays whole.
             </p>
           </>
         )}
