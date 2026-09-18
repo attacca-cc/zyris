@@ -544,9 +544,10 @@ lands in what order. Nothing here is ready to install yet.
 6. MCP — local servers promoted to capabilities (done, except for the
    [check against a real agent](#an-agent-and-a-promoted-mcp-tool))
 7. Voice in — audio, wake word recording, transcription (done, except for the
-   [checks that need a person](#a-microphone-a-key-and-windows); echo cancellation is built and
-   cancels nothing until there is something to speak)
-8. Voice out — streaming speech, interruption
+   [checks that need a person](#a-microphone-a-key-and-windows))
+8. Voice out — streaming speech, interruption (done, except for the
+   [checks that need a person](#a-microphone-a-key-and-windows); on Windows the echo canceller
+   is built and reaches nothing yet)
 
 ## Security
 
