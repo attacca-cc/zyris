@@ -35,12 +35,18 @@ use std::sync::Arc;
 
 use tokio::sync::{Mutex, broadcast};
 
+use std::sync::atomic::AtomicU64;
+
 use crate::apm::Apm;
-use crate::capture::{APM_FRAME, Capture, Captured, Choice, Chunker, VAD_FRAME};
-use crate::session::{Session, Stopped};
+use crate::capture::{
+    APM_FRAME, Capture, Captured, Choice, Chunker, VAD_FRAME, read_delay,
+};
+use crate::playback::{Playback, Render, Speaker};
+use crate::session::{Session, Speaking, Stopped};
+use crate::turn::Feed;
 use crate::vad::{Endpointer, Listening};
 use crate::view::{
-    DeviceList, ListeningState, ModelView, VoiceView, WakeState, WakeView, show,
+    DeviceList, ListeningState, ModelView, SpeakingState, VoiceView, WakeState, WakeView, show,
 };
 use crate::{Push, VoiceEvent, VoiceSupport, stt, wake};
 
@@ -56,6 +62,14 @@ pub struct Settings {
     pub listen: bool,
     /// Which microphone.
     pub device: Choice,
+    /// Which Attacca session this machine talks to and listens to.
+    ///
+    /// **`None` is a machine that can hear and cannot answer**, and that is where task 4 leaves
+    /// it: there is no screen for choosing a session yet, so the id is put here by hand or it is
+    /// absent. Absent is not a failure — everything about listening works, `Heard` still
+    /// reaches whatever is watching the event stream, and the only thing missing is the half
+    /// that speaks. Task 6 owns the screen that fills it in.
+    pub session: Option<String>,
 }
 
 /// What the settings file is called, inside the instance's data directory.
@@ -72,6 +86,13 @@ pub struct Engine {
     /// Where `zyris-app` puts the push-to-talk key. Held by the engine rather than handed to the
     /// session, so that a session started later still gets every press after it started.
     keys: broadcast::Sender<Push>,
+    /// The live turn feed, or `None` on a machine whose settings name no session.
+    ///
+    /// **Built once, at construction, and never rebuilt** — the same rule `Feed` itself states:
+    /// there is no screen for choosing a session, so the id is what it was when this started.
+    /// It outlives every connection, which is the point: the subscription belongs to the
+    /// connection and the cursor belongs to the feed.
+    feed: Option<Arc<Feed>>,
     live: Mutex<Live>,
 }
 
@@ -86,6 +107,12 @@ struct Running {
     /// waits on it is a plain thread and not a task.
     stop: std::sync::mpsc::Sender<()>,
     session: tokio::task::JoinHandle<Stopped>,
+    /// The same, for the speaker's thread. `None` on a machine that opened no speaker.
+    speaker_stop: Option<std::sync::mpsc::Sender<()>>,
+    /// The synthesis worker, the render pump and the delay watch. Aborted together with the
+    /// session: each of them holds a handle on the `Apm` this run built, and a pump left running
+    /// over the next run's processor would be feeding one canceller from another one's speaker.
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -98,11 +125,28 @@ impl Engine {
         let settings_path = dir.map(|dir| dir.join(SETTINGS_FILE));
         let settings = settings_path.as_deref().map(read_settings).unwrap_or_default();
 
+        let feed = settings.session.as_deref().map(Feed::new);
         Engine {
             settings_path,
             events,
             keys: broadcast::channel(KEY_CAPACITY).0,
+            feed,
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
+        }
+    }
+
+    /// A connection came up: subscribe to the turn on it.
+    ///
+    /// **Whether or not anything is listening.** The subscription belongs to the connection, not
+    /// to the microphone switch: `turn_events` with `after: None` replays nothing, so a feed that
+    /// waited for somebody to turn listening on would miss every delta written before they did.
+    pub async fn on_connect(&self, connection: zyris::Connection) {
+        match &self.feed {
+            Some(feed) => feed.on_connect(connection).await,
+            None => tracing::info!(
+                "no Attacca session is configured for the voice, so nothing is read aloud; set \
+                 `session` in {SETTINGS_FILE}"
+            ),
         }
     }
 
@@ -149,6 +193,17 @@ impl Engine {
             chosen: live.settings.device.clone(),
             model: model_view(stt::state(&stt::BASE)),
             model_env: std::env::var(stt::MODEL_ENV).ok().filter(|named| !named.is_empty()),
+            speaking: match live.settings.session.clone() {
+                Some(id) => SpeakingState::Session { id },
+                // Not a failure, and not silence without a reason: the file is named so a
+                // person can put an id in it, and there is no control here that would.
+                None => SpeakingState::NoSession {
+                    settings: match &self.settings_path {
+                        Some(path) => show(path),
+                        None => SETTINGS_FILE.to_string(),
+                    },
+                },
+            },
             wake: wake_view(),
         }
     }
@@ -215,7 +270,8 @@ impl Engine {
     /// Blocking for as long as 141 MB takes, which is why the screen shows what it is doing
     /// rather than a button that appears to do nothing.
     pub async fn fetch_model(&self) -> Result<(), String> {
-        let dir = stt::cache_dir().ok_or_else(|| stt::Fault::NoCacheDirectory.to_string())?;
+        let dir = stt::cache_dir()
+            .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
         {
             let mut live = self.live.lock().await;
             live.state = ListeningState::Starting {
@@ -284,14 +340,15 @@ impl Engine {
         }
         self.set_listening(false).await;
 
-        let dir = stt::cache_dir().ok_or_else(|| stt::Fault::NoCacheDirectory.to_string())?;
+        let dir = stt::cache_dir()
+            .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
         let model = dir.join(stt::BASE.file);
         match std::fs::remove_file(&model) {
             Ok(()) => {}
             // Nothing to delete is not a failure: it is what the screen already says is there.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(stt::Fault::Storage { path: model, detail: error.to_string() }
+                return Err(crate::model::Fault::Storage { path: model, detail: error.to_string() }
                     .to_string());
             }
         }
@@ -339,16 +396,92 @@ impl Engine {
             .map_err(|_| "loading the speech model stopped before it finished".to_string())?
             .map_err(|fault| fault.to_string())?;
 
-        let (device, audio, stop) = open_on_a_thread(choice.clone()).await?;
+        let apm = Arc::new(apm);
+        let (device, audio, capture_delay, stop) = open_on_a_thread(choice.clone()).await?;
 
-        let session = Session::new(
+        // **A machine that can hear and not speak is a usable machine**, so nothing below is
+        // allowed to refuse the microphone. No speaker, no voice models, no session configured:
+        // each of them is a run that listens, transcribes and publishes exactly as before, and
+        // says why it is not talking in the log rather than by failing to start.
+        let mut tasks = Vec::new();
+        let (speaking, speaker_stop) = match self.open_speaker(apm.clone(), &capture_delay).await {
+            Ok((speaking, stop, started)) => {
+                tasks = started;
+                (Some(speaking), Some(stop))
+            }
+            Err(reason) => {
+                tracing::info!(%reason, "nothing will be read aloud on this run");
+                (None, None)
+            }
+        };
+
+        let mut session = Session::new(
             audio,
             self.keys.subscribe(),
-            Arc::new(apm),
+            apm,
             Arc::new(stt),
             self.events.clone(),
         );
-        Ok((Running { stop, session: tokio::spawn(session.run()) }, device))
+        if let Some(speaking) = speaking {
+            session = session.speaking(speaking);
+        }
+        Ok((
+            Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
+            device,
+        ))
+    }
+
+    /// Open the speaker, load the voice, and start the three things that keep it fed.
+    ///
+    /// The `Err` is a sentence for the log, not for a person: every reason it can fail is
+    /// something a screen already shows or task 6 will.
+    async fn open_speaker(
+        &self,
+        apm: Arc<Apm>,
+        capture_delay: &Arc<AtomicU64>,
+    ) -> Result<
+        (Arc<Speaking>, std::sync::mpsc::Sender<()>, Vec<tokio::task::JoinHandle<()>>),
+        String,
+    > {
+        let feed = self
+            .feed
+            .clone()
+            .ok_or_else(|| format!("no Attacca session is named in {SETTINGS_FILE}"))?;
+        let dir = match crate::tts::state() {
+            crate::tts::VoiceState::Ready { dir } => dir,
+            crate::tts::VoiceState::Incomplete { bytes, .. } => {
+                return Err(format!("the voice has not been downloaded yet ({bytes} bytes)"));
+            }
+            crate::tts::VoiceState::Unreadable { detail, .. } => return Err(detail),
+            crate::tts::VoiceState::Nowhere { reason } => return Err(reason),
+        };
+        let voice = crate::tts::DEFAULT_VOICE;
+        let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load(&dir, voice))
+            .await
+            .map_err(|_| "loading the voice stopped before it finished".to_string())?
+            .map_err(|fault| fault.to_string())?;
+
+        let (speaker, tap, rate, stop) = open_speaker_on_a_thread().await?;
+
+        let mut tasks = Vec::new();
+        // The render side of the echo canceller. Started before anything can be queued, so that
+        // the first thing ever played is also the first thing the canceller is told about.
+        let render = Render::new(apm.clone(), rate).map_err(|problem| problem.reason)?;
+        tasks.push(tokio::spawn(render.run(tap)));
+        tasks.push(tokio::spawn(declare_stream_delay(
+            apm,
+            capture_delay.clone(),
+            speaker.clone(),
+        )));
+
+        let speaking = Speaking::new(
+            Arc::new(std::sync::Mutex::new(tts)),
+            Arc::new(speaker),
+            feed.clone(),
+            self.events.clone(),
+        );
+        tasks.push(tokio::spawn(speaking.clone().run(feed.events())));
+        Ok((speaking, stop, tasks))
     }
 
     /// Stop whatever is listening. Safe to call when nothing is.
@@ -357,6 +490,12 @@ impl Engine {
             // Dropping the sender would do it too; sending says which of the two happened to
             // anybody reading the thread.
             let _ = running.stop.send(());
+            if let Some(stop) = &running.speaker_stop {
+                let _ = stop.send(());
+            }
+            for task in &running.tasks {
+                task.abort();
+            }
             running.session.abort();
             let _ = running.session.await;
         }
@@ -429,7 +568,12 @@ fn no_model(state: &stt::ModelState) -> String {
 async fn open_on_a_thread(
     choice: Choice,
 ) -> Result<
-    (String, tokio::sync::mpsc::UnboundedReceiver<Captured>, std::sync::mpsc::Sender<()>),
+    (
+        String,
+        tokio::sync::mpsc::UnboundedReceiver<Captured>,
+        Arc<AtomicU64>,
+        std::sync::mpsc::Sender<()>,
+    ),
     String,
 > {
     let (ready, opened) = tokio::sync::oneshot::channel();
@@ -440,7 +584,9 @@ async fn open_on_a_thread(
         .spawn(move || match Capture::open(&choice, APM_FRAME) {
             Ok((capture, audio)) => {
                 let device = capture.device().to_string();
-                if ready.send(Ok((device, audio))).is_err() {
+                // The `Capture` cannot leave this thread, so what leaves is the one number
+                // anything outside wants from it: `callback - capture`, for the echo canceller.
+                if ready.send(Ok((device, audio, capture.delay_slot()))).is_err() {
                     return;
                 }
                 // Blocks until `stop` is sent or dropped. The `Capture` is dropped on the way
@@ -453,10 +599,79 @@ async fn open_on_a_thread(
         })
         .map_err(|error| format!("a thread for the microphone could not be started: {error}"))?;
 
-    let (device, audio) = opened
+    let (device, audio, delay) = opened
         .await
         .map_err(|_| "the microphone thread stopped before it opened anything".to_string())??;
-    Ok((device, audio, stop))
+    Ok((device, audio, delay, stop))
+}
+
+/// Hold a `cpal::Stream` for the speaker on a thread of its own and hand the queue back.
+///
+/// The same shape [`open_on_a_thread`] has, and for the same reason: `cpal::Stream` is not
+/// `Send` on every platform, so a `Playback` cannot be held by anything that is. What crosses
+/// the thread boundary is a [`Speaker`] — channels and atomics — the render tap, the rate the
+/// stream was actually opened at, and the handle that closes it.
+async fn open_speaker_on_a_thread() -> Result<
+    (Speaker, tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>, u32, std::sync::mpsc::Sender<()>),
+    String,
+> {
+    let (ready, opened) = tokio::sync::oneshot::channel();
+    let (stop, told_to_stop) = std::sync::mpsc::channel::<()>();
+
+    std::thread::Builder::new()
+        .name("zyris-speaker".to_string())
+        .spawn(move || match Playback::open(&Choice::Default) {
+            Ok((playback, tap)) => {
+                let rate = playback.config().sample_rate;
+                if ready.send(Ok((playback.handle(), tap, rate))).is_err() {
+                    return;
+                }
+                let _ = told_to_stop.recv();
+            }
+            Err(problem) => {
+                let _ = ready.send(Err(problem.reason));
+            }
+        })
+        .map_err(|error| format!("a thread for the speaker could not be started: {error}"))?;
+
+    let (speaker, tap, rate) = opened
+        .await
+        .map_err(|_| "the speaker thread stopped before it opened anything".to_string())??;
+    Ok((speaker, tap, rate, stop))
+}
+
+/// How often the delay watch looks for both streams having reported a timestamp.
+const DELAY_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How long it keeps looking. Ten seconds: a stream that has delivered no callback by then is
+/// one nobody is listening to or speaking through.
+const DELAY_TRIES: usize = 40;
+
+/// Tell the echo canceller the round trip, once both streams have said what their halves are.
+///
+/// **Neither half is knowable at construction** — a timestamp exists only once a callback has
+/// run — and the two streams open at different times, so this waits for both rather than
+/// declaring half a delay. While it is waiting, AEC3 is estimating the delay itself, which is
+/// what step 7 shipped and is a working state rather than a broken one.
+async fn declare_stream_delay(apm: Arc<Apm>, capture: Arc<AtomicU64>, speaker: Speaker) {
+    for _ in 0..DELAY_TRIES {
+        if let (Some(capture), Some(playback)) = (read_delay(&capture), speaker.stream_delay()) {
+            let round_trip = capture + playback;
+            apm.set_stream_delay(Some(round_trip));
+            tracing::info!(
+                ?capture,
+                ?playback,
+                ?round_trip,
+                "the echo canceller was told what the loudspeaker path costs"
+            );
+            return;
+        }
+        tokio::time::sleep(DELAY_POLL).await;
+    }
+    tracing::info!(
+        "neither audio stream reported a timestamp, so the echo canceller goes on estimating the \
+         delay between the speaker and the microphone itself"
+    );
 }
 
 /// Record one wake word take, on the thread this is called on.
@@ -612,7 +827,7 @@ fn write_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn tempdir() -> PathBuf {
+    pub(super) fn tempdir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "zyris-voice-run-{}-{}",
             std::process::id(),
@@ -630,7 +845,10 @@ mod tests {
     /// when somebody reshapes the struct.
     #[test]
     fn nothing_listens_until_somebody_says_so() {
-        assert_eq!(Settings::default(), Settings { listen: false, device: Choice::Default });
+        assert_eq!(
+            Settings::default(),
+            Settings { listen: false, device: Choice::Default, session: None }
+        );
 
         let engine = Engine::new(None, broadcast::channel(4).0);
         let live = tokio::runtime::Builder::new_current_thread()
@@ -813,4 +1031,109 @@ mod tests {
             .block_on(async { engine.live.lock().await.state.clone() });
         assert_eq!(state, ListeningState::Off);
     }
+}
+
+#[cfg(test)]
+mod the_delay_watch {
+    use super::*;
+
+    /// **Half a delay is a confident wrong number**, and the whole point of the watch is that it
+    /// does not declare one.
+    ///
+    /// The two streams open at different times — the microphone when somebody turns listening on,
+    /// the speaker when there is an answer — and a timestamp exists only once a callback has run.
+    /// A version that declared whichever half arrived first would hand AEC3 a path length that is
+    /// wrong by the other half, which cancels less while going on reporting that it is working.
+    #[tokio::test]
+    async fn neither_half_of_the_delay_is_declared_on_its_own() {
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let capture = Arc::new(AtomicU64::new(crate::capture::UNKNOWN_DELAY));
+        let (speaker, mut fill, _tap) = crate::playback::offline(441);
+
+        let watching = tokio::spawn(declare_stream_delay(apm.clone(), capture.clone(), speaker));
+
+        // The speaker reports its half and the microphone has not opened yet.
+        let at = cpal::StreamInstant::ZERO + std::time::Duration::from_millis(500);
+        let mut out = vec![0.0f32; 64];
+        fill.deliver(
+            &mut out,
+            1,
+            Some(cpal::OutputStreamTimestamp {
+                callback: at,
+                playback: at + std::time::Duration::from_millis(43),
+            }),
+        );
+        tokio::time::sleep(DELAY_POLL * 2).await;
+        assert_eq!(apm.stream_delay(), None, "one half is not a round trip");
+
+        // And now the microphone's.
+        crate::capture::store_delay(&capture, std::time::Duration::from_millis(21));
+        let waited = tokio::time::Instant::now();
+        while apm.stream_delay().is_none() {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(10),
+                "both halves are in and nothing was declared"
+            );
+            tokio::time::sleep(DELAY_POLL).await;
+        }
+
+        assert_eq!(
+            apm.stream_delay(),
+            Some(std::time::Duration::from_millis(64)),
+            "the round trip is the sum, which is what `EchoCanceller::Full` asks for"
+        );
+        watching.await.expect("the watch ends once it has declared");
+    }
+
+    /// A watch that nothing ever reports to ends rather than polling for the life of the
+    /// process. `DELAY_TRIES` bounds it; the assertion is that the bound exists and is sane.
+    #[test]
+    fn the_watch_gives_up_rather_than_polling_forever() {
+        assert!(DELAY_TRIES > 0);
+        assert!(
+            DELAY_POLL * DELAY_TRIES as u32 >= std::time::Duration::from_secs(5),
+            "a stream on a loaded machine may take seconds to deliver its first callback"
+        );
+        assert!(
+            DELAY_POLL * DELAY_TRIES as u32 <= std::time::Duration::from_secs(60),
+            "and one that has delivered none by then is a stream nobody is using"
+        );
+    }
+
+    /// The setting a session id comes from, and the default that means a machine which listens
+    /// and does not answer.
+    #[test]
+    fn a_machine_with_no_session_named_has_no_feed_to_read_aloud_from() {
+        let (events, _) = broadcast::channel(4);
+        let engine = Engine::new(None, events);
+
+        assert!(
+            engine.feed.is_none(),
+            "there is no screen for choosing a session yet, so an absent one has to be an \
+             ordinary state rather than a failure"
+        );
+    }
+
+    /// And one that does name a session gets a feed for exactly that session.
+    #[test]
+    fn a_named_session_is_the_one_the_feed_listens_to() {
+        let dir = tempdir();
+        std::fs::create_dir_all(&dir).expect("a directory");
+        std::fs::write(
+            dir.join(SETTINGS_FILE),
+            br#"{"listen":false,"device":{"kind":"default"},"session":"s-123"}"#,
+        )
+        .expect("written");
+        let (events, _) = broadcast::channel(4);
+
+        let engine = Engine::new(Some(&dir), events);
+
+        assert_eq!(
+            engine.feed.as_ref().map(|feed| feed.session_id().to_string()),
+            Some("s-123".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use super::tests::tempdir;
 }

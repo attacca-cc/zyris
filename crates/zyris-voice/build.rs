@@ -17,10 +17,16 @@
 //! `cargo test -p zyris-voice --features voice` need an environment variable to run at all.
 //!
 //! `ZYRIS_ALLOW_NATIVE_WHISPER=1` is the deliberate way past it, for somebody building a
-//! release for the machine it will run on and nowhere else.
+//! release for the machine it will run on and nowhere else. **A false value is not a way past
+//! it**: see `build/flags.rs`, which is where both spellings live and where the tests for them
+//! are, since `cargo test` never runs a `#[test]` inside a build script.
+
+#[path = "build/flags.rs"]
+mod flags;
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=build/flags.rs");
     println!("cargo::rerun-if-env-changed=GGML_NATIVE");
     println!("cargo::rerun-if-env-changed=ZYRIS_ALLOW_NATIVE_WHISPER");
 
@@ -31,7 +37,7 @@ fn main() {
     if std::env::var("PROFILE").as_deref() != Ok("release") {
         return;
     }
-    if std::env::var_os("ZYRIS_ALLOW_NATIVE_WHISPER").is_some_and(|v| !v.is_empty()) {
+    if flags::allows_native(std::env::var("ZYRIS_ALLOW_NATIVE_WHISPER").ok().as_deref()) {
         println!(
             "cargo::warning=building whisper.cpp with -march=native; this binary may SIGILL on \
              any other CPU"
@@ -40,15 +46,7 @@ fn main() {
     }
 
     // CMake's own spelling of false, which is what whisper-rs-sys forwards this value as.
-    let off = match std::env::var("GGML_NATIVE") {
-        Ok(value) => {
-            let v = value.trim().to_ascii_uppercase();
-            matches!(v.as_str(), "OFF" | "0" | "FALSE" | "N" | "NO" | "IGNORE" | "NOTFOUND" | "")
-        }
-        Err(_) => false,
-    };
-
-    if !off {
+    if !flags::cmake_off(std::env::var("GGML_NATIVE").ok().as_deref()) {
         panic!(
             "refusing to build a release with the audio stack while GGML_NATIVE is not OFF.\n\
              \n\

@@ -42,6 +42,17 @@ optional = true
 workspace = true
 optional = true
 
+# Speech out: Supertonic 3 through ONNX Runtime. The feature choice and what it costs are argued
+# in the root manifest, where the version is declared.
+[dependencies.ort]
+workspace = true
+optional = true
+
+# NFKD, without which Korean is silent and French is mangled. See `tts.rs`.
+[dependencies.unicode-normalization]
+workspace = true
+optional = true
+
 [dependencies.webrtc-audio-processing]
 workspace = true
 optional = true
@@ -83,6 +94,49 @@ optional = true
 workspace = true
 optional = true
 
+# The turn feed: `turn_events`, `send_message`, and the frames they carry. `speak::Kind` still
+# mirrors `ZDeltaKind` rather than re-exporting it, and `turn.rs` is the one place the two are
+# mapped -- one line that stops compiling if the protocol grows an arm.
+#
+# **Not optional, from task 4 of step 8, and it is the first thing in step 8 that costs the off
+# build anything.** `zyris-app` may contain no `#[cfg(feature = "voice")]`, so the connect hook
+# it installs cannot name `turn::Feed`, which exists only with the feature. The seam is therefore
+# a method on `Voice` -- `Voice::on_connect` -- and it has to have one signature in both builds,
+# which means naming `zyris::Connection` in both. There is no cheaper shape: a generic parameter
+# would need a bound, and a bound is the same dependency.
+#
+# What the off build now pulls in is **nothing the workspace was not already building**:
+# `zyris-runtime`, `zyris-tools` and `zyris-app` all depend on `zyris` unconditionally, so
+# `cargo test --workspace` compiles the same set either way. What changes is a crate outside this
+# workspace taking `zyris-voice` with default features: it used to get `tokio/sync` and `serde`,
+# and now gets the protocol stack with them.
+[dependencies.zyris]
+workspace = true
+
+[dependencies.zyris-attacca]
+workspace = true
+optional = true
+
+# Reading a `Streaming`'s items: `StreamExt::next`, and nothing else. Already in this workspace
+# through `zyris-app`.
+[dependencies.futures-util]
+workspace = true
+optional = true
+
+
+# The Windows echo canceller. **Target-gated as well as optional**: a Linux build of `voice`
+# enables this feature and cargo still builds nothing, because the dependency is declared for
+# `cfg(windows)` only. That is what lets `win_aec.rs` sit behind plain `voice` rather than
+# behind `aec` — see the feature list below for why those are not the same thing.
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+optional = true
+
+# The same copy again under the name `#[implement]` writes into the code it generates.
+[target.'cfg(windows)'.dependencies.windows-core]
+workspace = true
+optional = true
+
 [dev-dependencies]
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
@@ -110,12 +164,19 @@ voice = [
     "dep:rubato",
     "dep:earshot",
     "dep:whisper-rs",
+    "dep:ort",
+    "dep:unicode-normalization",
     "dep:directories",
     "dep:reqwest",
     "dep:rustls",
     "dep:sha2",
     "dep:serde_json",
     "dep:tracing",
+    "dep:zyris-attacca",
+    "dep:futures-util",
+    # Windows only, and built by nothing anywhere else: see the target section above.
+    "dep:windows",
+    "dep:windows-core",
     "tokio/rt",
 ]
 

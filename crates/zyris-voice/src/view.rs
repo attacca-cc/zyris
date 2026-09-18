@@ -189,6 +189,27 @@ pub enum ListeningState {
     Failed { reason: String },
 }
 
+/// Whether this machine reads an answer aloud, and why not when it does not.
+///
+/// **Separate from [`ListeningState`] because the two halves fail apart.** A machine with a
+/// microphone open and no session configured hears everything, transcribes it, publishes
+/// `VoiceEvent::Heard`, and never says a word — which is a working half, not a broken whole, and
+/// a screen that showed only the listening half would leave a person wondering why it is silent.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum SpeakingState {
+    /// The audio stack is not in this build, or this machine cannot do speech at all.
+    #[serde(rename_all = "camelCase")]
+    NotHere { reason: String },
+    /// No Attacca session is named, so nothing is ever read aloud. `settings` is the file to put
+    /// one in; there is no control for it here, and the screen says so rather than implying one.
+    #[serde(rename_all = "camelCase")]
+    NoSession { settings: String },
+    /// Answers from this session are read aloud as they arrive.
+    #[serde(rename_all = "camelCase")]
+    Session { id: String },
+}
+
 /// Everything the Voice screen reads off this machine, in one answer.
 ///
 /// One structure rather than five commands, for the reason `bridge::AutostartView` gives: the
@@ -215,6 +236,8 @@ pub struct VoiceView {
     /// why a file of the wrong size is not called damaged — see `stt::inspect`.
     pub model_env: Option<String>,
     pub wake: WakeView,
+    /// Whether anything is read aloud, and what stops it if not.
+    pub speaking: SpeakingState,
 }
 
 impl VoiceView {
@@ -231,6 +254,7 @@ impl VoiceView {
             chosen: Choice::Default,
             model: ModelView::NotHere { reason: reason.clone() },
             model_env: None,
+            speaking: SpeakingState::NotHere { reason: reason.clone() },
             wake: WakeView {
                 state: WakeState::NotHere { reason },
                 dir: None,

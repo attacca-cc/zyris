@@ -342,7 +342,10 @@ export type VoiceEvent =
   | { kind: "thinking" }
   | { kind: "heard"; text: string }
   | { kind: "heardNothing" }
-  | { kind: "failed"; reason: string };
+  | { kind: "failed"; reason: string }
+  | { kind: "speaking" }
+  | { kind: "spoke" }
+  | { kind: "interrupted" };
 
 // Has to match VOICE_EVENT_NAME in crates/zyris-app/src/bridge.rs exactly; nothing checks that
 // at build time.
