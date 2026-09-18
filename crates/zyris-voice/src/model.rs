@@ -425,11 +425,21 @@ mod tests {
         // pinned to the code rather than only to itself. `HOME` is set wherever `cargo test`
         // runs; a machine that names no cache directory at all is `ModelState::Nowhere` and has
         // nothing for this to check.
+        // The tail differs by platform and the sentence above says both: `directories` puts a
+        // cache under `~/.cache/<app>` on Linux and under `<org>\\<app>\\cache` on Windows, so
+        // only Linux ends in `<app>/<models>`. Asserting the Linux shape everywhere is what made
+        // this fail on Windows while every claim it checks was true.
         if let Some(dir) = cache_dir() {
+            let tail = if cfg!(windows) {
+                std::path::Path::new(APPLICATION).join("cache").join(MODELS)
+            } else {
+                std::path::Path::new(APPLICATION).join(MODELS)
+            };
             assert!(
-                dir.ends_with(std::path::Path::new(APPLICATION).join(MODELS)),
-                "this machine keeps models at {}, which is not the `{linux}` the README promises",
-                dir.display()
+                dir.ends_with(&tail),
+                "this machine keeps models at {}, which does not end in {}",
+                dir.display(),
+                tail.display()
             );
         }
 

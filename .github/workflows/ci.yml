@@ -149,6 +149,13 @@ jobs:
           # `webrtc-audio-processing-sys`, behind `aec` and built nowhere. That stopped being
           # true the day `ort` arrived.
           LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+        # **`bash`, and that is load-bearing on Windows.** The default shell there is `pwsh`,
+        # which does not stop at a native command's non-zero exit — only the last command's
+        # status decides the step. So a failing `cargo test` followed by a passing
+        # `cargo build` reported this step green, and did: `the_readme_names_the_directory_the
+        # _model_is_kept_in` failed on `windows-latest` for three runs while CI said success.
+        # `bash` is `bash -e` on both runners and is present on the Windows image.
+        shell: bash
         run: |
           cargo test -p zyris-voice --features voice
           cargo build -p zyris-app --features voice
