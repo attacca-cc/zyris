@@ -436,14 +436,39 @@ impl Session {
     /// through the other one. Two branches that have to agree, with nothing that goes red when
     /// they stop, is the shape this workspace keeps finding.
     fn captured(&mut self, captured: Captured) {
-        match captured {
-            Captured::Audio(samples) => self.heard(&samples),
-            // A rerouted default stream reports and keeps running; ending the turn on it would
-            // end every turn a person started while plugging in a headset.
-            Captured::Problem(problem) if problem.recovery != Recovery::Continue => {
-                self.abort(problem.reason)
-            }
-            Captured::Problem(_) => {}
+        let problem = match captured {
+            Captured::Audio(samples) => return self.heard(&samples),
+            Captured::Problem(problem) => problem,
+        };
+
+        // **Every device problem is written down, and the level is what the recovery says.**
+        // This used to discard the ones it could carry on through, which left the one case this
+        // module cannot otherwise explain — a microphone that goes quiet and stays quiet —
+        // with no evidence anywhere. `Continue` is `debug` rather than `warn` because an
+        // underrun under load arrives in bursts and would bury everything else; it is still
+        // reachable with `RUST_LOG=zyris_voice=debug`, which is the difference between quiet
+        // and gone. Anything that ends the turn is visible without asking.
+        match problem.recovery {
+            Recovery::Continue => tracing::debug!(
+                reason = problem.reason,
+                "the microphone reported something it can carry on through"
+            ),
+            Recovery::Retry | Recovery::Rebuild => tracing::warn!(
+                reason = problem.reason,
+                recovery = ?problem.recovery,
+                "the microphone stopped delivering audio and this turn is over"
+            ),
+            Recovery::Stop => tracing::error!(
+                reason = problem.reason,
+                settings = problem.settings.as_deref(),
+                "the microphone cannot be used and nothing here will retry it"
+            ),
+        }
+
+        // A rerouted default stream reports and keeps running; ending the turn on it would
+        // end every turn a person started while plugging in a headset.
+        if problem.recovery != Recovery::Continue {
+            self.abort(problem.reason);
         }
     }
 
@@ -1385,6 +1410,84 @@ mod tests {
     /// delivering audio, and a session that ended the turn on it would end every turn somebody
     /// started while plugging in a headset. Once through the `select!` and once through
     /// `Session::drain`, because those were two copies of the rule before they were one.
+    /// Everything the session hears from the device is written down, and the one it carries on
+    /// through is written down too.
+    ///
+    /// **This is the only test in the crate that reads a log**, and it exists because the
+    /// alternative failure has no other evidence: a microphone that reroutes onto a monitor or
+    /// a `null` source keeps delivering, keeps being silent, and every turn after it is
+    /// `HeardNothing`. Before this the `Continue` arm was `=> {}` — the one piece of evidence
+    /// discarded at the one moment it was worth having.
+    ///
+    /// A `debug` line rather than a `warn` for that arm, because an underrun under load arrives
+    /// in bursts; the subscriber here asks for it explicitly, which is what a person diagnosing
+    /// one would do.
+    #[tokio::test]
+    async fn every_device_problem_reaches_the_log() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("the log is not poisoned").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Shared {
+            type Writer = Shared;
+            fn make_writer(&'a self) -> Shared {
+                self.clone()
+            }
+        }
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(Shared(written.clone()))
+            .with_ansi(false)
+            .finish();
+
+        // `set_default` rather than `with_default`: the body awaits, and a closure cannot.
+        // `#[tokio::test]` is a current-thread runtime, so the thread-local the guard sets is
+        // the same one every await comes back to.
+        let guard = tracing::subscriber::set_default(subscriber);
+        let mut zyris = running(Scribe::always("never mind"));
+        zyris.problem_now(Recovery::Continue, "the default device changed");
+        zyris.problem_now(Recovery::Rebuild, "the microphone was unplugged");
+        zyris.problem_now(Recovery::Stop, "the microphone is not allowed");
+        settle().await;
+        zyris.stops().await;
+        drop(guard);
+
+        let said = String::from_utf8(written.lock().expect("the log is not poisoned").clone())
+            .expect("the log is text");
+
+        for reason in [
+            "the default device changed",
+            "the microphone was unplugged",
+            "the microphone is not allowed",
+        ] {
+            assert!(said.contains(reason), "{reason:?} is not in the log:\n{said}");
+        }
+
+        // And the level is the recovery's, not one level for all three: an underrun that is
+        // carried through must not read the same as a microphone that is gone.
+        let line = |needle: &str| {
+            said.lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} is not in the log:\n{said}"))
+                .to_string()
+        };
+        assert!(line("the default device changed").contains("DEBUG"));
+        assert!(line("the microphone was unplugged").contains("WARN"));
+        assert!(line("the microphone is not allowed").contains("ERROR"));
+    }
+
     #[tokio::test]
     async fn a_rerouted_default_stream_reported_as_the_key_comes_up_does_not_end_the_turn() {
         let mut zyris = running(Scribe::always("the whole sentence"));

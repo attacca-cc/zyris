@@ -146,6 +146,11 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 # The wire shape `VoiceEvent` takes to the window, pinned by a test rather than discovered in
 # TypeScript.
 serde_json = { workspace = true }
+# **The only way to assert that a log line exists.** `session.rs` used to discard every device
+# problem it could carry on through, which left "the microphone went quiet and stayed quiet" —
+# the one failure this crate cannot otherwise explain — with no evidence anywhere. A test that
+# reads the code rather than the output would pass for a `tracing::debug!` nobody can reach.
+tracing-subscriber = { workspace = true }
 
 [features]
 default = []

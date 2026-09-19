@@ -9348,6 +9348,7 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
  "webrtc-audio-processing",
  "whisper-rs",
