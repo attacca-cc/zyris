@@ -77,7 +77,7 @@ function machine(over: {
         note: "Zyris keeps this recording so a wake word can be added later without asking you to record it again. Nothing listens for it yet, and saving it does not make Zyris respond to it.",
       },
     },
-    hotkey: over.hotkey ?? { state: "working", trigger: "Ctrl+Alt+Space" },
+    hotkey: over.hotkey ?? { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true },
   };
 }
 
@@ -134,7 +134,7 @@ describe("Voice", () => {
   // ------------------------------------------------------------------------------------------
 
   it("names the key to hold when one is registered", async () => {
-    answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space" } }));
+    answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true } }));
 
     render(<Voice />);
 
@@ -482,6 +482,23 @@ describe("Voice", () => {
   // ------------------------------------------------------------------------------------------
   // The wake word
   // ------------------------------------------------------------------------------------------
+
+  it("keeps the release caveat with the backend rather than with the state", async () => {
+    // A bound key and a key whose release has been seen are two different facts. The portal
+    // reports the first and nobody has yet observed the second, so a screen switching on
+    // "working" alone would drop the caveat the day a portal started naming a trigger — which
+    // is the moment it starts mattering.
+    answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: false } }));
+    render(<Voice />);
+    await screen.findByText(/to talk, from any window/i);
+    expect(document.body.textContent ?? "").toMatch(/letting go of the key/i);
+
+    cleanup();
+    answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true } }));
+    render(<Voice />);
+    await screen.findByText(/to talk, from any window/i);
+    expect(document.body.textContent ?? "").not.toMatch(/letting go of the key/i);
+  });
 
   it("tells a reader a machine that hears and cannot answer apart from one that can", async () => {
     // The two halves fail apart, and only this says which half is missing. A machine with no

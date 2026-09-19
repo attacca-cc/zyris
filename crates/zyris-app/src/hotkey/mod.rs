@@ -126,7 +126,16 @@ pub enum HotkeyEvent {
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum HotkeySupport {
     /// A key is registered and the next press arrives here. `trigger` is what to press.
-    Working { trigger: String },
+    ///
+    /// **`release_confirmed` is not decoration, and it is why this is not two variants.**
+    /// Whether letting go of the key produces an event is a property of the *backend*, not of
+    /// whether a key is bound: `global-hotkey` reports a release on X11 and on Windows, and
+    /// nobody has yet confirmed that the Wayland portal's `Deactivated` arrives at all. A
+    /// portal that one day filled in `trigger_description` would land here — and a screen
+    /// switching on the variant alone would then drop the caveat exactly when it became
+    /// reachable, which is the collapse this field exists to prevent.
+    #[serde(rename_all = "camelCase")]
+    Working { trigger: String, release_confirmed: bool },
     /// Registered with the desktop, but nothing is pressing it yet.
     ///
     /// This is the Wayland portal's normal state: version 1 of the interface has no

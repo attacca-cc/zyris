@@ -88,7 +88,7 @@ type Speaking =
   | { state: "session"; id: string };
 
 type HotkeySupport =
-  | { state: "working"; trigger: string }
+  | { state: "working"; trigger: string; releaseConfirmed: boolean }
   | { state: "needsAKeyBound"; shortcutId: string; desktop: string; line: string | null; how: string }
   | { state: "unavailable"; reason: string };
 
@@ -419,9 +419,21 @@ export function Voice() {
         <h2>The push-to-talk key</h2>
 
         {hotkey.state === "working" && (
-          <p>
-            Hold <span className="mono">{hotkey.trigger}</span> to talk, from any window.
-          </p>
+          <>
+            <p>
+              Hold <span className="mono">{hotkey.trigger}</span> to talk, from any window.
+            </p>
+            {/* The caveat belongs to the backend, not to whether a key is bound. A screen that
+                switched on the state alone would drop it the day a portal started reporting a
+                trigger — which is exactly when it would start mattering. */}
+            {!hotkey.releaseConfirmed && (
+              <p className="muted note">
+                It has not been confirmed that letting go of the key gets through to Zyris on this
+                kind of desktop. If a turn does not end when you let go, Zyris ends it on its own
+                and throws the recording away rather than sending half a sentence on.
+              </p>
+            )}
+          </>
         )}
 
         {hotkey.state === "needsAKeyBound" && (

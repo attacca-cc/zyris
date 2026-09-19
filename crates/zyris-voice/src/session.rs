@@ -402,8 +402,16 @@ impl Session {
             }
             // Not audio, so neither speech nor silence: the endpointer refuses to advance on it
             // and neither does the buffer. `to_vad` hands out exactly `VAD_FRAME`, so this is
-            // unreachable unless that stops being true.
-            Err(_) => return,
+            // unreachable unless that stops being true — **and the same is true of the
+            // processor's fault twenty lines above, which ends the turn.** Two unreachable
+            // faults of one kind, handled two ways, with nothing able to tell either apart from
+            // the other: whichever is right, they should agree. They agree now. A frame the
+            // detector cannot read is a turn nothing can honestly finish, and ending it says so
+            // where returning quietly would leave a turn that never ends and never speaks.
+            Err(fault) => {
+                self.abort(fault.to_string());
+                return;
+            }
         }
 
         if self.turn.as_ref().is_some_and(|turn| turn.buffer.len() >= max_turn_frames() * VAD_FRAME)

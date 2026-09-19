@@ -561,7 +561,7 @@ mod tests {
 
     impl Hotkey for CountingHotkey {
         fn describe(&self) -> HotkeySupport {
-            HotkeySupport::Working { trigger: "Ctrl+Alt+Space".into() }
+            HotkeySupport::Working { trigger: "Ctrl+Alt+Space".into(), release_confirmed: true }
         }
 
         fn events(&self) -> tokio::sync::broadcast::Receiver<HotkeyEvent> {

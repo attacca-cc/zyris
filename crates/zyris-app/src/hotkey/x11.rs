@@ -85,7 +85,9 @@ impl GrabbedHotkey {
 
 impl Hotkey for GrabbedHotkey {
     fn describe(&self) -> HotkeySupport {
-        HotkeySupport::Working { trigger: TRIGGER.to_string() }
+        // `true`: `global-hotkey` delivers `HotKeyState::Released` on both backends this file
+        // is — X11 through `Event::KeyRelease`, Windows through its polling thread.
+        HotkeySupport::Working { trigger: TRIGGER.to_string(), release_confirmed: true }
     }
 
     fn events(&self) -> broadcast::Receiver<HotkeyEvent> {
