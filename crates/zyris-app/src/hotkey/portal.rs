@@ -103,7 +103,9 @@ impl PortalHotkey {
                 line,
             }
         } else {
-            HotkeySupport::Working { trigger }
+            // `false`: the portal's `Deactivated` has never been seen to arrive, and a trigger
+            // being reported says nothing about it. See `HotkeySupport::Working`.
+            HotkeySupport::Working { trigger, release_confirmed: false }
         };
 
         let events = Arc::new(OnePerHold::new());
@@ -211,8 +213,13 @@ mod tests {
         let env = Env::read();
         let hotkey = PortalHotkey::open(&env).await.expect("a GlobalShortcuts portal");
         match hotkey.describe() {
-            HotkeySupport::Working { trigger } => {
+            HotkeySupport::Working { trigger, release_confirmed } => {
                 assert!(!trigger.is_empty(), "a working hotkey names the key to press");
+                assert!(
+                    !release_confirmed,
+                    "nobody has seen the portal deliver a key release; a backend claiming \
+                     otherwise has to be measured first"
+                );
             }
             HotkeySupport::NeedsAKeyBound { shortcut_id, how, .. } => {
                 assert_eq!(shortcut_id, SHORTCUT_ID);

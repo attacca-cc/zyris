@@ -677,18 +677,69 @@ async fn declare_stream_delay(apm: Arc<Apm>, capture: Arc<AtomicU64>, speaker: S
 /// Record one wake word take, on the thread this is called on.
 ///
 /// Blocking from end to end: it owns a `cpal::Stream`, which cannot cross an `await`.
+/// How long one take may wait for the microphone to say anything.
+///
+/// **A device can open and then deliver nothing**, and cpal's `null` is the documented one that
+/// does — `capture.rs` records that it reports itself as a working input. Without a bound the
+/// recording waits on it forever, on a `spawn_blocking` thread nothing can cancel, holding the
+/// microphone open with the Voice tab's button turning. Three seconds because a microphone that
+/// has said nothing in three is not about to.
+const SILENT_DEVICE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long one take may run in total, however steadily the device delivers.
+///
+/// [`SILENT_DEVICE`] bounds a gap and this bounds the sum, which is a different failure: a device
+/// that answers every two seconds with one sample never trips a gap and never fills a take
+/// either. Four times [`wake::MAX_TAKE`] is slack for a machine under load rather than a
+/// tolerance anybody should reach.
+const TAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(wake::MAX_TAKE.as_secs() * 4);
+
 fn record_one(choice: &Choice) -> Result<(Vec<f32>, crate::apm::Conditioning), String> {
     let apm = Apm::new().map_err(|fault| fault.to_string())?;
-    let (_capture, mut audio) =
-        Capture::open(choice, APM_FRAME).map_err(|problem| problem.reason)?;
+    let (_capture, audio) = Capture::open(choice, APM_FRAME).map_err(|problem| problem.reason)?;
+    record_from(audio, apm)
+}
 
+/// The recording itself, with the device it came from left outside.
+///
+/// Separated so a test can hand it a channel nothing ever sends on, which is the whole of what
+/// [`SILENT_DEVICE`] is for and is unreachable while this function opens its own `Capture`.
+fn record_from(
+    mut audio: tokio::sync::mpsc::UnboundedReceiver<Captured>,
+    apm: Apm,
+) -> Result<(Vec<f32>, crate::apm::Conditioning), String> {
     let mut to_apm = Chunker::new(APM_FRAME);
     let mut to_vad = Chunker::new(VAD_FRAME);
     let mut endpointer = Endpointer::new();
     let mut kept: Vec<f32> = Vec::new();
     let longest = stt::samples_in(wake::MAX_TAKE);
 
-    while let Some(captured) = audio.blocking_recv() {
+    // `Handle::block_on` is legal here and only here: `record_one` is called from
+    // `spawn_blocking`, which is not a runtime worker thread. `blocking_recv` has no deadline
+    // of its own, which is the bug this replaces.
+    let runtime = tokio::runtime::Handle::current();
+    let started = std::time::Instant::now();
+
+    loop {
+        if started.elapsed() >= TAKE_DEADLINE {
+            return Err("the microphone delivered too slowly to finish a recording".to_string());
+        }
+        // The timeout is built *inside* `block_on`: `tokio::time::timeout` constructs its
+        // `Sleep` eagerly, and a blocking thread has a handle but no runtime context to build
+        // one in. Built outside, it panics with "there is no reactor running".
+        let waited =
+            runtime.block_on(async { tokio::time::timeout(SILENT_DEVICE, audio.recv()).await });
+        let captured = match waited {
+            Ok(Some(captured)) => captured,
+            Ok(None) => break,
+            Err(_elapsed) => {
+                return Err(
+                    "the microphone opened and then delivered nothing; if this is the right \
+                     device, something else may be holding it"
+                        .to_string(),
+                );
+            }
+        };
         let samples = match captured {
             Captured::Audio(samples) => samples,
             // A device that rerouted itself keeps going; anything else has ended the recording.
@@ -1030,6 +1081,52 @@ mod tests {
             .expect("runtime")
             .block_on(async { engine.live.lock().await.state.clone() });
         assert_eq!(state, ListeningState::Off);
+    }
+}
+
+#[cfg(test)]
+mod recording_a_take {
+    use super::*;
+
+    /// A device that opens and never says anything is refused, rather than held forever.
+    ///
+    /// **This is why `record_from` exists.** While the recording opened its own `Capture` there
+    /// was no way to hand it a device that delivers nothing — which is the failure being guarded
+    /// against, and cpal's `null` is the documented one that does it: `capture.rs` records that
+    /// it reports `supports_input() == true` and hands back a perfectly ordinary configuration.
+    /// The bug it replaces had no deadline anywhere, so the take waited on a `spawn_blocking`
+    /// thread nothing can cancel, holding the microphone, with the Voice tab's button turning.
+    ///
+    /// The channel is kept alive deliberately. Dropping the sender would end the recording
+    /// through the ordinary "the stream closed" path and prove nothing about the deadline.
+    #[test]
+    fn a_device_that_delivers_nothing_is_given_up_on() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_time()
+            .build()
+            .expect("a runtime");
+
+        let (_sender, audio) = tokio::sync::mpsc::unbounded_channel::<Captured>();
+        let Ok(apm) = Apm::new() else {
+            eprintln!("skipped: no audio processor on this machine");
+            return;
+        };
+
+        let began = std::time::Instant::now();
+        // Inside the `async` block, not as the argument: an argument is evaluated before
+        // `block_on` enters the runtime, and `spawn_blocking` needs the context to exist.
+        let outcome = runtime
+            .block_on(async move { tokio::task::spawn_blocking(move || record_from(audio, apm)).await });
+        let took = began.elapsed();
+
+        let outcome = outcome.expect("the recording thread did not panic");
+        let reason = outcome.expect_err("a device that says nothing cannot produce a take");
+        assert!(reason.contains("delivered nothing"), "{reason}");
+
+        // The deadline is what ended it, not something else that happened to be quicker or a
+        // test that would sit here for a minute if the bound came back.
+        assert!(took >= SILENT_DEVICE, "gave up after {took:?}, before the deadline");
+        assert!(took < SILENT_DEVICE * 3, "took {took:?}, which is not a bounded wait");
     }
 }
 
