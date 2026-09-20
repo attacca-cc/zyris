@@ -121,6 +121,11 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # says so in its own comment. So the conversion is ours on every platform, and a test that runs
 # only on Linux would never see the bug. 48k -> 16k costs 26 us per 1024-frame block.
 rubato = "5.0.0"
+# The transform behind the wake word's features. **Already in the tree**: `rubato` depends on
+# it at this exact version, so naming it here adds a line to a manifest and nothing to a
+# build. A hand-rolled DFT would be the alternative and would be slower by the usual two
+# orders of magnitude on the one path that runs while nobody is speaking.
+realfft = "3.5.0"
 # Only for `CryptoProvider::install_default`: see `reqwest` above. `ring` is the provider
 # `iroh` already builds, so this adds no native code to any platform.
 rustls = { version = "0.23.44", default-features = false, features = ["ring"] }

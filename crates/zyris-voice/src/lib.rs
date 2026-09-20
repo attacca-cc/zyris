@@ -101,6 +101,16 @@ pub mod session;
 pub mod win_aec;
 
 // Recording a wake word, and keeping it. Nothing matches it -- see the module.
+/// What a phrase sounds like, as numbers two recordings of it can be compared on. The wake
+/// word.s front end, and nothing else uses it.
+#[cfg(feature = "voice")]
+pub mod mfcc;
+
+/// Whether what was just said is the phrase somebody enrolled. Dynamic time warping over
+/// [`mfcc`] features, against the takes [`wake`] keeps.
+#[cfg(feature = "voice")]
+pub mod spot;
+
 #[cfg(feature = "voice")]
 pub mod wake;
 
