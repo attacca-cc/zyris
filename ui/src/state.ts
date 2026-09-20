@@ -365,6 +365,7 @@ export type Trace =
   | { step: "recorded"; seconds: number; speechSeconds: number; kept: boolean }
   | { step: "transcribing"; seconds: number }
   | { step: "transcribed"; text: string; tookMs: number }
+  | { step: "hearing"; text: string; seconds: number }
   | { step: "sent"; text: string }
   | { step: "sendFailed"; reason: string }
   | { step: "delta"; kind: string; text: string }

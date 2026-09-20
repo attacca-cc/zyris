@@ -63,6 +63,7 @@ describe("the Debug screen", () => {
       { step: "transcribing", seconds: 2.1 },
       { step: "transcribed", text: "what is the time", tookMs: 880 },
       { step: "transcribed", text: "", tookMs: 120 },
+      { step: "hearing", text: "what is", seconds: 1.5 },
       { step: "sent", text: "what is the time" },
       { step: "sendFailed", reason: "the connection is gone" },
       { step: "delta", kind: "Assistant", text: "It is four." },

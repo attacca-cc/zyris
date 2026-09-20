@@ -218,6 +218,17 @@ pub enum Trace {
     /// Whisper answered. An empty `text` is audio it found no speech in.
     #[serde(rename_all = "camelCase")]
     Transcribed { text: String, took_ms: u64 },
+    /// What whisper makes of the turn **so far**, while the key is still down.
+    ///
+    /// **Whisper is not a streaming recogniser**, so this is not a growing transcript: it is
+    /// the whole recording re-read from the start, and the words already shown can change when
+    /// the next one lands. That is a property of the model and not a bug to smooth over — a
+    /// screen that only ever appended would show a sentence the model has since revised.
+    ///
+    /// Display only. Nothing is sent to the agent until the key comes up and
+    /// [`Trace::Transcribed`] says what the turn actually was.
+    #[serde(rename_all = "camelCase")]
+    Hearing { text: String, seconds: f32 },
     /// The transcript was posted into the Attacca session. The step the spec calls
     /// `send_message`, and the one that joins the listening half to the speaking half.
     #[serde(rename_all = "camelCase")]

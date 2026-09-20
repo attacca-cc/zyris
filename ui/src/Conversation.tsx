@@ -37,7 +37,16 @@ type Sentence = {
 };
 
 type Turn =
-  | { who: "you"; state: "recording" | "thinking" | "said" | "lost"; text: string; detail: string }
+  | {
+      who: "you";
+      state: "recording" | "thinking" | "said" | "lost";
+      text: string;
+      detail: string;
+      // What whisper made of the turn so far, while the key is still down. Replaced whole on
+      // every look rather than appended to: the model re-reads the recording from the start
+      // and revises, so treating it as a growing string would show words it has since changed.
+      sofar: string;
+    }
   | { who: "agent"; text: string; sentences: Sentence[]; interrupted: boolean };
 
 // How far through a sentence the speaker is: null when it has not started, 1 when it is done.
@@ -75,7 +84,7 @@ function fold(turns: Turn[], step: Trace): Turn[] {
   switch (step.step) {
     case "recording":
       if (step.started) {
-        return [...turns, { who: "you", state: "recording", text: "", detail: "" }];
+        return [...turns, { who: "you", state: "recording", text: "", detail: "", sofar: "" }];
       }
       return you && you.state === "recording"
         ? replaceLast({ ...you, state: "thinking" })
@@ -89,6 +98,13 @@ function fold(turns: Turn[], step: Trace): Turn[] {
           `only ${say(step.speechSeconds)} of speech in ${say(step.seconds)} — below the ` +
           "floor, so it was not transcribed",
       });
+    case "hearing":
+      // **No guard on the state here, deliberately.** `Yours` shows `sofar` only while the
+      // turn is recording, so a second check would be the same rule written twice with
+      // nothing able to tell either copy from its absence — a mutation removing this one
+      // survived, which is how it was found. The session already drops a look that lands
+      // after its turn ended; this is only what the screen does with one that arrives.
+      return you ? replaceLast({ ...you, sofar: step.text }) : turns;
     case "transcribed":
       if (!you) return turns;
       return step.text === ""
@@ -146,7 +162,18 @@ function Yours({ turn }: { turn: Extract<Turn, { who: "you" }> }) {
   return (
     <li className="turn turn-you">
       <span className="turn-who">You</span>
-      {turn.state === "recording" && <p className="note">listening&hellip;</p>}
+      {turn.state === "recording" &&
+        (turn.sofar === "" ? (
+          <p className="note">listening&hellip;</p>
+        ) : (
+          // Marked as provisional, because it is: the next look re-reads the whole recording
+          // and may say something different. Showing it as settled text would be a screen
+          // that appears to change its mind about what somebody said.
+          <p className="sofar">
+            {turn.sofar}
+            <span className="sofar-mark"> &middot; still listening</span>
+          </p>
+        ))}
       {/* Whisper answers once, about a second later. There is no half-sentence to show. */}
       {turn.state === "thinking" && <p className="note">writing it down&hellip;</p>}
       {turn.state === "said" && <p>{turn.text}</p>}
@@ -255,8 +282,11 @@ export function Conversation() {
       )}
 
       <p className="note">
-        What you say is written down in one go when you let go of the key &mdash; whisper is not
-        a streaming recogniser, so there is no half-sentence to show. The agent&rsquo;s side is
+        What you say is re-read from the start every second and a half while you hold the key,
+        so the words can change before they settle &mdash; whisper is not a streaming
+        recogniser, and what it shows is a guess at the whole recording rather than a
+        transcript growing word by word. The text is final when you let go. The agent&rsquo;s
+        side is
         read aloud behind the writing, so it is normal for the whole answer to be on screen
         while only the first sentence is sounding. &ldquo;Heard&rdquo; means written to the
         sound device, which is about 43&nbsp;ms ahead of the loudspeaker.

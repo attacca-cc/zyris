@@ -77,12 +77,49 @@ describe("the Conversation screen", () => {
   });
 
   it("does not pretend to transcribe as you speak", async () => {
-    // Whisper is not a streaming recogniser: it is handed a whole turn and answers once. A
-    // screen that appeared to type the words out would be lying about where they come from,
-    // and this is the assertion that stops somebody adding that later.
+    // Whisper answers once per look and re-reads the whole recording each time, so there is
+    // no growing transcript. Between the key coming up and the answer landing there is
+    // nothing to show, and the screen says so rather than leaving the last look sitting there
+    // looking settled.
     const page = await show(AN_ANSWER.slice(0, 5));
     expect(page).toMatch(/writing it down/i);
     expect(page).not.toContain("what is the time");
+  });
+
+  it("shows what has been heard so far while the key is still down", async () => {
+    // The half of the request that needed the session to look at a turn in progress. It is
+    // marked as provisional because it is: the next look re-reads the recording from the
+    // start and may revise it.
+    const page = await show([
+      { step: "recording", started: true },
+      { step: "hearing", text: "what is the", seconds: 1.5 },
+    ]);
+    expect(page).toContain("what is the");
+    expect(page).toMatch(/still listening/i);
+  });
+
+  it("replaces a look rather than appending to it", async () => {
+    // Whisper revises. Concatenating would produce "what iswhat is the time" and would read
+    // as the model stuttering rather than as it changing its mind.
+    const page = await show([
+      { step: "recording", started: true },
+      { step: "hearing", text: "what is", seconds: 1.5 },
+      { step: "hearing", text: "what is the time", seconds: 3.0 },
+    ]);
+    expect(page).toContain("what is the time");
+    expect(page).not.toMatch(/what iswhat/);
+  });
+
+  it("drops a look once the key has come up", async () => {
+    // The turn is no longer being recorded, so a look is stale by definition. Leaving it on
+    // screen beside "writing it down" would be two answers to one question.
+    const page = await show([
+      { step: "recording", started: true },
+      { step: "hearing", text: "what is", seconds: 1.5 },
+      { step: "recording", started: false },
+    ]);
+    expect(page).toMatch(/writing it down/i);
+    expect(page).not.toContain("what is");
   });
 
   it("fills a sentence as it is actually played, not as time passes", async () => {

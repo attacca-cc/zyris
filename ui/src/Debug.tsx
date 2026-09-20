@@ -26,6 +26,7 @@ function half(step: Trace): "in" | "out" | "bad" {
     case "key":
     case "recording":
     case "recorded":
+    case "hearing":
     case "transcribing":
     case "transcribed":
     case "sent":
@@ -60,6 +61,8 @@ function describe(step: Trace): string {
           "— below the floor, so it was thrown away and whisper never saw it";
     case "transcribing":
       return `whisper is working on ${seconds(step.seconds)}`;
+    case "hearing":
+      return `so far (${seconds(step.seconds)}): "${step.text}"`;
     case "transcribed":
       return step.text === ""
         ? `whisper found no speech in it (${step.tookMs} ms)`
