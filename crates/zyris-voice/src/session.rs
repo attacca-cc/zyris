@@ -798,6 +798,14 @@ impl Says for crate::turn::Feed {
 /// being waited on is an audio callback, which may not signal anything.
 const DRAIN_POLL: Duration = Duration::from_millis(50);
 
+/// How often the playback cursor is published while an answer is being read aloud.
+///
+/// Ten a second: fast enough that a sentence of a second or two visibly fills, slow enough that
+/// a window doing nothing else is not the reason the machine is busy. It is a poll for
+/// [`DRAIN_POLL`]'s reason — the thing being watched is an audio callback, which signals
+/// nothing.
+const PLAYBACK_POLL: Duration = Duration::from_millis(100);
+
 /// One fragment that was queued, and where in the stream it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Queued {
@@ -1077,7 +1085,7 @@ impl Speaking {
     }
 
     /// One fragment: say it, and queue it if nobody interrupted while it was being said.
-    async fn synthesise(&self, text: &str) {
+    async fn synthesise(self: &Arc<Self>, text: &str) {
         let generation = self.generation();
         let tts = self.tts.clone();
         let owned = text.to_string();
@@ -1093,7 +1101,7 @@ impl Speaking {
         match said {
             Ok(Ok(samples)) => {
                 self.trace(crate::Trace::Synthesised {
-                    chars: text.chars().count(),
+                    text: text.to_string(),
                     seconds: samples.len() as f32 / crate::tts::SAMPLE_RATE as f32,
                     took_ms: started.elapsed().as_millis() as u64,
                 });
@@ -1113,7 +1121,7 @@ impl Speaking {
     /// and this line is a window — microseconds, but a real one — in which a key press would
     /// discard the queue and then have this put a sentence back onto it, unledgered, to be
     /// played over whoever pressed the key.
-    fn queue(&self, text: &str, samples: Vec<f32>, generation: u64) {
+    fn queue(self: &Arc<Self>, text: &str, samples: Vec<f32>, generation: u64) {
         let mut state = self.state.lock().expect("the speaking state is not poisoned");
         if state.generation != generation {
             // Somebody pressed the key between the synthesis starting and this line. The audio
@@ -1130,12 +1138,14 @@ impl Speaking {
             Some(at) => {
                 state.ledger.add(text, at, length);
                 self.trace(crate::Trace::Queued {
-                    seconds: length as f32 / crate::tts::SAMPLE_RATE as f32,
+                    text: text.to_string(),
                     at_sample: at,
+                    samples: length,
                 });
                 if first {
                     drop(state);
                     self.publish(VoiceEvent::Speaking);
+                    self.clone().watch_playback(generation);
                 }
             }
             None => self.publish(VoiceEvent::Failed {
@@ -1167,6 +1177,31 @@ impl Speaking {
         drop(state);
         self.trace(crate::Trace::Spoke);
         self.publish(VoiceEvent::Spoke);
+    }
+
+    /// Publish where the speaker has actually got to, until it has nothing left.
+    ///
+    /// **Only while something is queued**, and started by the first fragment of an answer
+    /// rather than run for the life of the session: a machine that is not speaking would
+    /// otherwise put ten messages a second onto the stream saying the same number.
+    ///
+    /// It reads [`Play::played`] — samples written to the device — and not a clock. A position
+    /// counted from a timer would drift against whatever the device buffers and, worse, would
+    /// keep counting after an interruption threw the queue away.
+    fn watch_playback(self: Arc<Self>, generation: u64) {
+        tokio::spawn(async move {
+            loop {
+                if self.generation() != generation {
+                    // Interrupted. The ending belongs to whoever pressed the key.
+                    return;
+                }
+                self.trace(crate::Trace::Playing { at_sample: self.out.played() });
+                if self.out.pending() == 0 {
+                    return;
+                }
+                tokio::time::sleep(PLAYBACK_POLL).await;
+            }
+        });
     }
 
     /// The person started a turn. Stop speaking, and answer with what they did not hear.

@@ -310,3 +310,33 @@ section { margin-bottom: 2rem; }
 .trace-out { border-left-color: #58a55c; }
 .trace-bad { border-left-color: #c0392b; }
 .trace-at { opacity: 0.55; }
+
+/* The Conversation screen. */
+.turns { list-style: none; margin: 0; padding: 0; }
+.turn { margin: 0 0 1.1rem; padding: 0 0 0 0.7rem; border-left: 3px solid transparent; }
+.turn-you { border-left-color: #4a90d9; }
+.turn-agent { border-left-color: #58a55c; }
+.turn-who { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; }
+.turn p { margin: 0.2rem 0; }
+
+.sentences { list-style: none; margin: 0.45rem 0 0; padding: 0; }
+/* Each sentence is text, a state in words, and a bar. The bar is never the only signal —
+   a reader who cannot see it still gets "62% of 1.4s" beside it. */
+.sentence {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 0.6rem;
+  align-items: baseline;
+  padding: 0.2rem 0;
+  font-size: 0.85rem;
+}
+.sentence-text { overflow-wrap: anywhere; }
+.sentence-state { opacity: 0.65; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sentence-bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  overflow: hidden;
+}
+.sentence-bar > span { display: block; height: 100%; background: #58a55c; }

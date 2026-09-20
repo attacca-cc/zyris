@@ -81,6 +81,7 @@ export const TABS = [
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP" },
   { id: "voice", label: "Voice" },
+  { id: "conversation", label: "Conversation" },
   { id: "debug", label: "Debug" },
   { id: "settings", label: "Settings" },
 ] as const;
@@ -368,8 +369,9 @@ export type Trace =
   | { step: "sendFailed"; reason: string }
   | { step: "delta"; kind: string; text: string }
   | { step: "fragment"; text: string }
-  | { step: "synthesised"; chars: number; seconds: number; tookMs: number }
-  | { step: "queued"; seconds: number; atSample: number }
+  | { step: "synthesised"; text: string; seconds: number; tookMs: number }
+  | { step: "queued"; text: string; atSample: number; samples: number }
+  | { step: "playing"; atSample: number }
   | { step: "dropped" }
   | { step: "spoke" }
   | { step: "interrupted"; heard: number; unheard: number }

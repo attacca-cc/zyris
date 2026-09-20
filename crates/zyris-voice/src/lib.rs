@@ -234,11 +234,28 @@ pub enum Trace {
     #[serde(rename_all = "camelCase")]
     Fragment { text: String },
     /// Supertonic turned a fragment into audio.
+    ///
+    /// Carries the text rather than a length, so a reader can pair it with the
+    /// [`Trace::Fragment`] it belongs to **without counting**. Pairing by order would be right
+    /// today — synthesis is one at a time, deliberately — and would silently mis-attribute
+    /// every later sentence the first time a [`Trace::Dropped`] appeared between them.
     #[serde(rename_all = "camelCase")]
-    Synthesised { chars: usize, seconds: f32, took_ms: u64 },
-    /// The audio reached the speaker's queue, at this many samples into the stream.
+    Synthesised { text: String, seconds: f32, took_ms: u64 },
+    /// The audio reached the speaker's queue, and where in the stream it sits.
+    ///
+    /// `at_sample` and `samples` are at [`crate::tts::SAMPLE_RATE`] and are what
+    /// [`Trace::Playing`] is read against: a fragment is sounding when the cursor is inside
+    /// its range, and the fraction of the way through is exact rather than timed.
     #[serde(rename_all = "camelCase")]
-    Queued { seconds: f32, at_sample: u64 },
+    Queued { text: String, at_sample: u64, samples: u64 },
+    /// How far the speaker has actually got, while anything is queued.
+    ///
+    /// **Samples written to the device, not a clock.** The queue is ahead of the loudspeaker by
+    /// whatever the device buffers — 42.67 ms here — and that is the whole of the uncertainty.
+    /// A position estimated from a timer would drift against it and would keep counting after
+    /// an interruption threw the queue away.
+    #[serde(rename_all = "camelCase")]
+    Playing { at_sample: u64 },
     /// A fragment was refused by the speaker, which is what an interruption between synthesis
     /// and the queue looks like.
     Dropped,

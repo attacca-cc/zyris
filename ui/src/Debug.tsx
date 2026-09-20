@@ -73,9 +73,11 @@ function describe(step: Trace): string {
     case "fragment":
       return `to be spoken: "${step.text}"`;
     case "synthesised":
-      return `the voice made ${seconds(step.seconds)} from ${step.chars} characters (${step.tookMs} ms)`;
+      return `the voice made ${seconds(step.seconds)} of audio: "${step.text}" (${step.tookMs} ms)`;
     case "queued":
-      return `${seconds(step.seconds)} queued at sample ${step.atSample}`;
+      return `queued at sample ${step.atSample}: "${step.text}"`;
+    case "playing":
+      return `played as far as sample ${step.atSample}`;
     case "dropped":
       return "a fragment was finished after the key went down, so nobody heard it";
     case "spoke":

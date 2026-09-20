@@ -6,6 +6,7 @@ import { Settings } from "./Settings";
 import { Status } from "./Status";
 import { Tools } from "./Tools";
 import { Voice } from "./Voice";
+import { Conversation } from "./Conversation";
 import { Debug } from "./Debug";
 import {
   fetchLatestEvent,
@@ -131,6 +132,7 @@ export function App() {
             says arrives on its own Tauri event rather than through the core bus, because a
             microphone is not something the node did about its connection to Attacca. */}
         {state.screen === "voice" && <Voice />}
+        {state.screen === "conversation" && <Conversation />}
         {state.screen === "debug" && <Debug />}
         {/* No props: what this screen shows is read off the machine through a command, not
             folded into core state, because nothing outside it needs the answer. */}
