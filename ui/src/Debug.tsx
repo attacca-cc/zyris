@@ -24,6 +24,7 @@ type Line = { at: number; step: Trace };
 function half(step: Trace): "in" | "out" | "bad" {
   switch (step.step) {
     case "key":
+    case "recording":
     case "recorded":
     case "transcribing":
     case "transcribed":
@@ -47,7 +48,11 @@ function seconds(value: number): string {
 function describe(step: Trace): string {
   switch (step.step) {
     case "key":
-      return step.down ? "key down — recording" : "key up";
+      // Reaching Zyris and reaching a running session are two facts. This is the first, and
+      // it is published whether or not anything is listening.
+      return step.down ? "key down" : "key up";
+    case "recording":
+      return step.started ? "recording started" : "recording stopped";
     case "recorded":
       return step.kept
         ? `recorded ${seconds(step.seconds)}, ${seconds(step.speechSeconds)} of it speech`
@@ -142,9 +147,17 @@ export function Debug() {
 
       {lines.length === 0 ? (
         <p className="note">
-          Nothing yet. Hold the push-to-talk key and say something — if not even a{" "}
-          <span className="mono">key down</span> appears, the key is not reaching Zyris and the
-          Voice tab says what to do about that.
+          Nothing yet. Hold the push-to-talk key and say something.
+        </p>
+      ) : null}
+      {lines.length === 0 ? (
+        <p className="note">
+          No <span className="mono">key down</span> at all means the key is not reaching Zyris —
+          another program may hold the combination, and on Wayland the compositor has to be told
+          to send it. A <span className="mono">key down</span> with no{" "}
+          <span className="mono">recording started</span> after it means the key arrived and
+          nothing was listening: the Voice tab says why, and the usual reason is that the speech
+          model has not been downloaded.
         </p>
       ) : (
         <ol className="trace">

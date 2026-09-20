@@ -542,7 +542,7 @@ impl Session {
         self.to_apm = Chunker::new(APM_FRAME);
         self.to_vad = Chunker::new(VAD_FRAME);
         self.turn = Some(Turn { buffer: Vec::new(), first_frame: self.frames });
-        self.trace(crate::Trace::Key { down: true });
+        self.trace(crate::Trace::Recording { started: true });
         self.publish(VoiceEvent::Listening);
     }
 
@@ -556,7 +556,7 @@ impl Session {
     /// ended only sets a turn start that is already where it would put it — audio is dropped
     /// while nothing is being recorded, so the frame number cannot have moved.
     fn released(&mut self) {
-        self.trace(crate::Trace::Key { down: false });
+        self.trace(crate::Trace::Recording { started: false });
         // Everything already captured is part of the turn the key is ending.
         self.drain();
         let ended = self.endpointer.finish();

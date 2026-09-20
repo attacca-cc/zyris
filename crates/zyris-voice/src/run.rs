@@ -173,6 +173,11 @@ impl Engine {
     /// is subscribed, which is the ordinary state of a machine with the switch off. A key
     /// pressed then is not an error and not a reason to start.
     pub fn push(&self, push: Push) {
+        // **Before the send, and regardless of whether anybody receives it.** This is the arm
+        // that says the key reached Zyris at all; the session publishes its own when a turn
+        // actually starts. A stream carrying only the second cannot tell an unbound key from a
+        // microphone that is switched off.
+        let _ = self.traces.send(crate::Trace::Key { down: push == Push::Pressed });
         let _ = self.keys.send(push);
     }
 

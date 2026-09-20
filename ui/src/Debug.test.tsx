@@ -56,6 +56,8 @@ describe("the Debug screen", () => {
     const steps: Trace[] = [
       { step: "key", down: true },
       { step: "key", down: false },
+      { step: "recording", started: true },
+      { step: "recording", started: false },
       { step: "recorded", seconds: 2.5, speechSeconds: 1.8, kept: true },
       { step: "recorded", seconds: 0.4, speechSeconds: 0.1, kept: false },
       { step: "transcribing", seconds: 2.1 },
@@ -81,6 +83,37 @@ describe("the Debug screen", () => {
     expect(rendered).toHaveLength(steps.length);
     expect(new Set(rendered).size).toBe(steps.length);
     for (const line of rendered) expect(line.length).toBeGreaterThan(3);
+  });
+
+  it("tells a key that never arrived apart from one nothing was listening to", async () => {
+    // The blind spot this screen shipped with. `Trace::Key` used to be published by the
+    // session, which only exists while listening is on — so a key press on a machine whose
+    // model had not been downloaded produced *nothing at all*, exactly like a key the
+    // compositor never sent. Those two send somebody to opposite ends of the problem.
+    const arrived = await show([
+      { step: "key", down: true },
+      { step: "key", down: false },
+    ]);
+    expect(arrived).toMatch(/key down/i);
+    expect(arrived).not.toMatch(/recording started/i);
+
+    cleanup();
+    const listened = await show([
+      { step: "key", down: true },
+      { step: "recording", started: true },
+    ]);
+    expect(listened).toMatch(/key down/i);
+    expect(listened).toMatch(/recording started/i);
+  });
+
+  it("names both reasons for silence when nothing has arrived at all", async () => {
+    // An empty log is the state somebody is most likely to be looking at when they ask for
+    // help, so it carries the two questions rather than making them ask.
+    await opened();
+    const page = document.body.textContent ?? "";
+    expect(page).toMatch(/not reaching zyris/i);
+    expect(page).toMatch(/nothing was listening/i);
+    expect(page).toMatch(/model has not been downloaded/i);
   });
 
   it("says a turn the silence rule threw away was thrown away", async () => {

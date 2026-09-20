@@ -185,10 +185,25 @@ pub enum VoiceEvent {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "step", rename_all = "camelCase")]
 pub enum Trace {
-    /// The push-to-talk key. The first thing to check when nothing happens at all: on Wayland
-    /// the compositor has to be told to send it, and until it is, no `down` ever arrives.
+    /// The push-to-talk key **arrived at Zyris**. The first thing to check when nothing
+    /// happens at all: on Wayland the compositor has to be told to send it, and until it is,
+    /// no `down` ever arrives.
+    ///
+    /// Published from [`Voice::push`], which runs whether or not anything is listening —
+    /// **not from the session**, and that distinction is the whole reason this arm exists
+    /// separately from [`Trace::Recording`]. A key that reaches the program and a key that
+    /// reaches a running session are two different facts, and the second is false on every
+    /// machine whose switch is off or whose model has not been downloaded. Reporting only the
+    /// second made "the key is not bound" and "nothing is listening" look identical, which is
+    /// the first question this stream is asked.
     #[serde(rename_all = "camelCase")]
     Key { down: bool },
+    /// The key reached a running session, and a turn began or ended because of it.
+    ///
+    /// Always preceded by a [`Trace::Key`]. One without the other means the key arrived and
+    /// nothing was listening to it.
+    #[serde(rename_all = "camelCase")]
+    Recording { started: bool },
     /// A turn's recording ended, and what the silence rule made of it.
     ///
     /// `kept` is false when there was less than [`vad`]'s floor of speech in it — the turn is

@@ -360,6 +360,7 @@ const VOICE_EVENT_NAME = "voice-event";
 // "where did it stop".
 export type Trace =
   | { step: "key"; down: boolean }
+  | { step: "recording"; started: boolean }
   | { step: "recorded"; seconds: number; speechSeconds: number; kept: boolean }
   | { step: "transcribing"; seconds: number }
   | { step: "transcribed"; text: string; tookMs: number }
