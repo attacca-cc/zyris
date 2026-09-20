@@ -222,6 +222,11 @@ pub struct Session {
     apm: Arc<Apm>,
     stt: Arc<dyn Transcribe>,
     events: broadcast::Sender<VoiceEvent>,
+    /// The diagnostic stream. Never `Option`: a sender with no subscribers costs an atomic
+    /// load per send, and a `None` arm here would be a branch on every step of the pipeline.
+    traces: broadcast::Sender<crate::Trace>,
+    /// When the transcription in flight was handed over, so the trace can say what it cost.
+    since: Option<std::time::Instant>,
 
     /// Whatever length the device chose, re-cut to what the processor accepts. The processor
     /// **panics** rather than erroring on a wrong count, so nothing may reach it unmeasured.
@@ -251,6 +256,16 @@ pub struct Session {
     /// which is every one step 7 built, and every one on a machine whose output device would not
     /// open. A key pressed then starts a turn and interrupts nothing.
     speaking: Option<Arc<Speaking>>,
+
+    /// Where a transcript goes. `None` is a machine with no Attacca session named, which hears
+    /// and transcribes and has nowhere to send it.
+    ///
+    /// **Separate from [`Session::speaking`] although both end at the same `Feed`**, because
+    /// the two open on different conditions: reading an answer aloud needs a speaker and 401 MB
+    /// of voice, and sending what somebody said needs neither. Folding this into `speaking`
+    /// would make a machine with no voice models deaf to the agent *and* silent to it, which is
+    /// two failures out of one missing download.
+    conversation: Option<Arc<dyn Says>>,
 }
 
 impl Session {
@@ -271,6 +286,10 @@ impl Session {
             apm,
             stt,
             events,
+            // Replaced by [`Session::tracing`] when anything is watching. A channel nobody
+            // subscribed to is the ordinary case and sending on it is a discarded error.
+            traces: broadcast::channel(1).0,
+            since: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
             // one, and nothing reads them then.
@@ -284,6 +303,7 @@ impl Session {
             staged: Vec::new(),
             ready: Vec::new(),
             speaking: None,
+            conversation: None,
         }
     }
 
@@ -295,6 +315,25 @@ impl Session {
     /// module already had is unchanged by its absence.
     pub fn speaking(mut self, speaking: Arc<Speaking>) -> Session {
         self.speaking = Some(speaking);
+        self
+    }
+
+    /// Give this session somewhere to send what it hears.
+    ///
+    /// The spec's conversation loop is *get a session, send an utterance, receive the reply*,
+    /// and this is the second step. Before it existed a transcript was published as
+    /// [`VoiceEvent::Heard`] and went nowhere else: the listening half and the speaking half
+    /// were each wired to Attacca and nothing joined them, so this computer could read an answer
+    /// aloud to a question asked from somebody's phone and not to one asked out loud in front
+    /// of it.
+    pub fn conversation(mut self, conversation: Arc<dyn Says>) -> Session {
+        self.conversation = Some(conversation);
+        self
+    }
+
+    /// Publish every step onto this stream as well.
+    pub fn tracing(mut self, traces: broadcast::Sender<crate::Trace>) -> Session {
+        self.traces = traces;
         self
     }
 
@@ -503,6 +542,7 @@ impl Session {
         self.to_apm = Chunker::new(APM_FRAME);
         self.to_vad = Chunker::new(VAD_FRAME);
         self.turn = Some(Turn { buffer: Vec::new(), first_frame: self.frames });
+        self.trace(crate::Trace::Key { down: true });
         self.publish(VoiceEvent::Listening);
     }
 
@@ -516,6 +556,7 @@ impl Session {
     /// ended only sets a turn start that is already where it would put it — audio is dropped
     /// while nothing is being recorded, so the frame number cannot have moved.
     fn released(&mut self) {
+        self.trace(crate::Trace::Key { down: false });
         // Everything already captured is part of the turn the key is ending.
         self.drain();
         let ended = self.endpointer.finish();
@@ -528,8 +569,20 @@ impl Session {
         match ended {
             // Not enough was said for it to be a turn. Nothing is sent to whisper: the floor
             // here is the one that keeps "nobody spoke" from arriving as an invented sentence.
-            Ended::TooShort { .. } => self.publish(VoiceEvent::HeardNothing),
-            Ended::Utterance { first, last, .. } => {
+            Ended::TooShort { speech, .. } => {
+                self.trace(crate::Trace::Recorded {
+                    seconds: seconds(turn.buffer.len()),
+                    speech_seconds: speech.as_secs_f32(),
+                    kept: false,
+                });
+                self.publish(VoiceEvent::HeardNothing)
+            }
+            Ended::Utterance { first, last, speech } => {
+                self.trace(crate::Trace::Recorded {
+                    seconds: seconds(turn.buffer.len()),
+                    speech_seconds: speech.as_secs_f32(),
+                    kept: true,
+                });
                 let from = first.saturating_sub(turn.first_frame) * VAD_FRAME;
                 // The clamp is provably dead today and stays: the buffer grows by one frame
                 // exactly when the endpointer.s index does, so `last` can never name a frame
@@ -562,7 +615,9 @@ impl Session {
     }
 
     fn start_transcribing(&mut self, audio: Vec<f32>) {
+        self.trace(crate::Trace::Transcribing { seconds: seconds(audio.len()) });
         if self.pending.is_none() {
+            self.since = Some(std::time::Instant::now());
             self.publish(VoiceEvent::Thinking);
             self.pending = Some(self.spawn(audio));
         } else if self.queued.is_none() {
@@ -586,18 +641,27 @@ impl Session {
         done: Result<Result<String, stt::Fault>, tokio::task::JoinError>,
     ) {
         self.pending = None;
+        let took = self.since.take().map_or(0, |at| at.elapsed().as_millis() as u64);
         match done {
             // An empty transcript is not an empty sentence. `stt::clean` turns whisper's own
             // annotations for audio it found no speech in — `[BLANK_AUDIO]`, `(silence)` —
             // into exactly this, and a window shows "nobody spoke" differently from "".
-            Ok(Ok(text)) if text.is_empty() => self.publish(VoiceEvent::HeardNothing),
-            Ok(Ok(text)) => self.publish(VoiceEvent::Heard { text }),
+            Ok(Ok(text)) if text.is_empty() => {
+                self.trace(crate::Trace::Transcribed { text: String::new(), took_ms: took });
+                self.publish(VoiceEvent::HeardNothing)
+            }
+            Ok(Ok(text)) => {
+                self.trace(crate::Trace::Transcribed { text: text.clone(), took_ms: took });
+                self.publish(VoiceEvent::Heard { text: text.clone() });
+                self.send(text);
+            }
             Ok(Err(fault)) => self.publish(VoiceEvent::Failed { reason: fault.to_string() }),
             Err(_) => {
                 self.publish(VoiceEvent::Failed { reason: stt::Fault::Lost.to_string() })
             }
         }
         if let Some(next) = self.queued.take() {
+            self.since = Some(std::time::Instant::now());
             self.pending = Some(self.spawn(next));
         }
     }
@@ -607,6 +671,48 @@ impl Session {
     fn publish(&self, event: VoiceEvent) {
         let _ = self.events.send(event);
     }
+
+    /// Send a transcript to the agent, on a task of its own.
+    ///
+    /// **Spawned rather than awaited**, because this runs inside the select loop that is also
+    /// reading the microphone: awaiting a round trip to Attacca here would stop capturing audio
+    /// for the length of it, and the next thing somebody says would be lost. The cost is that
+    /// two utterances in quick succession could arrive out of order — which is the same order
+    /// they would arrive in if the person had typed them into two windows, and far cheaper than
+    /// a deaf microphone.
+    ///
+    /// A machine with no session named has nowhere to send it. That is not an error and not
+    /// silent either: the Voice screen says so before anybody speaks.
+    fn send(&self, text: String) {
+        let Some(conversation) = self.conversation.clone() else { return };
+        let events = self.events.clone();
+        let traces = self.traces.clone();
+        tokio::spawn(async move {
+            let sent = text.clone();
+            if let Err(reason) = conversation.say(text).await {
+                let _ = traces.send(crate::Trace::SendFailed { reason: reason.clone() });
+                // Not swallowed. A transcript that did not reach the agent looks exactly like
+                // one that did until the answer never comes, and this is the only place that
+                // knows the difference.
+                let _ = events.send(VoiceEvent::Failed {
+                    reason: format!("what you said did not reach Attacca: {reason}"),
+                });
+            } else {
+                let _ = traces.send(crate::Trace::Sent { text: sent });
+            }
+        });
+    }
+
+    /// One step onto the diagnostic stream. Discarded when nobody is watching, like
+    /// [`Session::publish`].
+    fn trace(&self, step: crate::Trace) {
+        let _ = self.traces.send(step);
+    }
+}
+
+/// Samples at the capture rate, as seconds. The trace's only arithmetic, in one place.
+fn seconds(samples: usize) -> f32 {
+    samples as f32 / crate::capture::SAMPLE_RATE as f32
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -880,6 +986,11 @@ pub struct Speaking {
     out: Arc<dyn Play>,
     turn: Arc<dyn Says>,
     events: broadcast::Sender<VoiceEvent>,
+    /// The diagnostic stream, for the half of the pipeline that runs after the agent answers.
+    /// **Everything it needs is already here**: `run` sees `TurnEvent::Shown` — what the agent
+    /// wrote — beside `TurnEvent::Say` — what the filter and splitter made of it — so the two
+    /// texts can be shown against each other without `turn.rs` knowing about tracing at all.
+    traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
 }
 
@@ -900,7 +1011,29 @@ impl Speaking {
         turn: Arc<dyn Says>,
         events: broadcast::Sender<VoiceEvent>,
     ) -> Arc<Speaking> {
-        Arc::new(Speaking { tts, out, turn, events, state: std::sync::Mutex::new(Default::default()) })
+        Arc::new(Speaking {
+            tts,
+            out,
+            turn,
+            events,
+            traces: broadcast::channel(1).0,
+            state: std::sync::Mutex::new(Default::default()),
+        })
+    }
+
+    /// Publish every step onto this stream as well. [`Session::tracing`]'s opposite number.
+    ///
+    /// Takes `Arc<Self>` apart rather than `&mut self` because [`Speaking::new`] answers an
+    /// `Arc` — a builder here would have to unwrap it, and every caller holds only the one.
+    pub fn tracing(self: Arc<Self>, traces: broadcast::Sender<crate::Trace>) -> Arc<Speaking> {
+        Arc::new(Speaking {
+            tts: self.tts.clone(),
+            out: self.out.clone(),
+            turn: self.turn.clone(),
+            events: self.events.clone(),
+            traces,
+            state: std::sync::Mutex::new(Default::default()),
+        })
     }
 
     /// Synthesise and queue everything the feed says to, until the feed goes away.
@@ -913,7 +1046,15 @@ impl Speaking {
         loop {
             match turns.recv().await {
                 Ok(crate::turn::TurnEvent::Say(fragment)) => {
+                    self.trace(crate::Trace::Fragment { text: fragment.text().to_string() });
                     self.synthesise(fragment.text()).await;
+                }
+                // Carried to the trace and nowhere else. This is what the agent wrote, before
+                // the filter took the code fences and asides out of it, and seeing the two
+                // beside each other is the only way to tell "the filter ate it" from "the
+                // agent never said it".
+                Ok(crate::turn::TurnEvent::Shown { kind, text }) => {
+                    self.trace(crate::Trace::Delta { kind: format!("{kind:?}"), text });
                 }
                 // The end of a turn. Everything sayable has been said; what is left is waiting
                 // for the speaker to get through it.
@@ -940,6 +1081,7 @@ impl Speaking {
         let generation = self.generation();
         let tts = self.tts.clone();
         let owned = text.to_string();
+        let started = std::time::Instant::now();
         let said = tokio::task::spawn_blocking(move || tts.say(&owned)).await;
 
         // **Whether anybody interrupted while this was being made is decided in
@@ -949,7 +1091,14 @@ impl Speaking {
         // synthesis that *failed* is still reported either way: the voice really did stop
         // working, and whoever interrupted is not the reason.
         match said {
-            Ok(Ok(samples)) => self.queue(text, samples, generation),
+            Ok(Ok(samples)) => {
+                self.trace(crate::Trace::Synthesised {
+                    chars: text.chars().count(),
+                    seconds: samples.len() as f32 / crate::tts::SAMPLE_RATE as f32,
+                    took_ms: started.elapsed().as_millis() as u64,
+                });
+                self.queue(text, samples, generation)
+            }
             Ok(Err(reason)) => self.publish(VoiceEvent::Failed { reason }),
             Err(_) => self.publish(VoiceEvent::Failed {
                 reason: "making the answer into speech stopped before it finished".to_string(),
@@ -967,6 +1116,9 @@ impl Speaking {
     fn queue(&self, text: &str, samples: Vec<f32>, generation: u64) {
         let mut state = self.state.lock().expect("the speaking state is not poisoned");
         if state.generation != generation {
+            // Somebody pressed the key between the synthesis starting and this line. The audio
+            // is real and nobody will hear it.
+            self.trace(crate::Trace::Dropped);
             return;
         }
         let first = state.ledger.is_empty();
@@ -977,6 +1129,10 @@ impl Speaking {
         match self.out.speak(samples) {
             Some(at) => {
                 state.ledger.add(text, at, length);
+                self.trace(crate::Trace::Queued {
+                    seconds: length as f32 / crate::tts::SAMPLE_RATE as f32,
+                    at_sample: at,
+                });
                 if first {
                     drop(state);
                     self.publish(VoiceEvent::Speaking);
@@ -1009,6 +1165,7 @@ impl Speaking {
         }
         state.ledger.clear();
         drop(state);
+        self.trace(crate::Trace::Spoke);
         self.publish(VoiceEvent::Spoke);
     }
 
@@ -1049,6 +1206,10 @@ impl Speaking {
     /// Both halves, as one call for a caller that is not async. Nothing if nothing was missed.
     pub fn interrupt(self: &Arc<Self>) {
         let Some(interruption) = self.stop() else { return };
+        self.trace(crate::Trace::Interrupted {
+            heard: interruption.heard.len(),
+            unheard: interruption.unheard.len() + usize::from(interruption.cut.is_some()),
+        });
         self.publish(VoiceEvent::Interrupted);
         let speaking = self.clone();
         tokio::spawn(async move { speaking.record(interruption).await });
@@ -1058,8 +1219,68 @@ impl Speaking {
         self.state.lock().expect("the speaking state is not poisoned").generation
     }
 
+    /// One step onto the diagnostic stream.
+    fn trace(&self, step: crate::Trace) {
+        let _ = self.traces.send(step);
+    }
+
     fn publish(&self, event: VoiceEvent) {
         let _ = self.events.send(event);
+    }
+}
+
+/// What reached Attacca, in order.
+///
+/// **Shared by both test modules rather than written twice.** The listening half asserts that a
+/// transcript arrives at all and the speaking half asserts the order of a cancel against the
+/// message after it; two doubles for one trait is the duplication this file keeps arguing
+/// against everywhere else.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Told {
+    Cancel,
+    Said(String),
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct Conversation {
+    told: std::sync::Mutex<Vec<Told>>,
+    /// Answer every call with an error. What a node that is offline, or whose session has gone,
+    /// does to a transcript.
+    refuse: bool,
+}
+
+#[cfg(test)]
+impl Conversation {
+    fn told(&self) -> Vec<Told> {
+        self.told.lock().expect("not poisoned").clone()
+    }
+
+    /// The one message posted, or a panic naming what was posted instead.
+    fn message(&self) -> String {
+        match self.told().into_iter().find_map(|told| match told {
+            Told::Said(message) => Some(message),
+            Told::Cancel => None,
+        }) {
+            Some(message) => message,
+            None => panic!("nothing was posted into the session: {:?}", self.told()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[zyris::async_trait]
+impl Says for Conversation {
+    async fn cancel(&self) -> Result<(), String> {
+        self.told.lock().expect("not poisoned").push(Told::Cancel);
+        if self.refuse { return Err("the connection is gone".into()) }
+        Ok(())
+    }
+    async fn say(&self, message: String) -> Result<(), String> {
+        self.told.lock().expect("not poisoned").push(Told::Said(message));
+        if self.refuse { return Err("the connection is gone".into()) }
+        Ok(())
     }
 }
 
@@ -1231,6 +1452,25 @@ mod tests {
         }
     }
 
+    /// The same, with somewhere for the transcript to go.
+    fn running_in_a_conversation(scribe: Arc<Scribe>) -> (Harness, Arc<Conversation>) {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let conversation = Arc::new(Conversation::default());
+        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+            .conversation(conversation.clone());
+        let harness = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+        (harness, conversation)
+    }
+
     /// Let the session catch up with everything it has been handed.
     ///
     /// Needed because the `select!` is `biased` on the audio, which is the right production
@@ -1387,6 +1627,90 @@ mod tests {
             VoiceEvent::Heard { text: "and so my fellow americans".into() }
         );
         assert_eq!(zyris.scribe.calls(), 1);
+        zyris.stops().await;
+    }
+
+    /// **What was said reaches the agent, and that is the step the spec calls `send_message`.**
+    /// It was missing: a transcript was published as [`VoiceEvent::Heard`] and went nowhere,
+    /// so this computer could read out an answer to a question asked from somewhere else and
+    /// not one asked out loud in front of it. Nothing in the suite noticed, because every test
+    /// of the listening half asserted on the event stream and every test of the speaking half
+    /// started from a turn that was already running.
+    #[tokio::test]
+    async fn what_was_heard_is_sent_to_the_agent() {
+        let (mut zyris, attacca) = running_in_a_conversation(Scribe::always("what is the time"));
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
+        // Posted on a task of its own, so it is not there the instant the event is.
+        settle().await;
+        assert_eq!(attacca.told(), vec![Told::Said("what is the time".into())]);
+        zyris.stops().await;
+    }
+
+    /// A turn with nothing in it is not a message. An agent asked an empty question answers
+    /// something, and the whole of what `min_speech` and `stt::clean` are for is that a tapped
+    /// key and a quiet room do not become a sentence somebody has to undo.
+    #[tokio::test]
+    async fn a_turn_nobody_spoke_in_sends_nothing() {
+        let (mut zyris, attacca) = running_in_a_conversation(Scribe::always(""));
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        settle().await;
+        assert!(attacca.told().is_empty(), "an empty transcript was posted: {:?}", attacca.told());
+        zyris.stops().await;
+    }
+
+    /// A transcript that did not arrive is said out loud rather than swallowed. Without this
+    /// it looks exactly like one that did, until the answer never comes — and on a machine with
+    /// no voice downloaded there is no answer to wait for either, so nothing would ever say it.
+    #[tokio::test]
+    async fn a_transcript_that_did_not_reach_attacca_is_reported() {
+        let (mut zyris, _attacca) = {
+            let (audio, audio_rx) = mpsc::unbounded_channel();
+            let (keys, keys_rx) = broadcast::channel(32);
+            let (events, events_rx) = broadcast::channel(64);
+            let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+            let refuses = Arc::new(Conversation { refuse: true, ..Conversation::default() });
+            let scribe = Scribe::always("hello");
+            let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+                .conversation(refuses.clone());
+            (
+                Harness {
+                    audio: Some(audio),
+                    keys,
+                    events: events_rx,
+                    scribe,
+                    session: tokio::spawn(session.run()),
+                },
+                refuses,
+            )
+        };
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "hello".into() });
+        match zyris.next().await {
+            VoiceEvent::Failed { reason } => {
+                assert!(reason.contains("did not reach Attacca"), "{reason}");
+            }
+            other => panic!("a refused post was not reported: {other:?}"),
+        }
         zyris.stops().await;
     }
 
@@ -2127,47 +2451,6 @@ mod barge_in {
                 .expect("not poisoned")
                 .pop_front()
                 .unwrap_or_else(|| Ok(vec![0.1; text.chars().count() * PER_CHAR]))
-        }
-    }
-
-    /// What reached Attacca, in order. The order is the assertion in one of the tests below.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum Told {
-        Cancel,
-        Said(String),
-    }
-
-    #[derive(Default)]
-    struct Conversation {
-        told: Mutex<Vec<Told>>,
-    }
-
-    impl Conversation {
-        fn told(&self) -> Vec<Told> {
-            self.told.lock().expect("not poisoned").clone()
-        }
-
-        /// The one message posted, or a panic naming what was posted instead.
-        fn message(&self) -> String {
-            match self.told().into_iter().find_map(|told| match told {
-                Told::Said(message) => Some(message),
-                Told::Cancel => None,
-            }) {
-                Some(message) => message,
-                None => panic!("nothing was posted into the session: {:?}", self.told()),
-            }
-        }
-    }
-
-    #[zyris::async_trait]
-    impl Says for Conversation {
-        async fn cancel(&self) -> Result<(), String> {
-            self.told.lock().expect("not poisoned").push(Told::Cancel);
-            Ok(())
-        }
-        async fn say(&self, message: String) -> Result<(), String> {
-            self.told.lock().expect("not poisoned").push(Told::Said(message));
-            Ok(())
         }
     }
 

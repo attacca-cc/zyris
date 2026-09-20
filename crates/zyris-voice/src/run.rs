@@ -83,6 +83,9 @@ pub const SETTINGS_FILE: &str = "voice.json";
 pub struct Engine {
     settings_path: Option<PathBuf>,
     events: broadcast::Sender<VoiceEvent>,
+    /// The diagnostic stream. Built here rather than handed in: nothing outside needs to send
+    /// on it, and `zyris-app` only ever subscribes.
+    traces: broadcast::Sender<crate::Trace>,
     /// Where `zyris-app` puts the push-to-talk key. Held by the engine rather than handed to the
     /// session, so that a session started later still gets every press after it started.
     keys: broadcast::Sender<Push>,
@@ -122,6 +125,9 @@ impl Engine {
     /// treated as the default — which is **off**, so the failure mode is a switch a person has
     /// to move again rather than a microphone that opens for a reason nobody can see.
     pub fn new(dir: Option<&Path>, events: broadcast::Sender<VoiceEvent>) -> Engine {
+        // Deeper than the product stream: a turn produces one or two `VoiceEvent`s and a dozen
+        // steps, and a window that fell behind would lose the middle of the pipeline, which is
+        // the part somebody is watching for.
         let settings_path = dir.map(|dir| dir.join(SETTINGS_FILE));
         let settings = settings_path.as_deref().map(read_settings).unwrap_or_default();
 
@@ -129,6 +135,7 @@ impl Engine {
         Engine {
             settings_path,
             events,
+            traces: broadcast::channel(TRACE_CAPACITY).0,
             keys: broadcast::channel(KEY_CAPACITY).0,
             feed,
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
@@ -153,6 +160,11 @@ impl Engine {
     /// A new subscription to what the session says.
     pub fn events(&self) -> broadcast::Receiver<VoiceEvent> {
         self.events.subscribe()
+    }
+
+    /// A new subscription to the diagnostic stream.
+    pub fn traces(&self) -> broadcast::Receiver<crate::Trace> {
+        self.traces.subscribe()
     }
 
     /// The push-to-talk key went down or came up.
@@ -456,6 +468,13 @@ impl Engine {
         if let Some(speaking) = speaking {
             session = session.speaking(speaking);
         }
+        // **Not `if let Some(speaking)` above.** Sending what was heard needs the feed and
+        // nothing else, so a machine whose speaker would not open, or whose voice has not been
+        // downloaded, still talks to the agent — it just does not hear the answer back.
+        if let Some(feed) = &self.feed {
+            session = session.conversation(feed.clone());
+        }
+        session = session.tracing(self.traces.clone());
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
@@ -511,6 +530,7 @@ impl Engine {
             feed.clone(),
             self.events.clone(),
         );
+        let speaking = speaking.tracing(self.traces.clone());
         tasks.push(tokio::spawn(speaking.clone().run(feed.events())));
         Ok((speaking, stop, tasks))
     }
@@ -571,6 +591,13 @@ impl Engine {
 /// reason: a hold is two events and a person cannot produce many per second. `Session` treats a
 /// lag as the end of a turn, so this being generous is what keeps that path out of ordinary use.
 const KEY_CAPACITY: usize = 32;
+
+/// How many diagnostic steps are held for a window that is not reading fast enough.
+///
+/// Deeper than the key or the product stream: a single turn is a dozen steps and an answer of
+/// ten sentences is fifty, and the middle of the pipeline is exactly what somebody watching it
+/// is looking for. A lag here costs nothing but a gap in a log.
+const TRACE_CAPACITY: usize = 512;
 
 /// Why listening cannot start, said in terms of the model.
 fn no_model(state: &stt::ModelState) -> String {

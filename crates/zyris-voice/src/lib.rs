@@ -167,6 +167,76 @@ pub enum VoiceEvent {
     Interrupted,
 }
 
+/// Every step the audio takes, for somebody watching it work.
+///
+/// **A second stream rather than more arms on [`VoiceEvent`], and the split is the point.**
+/// `VoiceEvent` is the product: four or five things a person needs to be told, each of which a
+/// screen renders as a state. This is the trace — noisy, detailed, and about the *machine*
+/// rather than about the conversation. Folding them together would make every consumer of the
+/// product stream filter out the diagnostics, and would make the diagnostics something the
+/// product's copy has to be careful about.
+///
+/// It is published unconditionally and costs nothing when nobody is looking: `broadcast::send`
+/// on a channel with no receivers returns an error that is discarded, and every field here is
+/// already computed for another reason.
+///
+/// Like [`VoiceEvent`] it is declared outside the `voice` feature, because `zyris-app` forwards
+/// it to the window and may contain no `#[cfg(feature = "voice")]`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "step", rename_all = "camelCase")]
+pub enum Trace {
+    /// The push-to-talk key. The first thing to check when nothing happens at all: on Wayland
+    /// the compositor has to be told to send it, and until it is, no `down` ever arrives.
+    #[serde(rename_all = "camelCase")]
+    Key { down: bool },
+    /// A turn's recording ended, and what the silence rule made of it.
+    ///
+    /// `kept` is false when there was less than [`vad`]'s floor of speech in it — the turn is
+    /// discarded and whisper never sees it, which is the case that otherwise looks like a
+    /// transcription that returned nothing.
+    #[serde(rename_all = "camelCase")]
+    Recorded { seconds: f32, speech_seconds: f32, kept: bool },
+    /// The recording was handed to whisper. `seconds` is after trimming, so it is smaller than
+    /// [`Trace::Recorded`]'s.
+    #[serde(rename_all = "camelCase")]
+    Transcribing { seconds: f32 },
+    /// Whisper answered. An empty `text` is audio it found no speech in.
+    #[serde(rename_all = "camelCase")]
+    Transcribed { text: String, took_ms: u64 },
+    /// The transcript was posted into the Attacca session. The step the spec calls
+    /// `send_message`, and the one that joins the listening half to the speaking half.
+    #[serde(rename_all = "camelCase")]
+    Sent { text: String },
+    /// It was not posted, and this is why.
+    #[serde(rename_all = "camelCase")]
+    SendFailed { reason: String },
+    /// A delta from the agent, as the screen would have it. Every delta, reasoning included.
+    #[serde(rename_all = "camelCase")]
+    Delta { kind: String, text: String },
+    /// What the splitter cut out of the deltas to be spoken. **Not the same text as
+    /// [`Trace::Delta`]**: the filter drops code fences, asides, URLs and markdown, so a
+    /// fragment is what is left after all of that.
+    #[serde(rename_all = "camelCase")]
+    Fragment { text: String },
+    /// Supertonic turned a fragment into audio.
+    #[serde(rename_all = "camelCase")]
+    Synthesised { chars: usize, seconds: f32, took_ms: u64 },
+    /// The audio reached the speaker's queue, at this many samples into the stream.
+    #[serde(rename_all = "camelCase")]
+    Queued { seconds: f32, at_sample: u64 },
+    /// A fragment was refused by the speaker, which is what an interruption between synthesis
+    /// and the queue looks like.
+    Dropped,
+    /// The speaker ran out of things to play.
+    Spoke,
+    /// Speech was cut off by the key, and how much of the answer had been heard.
+    #[serde(rename_all = "camelCase")]
+    Interrupted { heard: usize, unheard: usize },
+    /// Something failed, said in the same words the product stream uses.
+    #[serde(rename_all = "camelCase")]
+    Failed { reason: String },
+}
+
 /// What the push-to-talk key did.
 ///
 /// The same two things `zyris-app`.s `hotkey::HotkeyEvent` carries, and deliberately a second
@@ -223,6 +293,9 @@ pub struct Voice {
     /// a microphone that has not been spoken into yet. A closed stream *ends*, which is what a
     /// `while let Ok(event) = rx.recv().await` loop needs in order to stop.
     events: Option<broadcast::Sender<VoiceEvent>>,
+    /// The diagnostic stream. `None` for the same reason `events` is: a subscriber to a voice
+    /// that will never publish has to be able to *end*, not wait.
+    traces: Option<broadcast::Sender<Trace>>,
     support: VoiceSupport,
     /// What is, or could be, listening. `None` on a [`Voice::disabled`]; always `Some` on one
     /// [`start`] built, because `run::Engine::new` cannot fail and opens nothing.
@@ -237,6 +310,7 @@ impl Voice {
     pub fn disabled(reason: impl Into<String>) -> Voice {
         Voice {
             events: None,
+            traces: None,
             support: VoiceSupport::Unavailable { reason: reason.into() },
             #[cfg(feature = "voice")]
             engine: None,
@@ -255,6 +329,19 @@ impl Voice {
         match &self.events {
             Some(tx) => tx.subscribe(),
             // The sender is dropped at the end of this expression, which closes the channel.
+            None => broadcast::channel(1).1,
+        }
+    }
+
+    /// A new subscription to the diagnostic stream. [`Voice::events`]'s neighbour, and closed
+    /// on a disabled voice for the same reason.
+    pub fn traces(&self) -> broadcast::Receiver<Trace> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.traces();
+        }
+        match &self.traces {
+            Some(tx) => tx.subscribe(),
             None => broadcast::channel(1).1,
         }
     }
@@ -434,7 +521,7 @@ pub fn start(dir: Option<&std::path::Path>) -> Voice {
     {
         let events = broadcast::channel(EVENT_CAPACITY).0;
         let engine = std::sync::Arc::new(run::Engine::new(dir, events.clone()));
-        Voice { events: None, support: engine.support(), engine: Some(engine) }
+        Voice { events: None, traces: None, support: engine.support(), engine: Some(engine) }
     }
 }
 
@@ -496,6 +583,7 @@ mod tests {
         let (tx, _) = broadcast::channel(4);
         let voice = Voice {
             events: Some(tx),
+            traces: None,
             support: VoiceSupport::Ready,
             #[cfg(feature = "voice")]
             engine: None,

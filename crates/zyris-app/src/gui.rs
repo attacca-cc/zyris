@@ -354,6 +354,7 @@ pub fn run(
             // a subscriber that shows up late, and a turn that happened before the window was
             // listening is a turn nobody would ever be told about.
             bridge::forward_voice(app.handle().clone(), setup_voice.events(), &setup_runtime);
+            bridge::forward_traces(app.handle().clone(), setup_voice.traces(), &setup_runtime);
 
             // **Acting on an answer a person already gave.** Nothing is opened here unless the
             // stored settings say it was asked for on some earlier run; on a machine nobody has

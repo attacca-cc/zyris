@@ -81,6 +81,7 @@ export const TABS = [
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP" },
   { id: "voice", label: "Voice" },
+  { id: "debug", label: "Debug" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -350,6 +351,39 @@ export type VoiceEvent =
 // Has to match VOICE_EVENT_NAME in crates/zyris-app/src/bridge.rs exactly; nothing checks that
 // at build time.
 const VOICE_EVENT_NAME = "voice-event";
+
+// Every step the audio took. Mirrors `Trace` in crates/zyris-voice/src/lib.rs, tagged on `step`.
+//
+// **A second stream rather than more arms on `VoiceEvent`.** That one is the product — four or
+// five things a person is told, each of which the Voice screen renders as a state. This is the
+// trace: noisy, about the machine rather than the conversation, and read by whoever is asking
+// "where did it stop".
+export type Trace =
+  | { step: "key"; down: boolean }
+  | { step: "recorded"; seconds: number; speechSeconds: number; kept: boolean }
+  | { step: "transcribing"; seconds: number }
+  | { step: "transcribed"; text: string; tookMs: number }
+  | { step: "sent"; text: string }
+  | { step: "sendFailed"; reason: string }
+  | { step: "delta"; kind: string; text: string }
+  | { step: "fragment"; text: string }
+  | { step: "synthesised"; chars: number; seconds: number; tookMs: number }
+  | { step: "queued"; seconds: number; atSample: number }
+  | { step: "dropped" }
+  | { step: "spoke" }
+  | { step: "interrupted"; heard: number; unheard: number }
+  | { step: "failed"; reason: string };
+
+// Has to match VOICE_TRACE_NAME in crates/zyris-app/src/bridge.rs.
+const VOICE_TRACE_NAME = "voice-trace";
+
+// No catch-up here either, and it costs more than it does for `subscribeVoice`: a window opened
+// after a turn has no way to see that turn's steps. Holding them on the Rust side would be a
+// second copy of the stream with a retention policy, for a screen whose whole job is to watch
+// what happens next.
+export function subscribeTrace(onStep: (step: Trace) => void): Promise<() => void> {
+  return listen<Trace>(VOICE_TRACE_NAME, (message) => onStep(message.payload));
+}
 
 // There is deliberately **no catch-up call beside this one**. A turn is four events over a second
 // or two and none of them is state, so there is nothing on the Rust side holding the last one to

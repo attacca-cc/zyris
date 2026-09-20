@@ -288,3 +288,25 @@ section { margin-bottom: 2rem; }
    Its own class rather than styling `.caps label`, which the MCP and Tools lists share. */
 .choices label { align-items: baseline; display: flex; gap: 0.5rem; overflow-wrap: anywhere; }
 .choices input { flex: none; }
+
+/* The Debug screen's log. A list rather than a table: the lines are different lengths and a
+   table would make every one as tall as the longest cell in its row. */
+.trace {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.trace li {
+  padding: 0.15rem 0.4rem;
+  border-left: 3px solid transparent;
+  overflow-wrap: anywhere;
+}
+/* The two halves of the pipeline, and the things that went wrong. Colour is the *second*
+   signal here and never the only one — every line says what it is in words. */
+.trace-in { border-left-color: #4a90d9; }
+.trace-out { border-left-color: #58a55c; }
+.trace-bad { border-left-color: #c0392b; }
+.trace-at { opacity: 0.55; }
