@@ -712,7 +712,9 @@ fn record_from(
     let mut to_vad = Chunker::new(VAD_FRAME);
     let mut endpointer = Endpointer::new();
     let mut kept: Vec<f32> = Vec::new();
-    let longest = stt::samples_in(wake::MAX_TAKE);
+    // Not `samples_in(MAX_TAKE)`: this loop can only stop on a frame boundary, and that figure
+    // is not one. See `wake::longest_take`.
+    let longest = wake::longest_take(VAD_FRAME);
 
     // `Handle::block_on` is legal here and only here: `record_one` is called from
     // `spawn_blocking`, which is not a runtime worker thread. `blocking_recv` has no deadline
