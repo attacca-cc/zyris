@@ -26,6 +26,7 @@ import { Voice, type VoiceScreen } from "./Voice";
 
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
 const TAKES = "/home/ada/.local/share/zyris/wake-word";
+const VOICE = "/home/ada/.cache/zyris/models/supertonic-3";
 
 // The real shape, not a loose record. A field added to `VoiceView` in Rust and mirrored in
 // `Voice.tsx` is then a compile error here until the fixture carries it, which is the only thing
@@ -33,17 +34,11 @@ const TAKES = "/home/ada/.local/share/zyris/wake-word";
 type Screen = VoiceScreen;
 
 // A machine where everything works, which every test below then breaks one thing of.
-function machine(over: {
-  support?: VoiceScreen["voice"]["support"];
-  listening?: VoiceScreen["voice"]["listening"];
-  devices?: VoiceScreen["voice"]["devices"];
-  chosen?: VoiceScreen["voice"]["chosen"];
-  model?: VoiceScreen["voice"]["model"];
-  modelEnv?: string | null;
-  wake?: VoiceScreen["voice"]["wake"];
-  speaking?: VoiceScreen["voice"]["speaking"];
-  hotkey?: VoiceScreen["hotkey"];
-}): Screen {
+// The overrides are **derived** from the wire type rather than listed. A hand-written list is
+// a second copy of the shape, and it goes stale silently: a field added to `VoiceScreen` is
+// simply not overridable, and every test of it has to build a whole screen by hand or go
+// unwritten. Adding one is still a compile error in the body below, which is where it belongs.
+function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["hotkey"] }): Screen {
   return {
     voice: {
       support: over.support ?? { state: "ready" },
@@ -69,6 +64,8 @@ function machine(over: {
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
       modelEnv: over.modelEnv ?? null,
       speaking: over.speaking ?? { state: "session", id: "s-1" },
+      voiceModel: over.voiceModel ?? { state: "ready", dir: VOICE },
+      voiceModelEnv: over.voiceModelEnv ?? null,
       wake: over.wake ?? {
         state: { state: "nothing" },
         dir: TAKES,
@@ -531,6 +528,69 @@ describe("Voice", () => {
     expect(page).toMatch(/pauses between sentences/i);
     expect(page).toMatch(/record of the answer stays whole/i);
     expect(page).not.toMatch(/without a pause|seamless|smoothly/i);
+  });
+
+  it("does not say a session is being read aloud when the voice is not on disk", async () => {
+    // The defect this card was added for. A session id and 401 MB of voice are independent
+    // facts, and the screen used to read only the first: a machine that had never downloaded a
+    // byte of the voice said "answers from this session are read aloud as they are written",
+    // which is exactly what was not happening. Nothing else on the page could have contradicted
+    // it, because nothing else on the page knew.
+    answers(
+      machine({
+        speaking: { state: "session", id: "sess-42" },
+        voiceModel: { state: "incomplete", dir: VOICE, missing: 16, bytes: 401276744 },
+      }),
+    );
+    render(<Voice />);
+    await screen.findByText(/has not been downloaded yet/i);
+
+    const page = document.body.textContent ?? "";
+    expect(page).toContain("sess-42");
+    expect(page).toMatch(/nothing is read aloud until the voice above is on disk/i);
+    // The claim itself, not merely a different sentence somewhere near it.
+    expect(page).not.toMatch(/are read aloud as they are written/i);
+    // And the note about how speaking behaves belongs to speech that happens.
+    expect(page).not.toMatch(/pauses between sentences/i);
+  });
+
+  it("offers the voice download only where a download is what is missing", async () => {
+    // Four states and four answers, the same separation `tts::VoiceState` was given four arms
+    // for: a Download button in front of somebody a download cannot help is the confident false
+    // negative this project keeps shipping when it collapses "absent" into "unreadable".
+    const wanted: [VoiceScreen["voice"]["voiceModel"], boolean][] = [
+      [{ state: "ready", dir: VOICE }, false],
+      [{ state: "incomplete", dir: VOICE, missing: 16, bytes: 401276744 }, true],
+      [{ state: "unreadable", dir: VOICE, reason: "a directory is in the way" }, false],
+      [{ state: "nowhere", reason: "this system names no cache directory" }, false],
+    ];
+
+    for (const [voiceModel, offered] of wanted) {
+      answers(machine({ voiceModel }));
+      render(<Voice />);
+      await screen.findByRole("heading", { name: /reading answers aloud/i });
+      const button = screen.queryByRole("button", { name: /download the voice/i });
+      expect(Boolean(button)).toBe(offered);
+      cleanup();
+    }
+  });
+
+  it("offers no voice download for a directory somebody named themselves", async () => {
+    // `ZYRIS_TTS_MODELS` names an operator's own directory, and fetching into it is this
+    // program writing 401 MB over a choice they made. Same rule `ZYRIS_WHISPER_MODEL` gets.
+    answers(
+      machine({
+        voiceModel: { state: "incomplete", dir: "/opt/voices", missing: 2, bytes: 5_000_000 },
+        voiceModelEnv: "/opt/voices",
+      }),
+    );
+    render(<Voice />);
+    await screen.findByText(/has not been downloaded yet/i);
+
+    expect(screen.queryByRole("button", { name: /download the voice/i })).toBeNull();
+    const page = document.body.textContent ?? "";
+    expect(page).toContain("ZYRIS_TTS_MODELS");
+    expect(page).toMatch(/yours to manage/i);
   });
 
   it("says nothing reads the wake word, in every state it can be in", async () => {

@@ -242,6 +242,7 @@ pub fn run(
             bridge::set_voice_listening,
             bridge::set_voice_device,
             bridge::fetch_speech_model,
+            bridge::fetch_voice_model,
             bridge::forget_speech_model,
             bridge::record_wake_take,
             bridge::clear_wake_word,

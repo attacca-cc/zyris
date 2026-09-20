@@ -87,6 +87,17 @@ type Speaking =
   | { state: "noSession"; settings: string }
   | { state: "session"; id: string };
 
+// `zyris_voice::view::VoiceModelView`. A card of its own rather than two more arms on
+// `Speaking`, because a session and the voice are independent: a machine can have one without
+// the other, and an enum holding both would have to be silent about whichever it was not.
+// `incomplete` carries only what is *left* to fetch, not what the whole snapshot costs.
+type VoiceModelView =
+  | { state: "ready"; dir: string }
+  | { state: "incomplete"; dir: string; missing: number; bytes: number }
+  | { state: "unreadable"; dir: string; reason: string }
+  | { state: "nowhere"; reason: string }
+  | { state: "notHere"; reason: string };
+
 type HotkeySupport =
   | { state: "working"; trigger: string; releaseConfirmed: boolean }
   | { state: "needsAKeyBound"; shortcutId: string; desktop: string; line: string | null; how: string }
@@ -105,6 +116,8 @@ export type VoiceScreen = {
     modelEnv: string | null;
     wake: WakeView;
     speaking: Speaking;
+    voiceModel: VoiceModelView;
+    voiceModelEnv: string | null;
   };
   hotkey: HotkeySupport;
 };
@@ -386,6 +399,58 @@ export function Voice() {
 
         {voice.speaking.state === "notHere" && <p>{voice.speaking.reason}</p>}
 
+        {voice.voiceModel.state === "nowhere" && (
+          <p>The voice cannot be kept anywhere on this computer. {voice.voiceModel.reason}</p>
+        )}
+
+        {voice.voiceModel.state === "unreadable" && (
+          // Not "it has not been downloaded". Downloading again would write to the same place
+          // and fail the same way, so there is no button.
+          <p>
+            Something is in the way at{" "}
+            <span className="mono">{voice.voiceModel.dir}</span> and it could not be read:{" "}
+            {voice.voiceModel.reason}
+          </p>
+        )}
+
+        {voice.voiceModel.state === "incomplete" && (
+          <>
+            <p>
+              The voice has not been downloaded yet, so nothing can be read aloud even once a
+              session is named. It is about {megabytes(voice.voiceModel.bytes)} in{" "}
+              {voice.voiceModel.missing} file{voice.voiceModel.missing === 1 ? "" : "s"}, it is
+              downloaded once, and it is kept at{" "}
+              <span className="mono">{voice.voiceModel.dir}</span>.
+            </p>
+            {voice.voiceModelEnv === null ? (
+              <p>
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => act("voiceModel", "fetch_voice_model")}
+                >
+                  {busy === "voiceModel" ? "Downloading" : "Download the voice"}
+                </button>
+              </p>
+            ) : (
+              // No button for a directory somebody named themselves. Fetching into it would be
+              // this program writing 401 MB over a choice they made.
+              <p className="note">
+                <span className="mono">ZYRIS_TTS_MODELS</span> points at{" "}
+                <span className="mono">{voice.voiceModelEnv}</span>, so those files are yours to
+                manage and Zyris does not download into them.
+              </p>
+            )}
+            {busy === "voiceModel" && (
+              <p className="note">
+                Sixteen files, and each one is checked against its digest as it arrives. This
+                takes a few minutes.
+              </p>
+            )}
+          </>
+        )}
+
+
         {voice.speaking.state === "noSession" && (
           <>
             <p>
@@ -402,15 +467,30 @@ export function Voice() {
 
         {voice.speaking.state === "session" && (
           <>
+            {/* Two facts, so two sentences. A session is named *and* the voice is on disk before
+                anything is read aloud, and saying the first while the second is false is how this
+                screen used to claim speech on a machine that had none of the 401 MB. */}
             <p>
-              Answers from session <span className="mono">{voice.speaking.id}</span> are read aloud
-              as they are written.
+              {voice.voiceModel.state === "ready" ? (
+                <>
+                  Answers from session <span className="mono">{voice.speaking.id}</span> are read
+                  aloud as they are written.
+                </>
+              ) : (
+                <>
+                  Session <span className="mono">{voice.speaking.id}</span> is the one this
+                  computer would answer from, and nothing is read aloud until the voice above is
+                  on disk.
+                </>
+              )}
             </p>
-            <p className="note">
-              Speaking runs behind writing, so there are pauses between sentences. Pressing the
-              push-to-talk key stops the speaking: your side of the conversation records where it
-              was cut off, and the agent&rsquo;s own record of the answer stays whole.
-            </p>
+            {voice.voiceModel.state === "ready" && (
+              <p className="note">
+                Speaking runs behind writing, so there are pauses between sentences. Pressing the
+                push-to-talk key stops the speaking: your side of the conversation records where
+                it was cut off, and the agent&rsquo;s own record of the answer stays whole.
+              </p>
+            )}
           </>
         )}
       </section>

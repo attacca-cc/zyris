@@ -205,6 +205,8 @@ impl Engine {
                 },
             },
             wake: wake_view(),
+            voice_model: voice_model_view(crate::tts::state()),
+            voice_model_env: std::env::var(crate::tts::MODELS_ENV).ok().filter(|n| !n.is_empty()),
         }
     }
 
@@ -291,6 +293,35 @@ impl Engine {
             }
         }
         fetched.map(|_| ())
+    }
+
+    /// Download every file of the voice that is not already there.
+    ///
+    /// **Nothing else in this program fetches these**, which is what made a machine with a
+    /// session named and no voice on disk say it was reading answers aloud: the only way to the
+    /// 401 MB was an operator unpacking the archive by hand.
+    ///
+    /// It does not touch the listening state the way [`Voice::fetch_model`] does. Whisper gates
+    /// the microphone, so a download that finishes is a reason to start; the voice gates only
+    /// what is read back, and the speaking half is opened by the connection rather than by this.
+    pub async fn fetch_voice(&self) -> Result<(), String> {
+        let dir = match crate::tts::models_dir() {
+            Some(dir) => dir,
+            None => return Err(crate::model::Fault::NoCacheDirectory.to_string()),
+        };
+        // Refused rather than fetched into: `ZYRIS_TTS_MODELS` names somebody's own directory,
+        // and writing 401 MB into it is this program overruling their choice. The screen offers
+        // no button in that state either; this is the half that cannot be clicked around.
+        if std::env::var_os(crate::tts::MODELS_ENV).is_some_and(|n| !n.is_empty()) {
+            return Err(format!(
+                "{} names the directory the voice is read from, so Zyris does not download into it",
+                crate::tts::MODELS_ENV
+            ));
+        }
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            format!("{} could not be created: {error}", dir.display())
+        })?;
+        crate::tts::fetch_missing(&dir, |_| {}).await.map_err(|fault| fault.to_string())
     }
 
     /// Record one wake word take from the chosen microphone and keep it.
@@ -802,6 +833,28 @@ fn model_view(state: stt::ModelState) -> ModelView {
     }
 }
 
+/// What is on disk where the voice should be, as the screen renders it.
+///
+/// Four answers in and four out, plus the arm no `voice` build can produce. The arm that has to
+/// survive is `Incomplete`: a download button in front of somebody a download cannot help is the
+/// confident false negative `tts::VoiceState` was given four arms to prevent, and folding it
+/// into `Unreadable` here would put it back.
+fn voice_model_view(state: crate::tts::VoiceState) -> crate::view::VoiceModelView {
+    use crate::tts::VoiceState;
+    match state {
+        VoiceState::Ready { dir } => crate::view::VoiceModelView::Ready { dir: show(&dir) },
+        // Not `tts::total_bytes()`: what is left to fetch, which after fifteen of sixteen files
+        // is a few megabytes and not four hundred.
+        VoiceState::Incomplete { dir, missing, bytes } => {
+            crate::view::VoiceModelView::Incomplete { dir: show(&dir), missing: missing.len(), bytes }
+        }
+        VoiceState::Unreadable { dir, detail } => {
+            crate::view::VoiceModelView::Unreadable { dir: show(&dir), reason: detail }
+        }
+        VoiceState::Nowhere { reason } => crate::view::VoiceModelView::Nowhere { reason },
+    }
+}
+
 /// How far along the wake word is, as the screen renders it.
 fn wake_view() -> WakeView {
     match wake::Store::on_this_machine() {
@@ -1021,6 +1074,86 @@ mod tests {
         for (at, view) in views.iter().enumerate() {
             for other in &views[at + 1..] {
                 assert_ne!(view, other, "two states about the model render the same");
+            }
+        }
+    }
+
+    /// **The voice is a separate card from the session, because the two fail apart.** Before
+    /// this, `SpeakingState` was the only thing the screen read about speech: a machine with a
+    /// session named and not one byte of the voice on disk rendered as *answers from this
+    /// session are read aloud as they arrive*, which is precisely what was not happening. The
+    /// two answers here are independent, so both are asserted from one view.
+    #[test]
+    fn a_named_session_does_not_say_the_voice_is_there() {
+        let view = crate::view::VoiceView {
+            speaking: SpeakingState::Session { id: "s-1".into() },
+            voice_model: voice_model_view(crate::tts::VoiceState::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: vec!["vocoder.onnx".into(), "tts.json".into()],
+                bytes: 300,
+            }),
+            ..crate::view::VoiceView::unavailable("stand-in".into())
+        };
+
+        assert_eq!(view.speaking, SpeakingState::Session { id: "s-1".into() });
+        assert_eq!(
+            view.voice_model,
+            crate::view::VoiceModelView::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: 2,
+                bytes: 300,
+            }
+        );
+    }
+
+    /// What is left to fetch, not what the whole snapshot costs. Fifteen of sixteen files down
+    /// and the screen must not ask for 401 MB again — `tts::total_bytes()` in that position
+    /// would be a number that is wrong exactly when somebody is looking at it.
+    #[test]
+    fn an_unfinished_download_asks_for_what_is_left_and_not_for_all_of_it() {
+        let view = voice_model_view(crate::tts::VoiceState::Incomplete {
+            dir: "/c/supertonic-3".into(),
+            missing: vec!["tts.json".into()],
+            bytes: 4_000,
+        });
+
+        assert_eq!(
+            view,
+            crate::view::VoiceModelView::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: 1,
+                bytes: 4_000,
+            }
+        );
+        assert!(4_000 < crate::tts::total_bytes(), "the stand-in has to be the smaller number");
+    }
+
+    /// Four states about the voice and each is a different sentence and a different set of
+    /// buttons. The one that has to survive is `Incomplete`: folded into `Unreadable` it puts a
+    /// Download button in front of somebody a download cannot help, which is the confident
+    /// false negative `tts::VoiceState` was given four arms to prevent.
+    #[test]
+    fn the_four_answers_about_the_voice_stay_four() {
+        let dir: PathBuf = "/c/supertonic-3".into();
+        let views = [
+            voice_model_view(crate::tts::VoiceState::Ready { dir: dir.clone() }),
+            voice_model_view(crate::tts::VoiceState::Incomplete {
+                dir: dir.clone(),
+                missing: vec!["tts.json".into()],
+                bytes: 4_000,
+            }),
+            voice_model_view(crate::tts::VoiceState::Unreadable {
+                dir: dir.clone(),
+                detail: "a directory is in the way".into(),
+            }),
+            voice_model_view(crate::tts::VoiceState::Nowhere {
+                reason: "no cache directory".into(),
+            }),
+        ];
+
+        for (at, view) in views.iter().enumerate() {
+            for other in &views[at + 1..] {
+                assert_ne!(view, other, "two states about the voice render the same");
             }
         }
     }

@@ -282,6 +282,19 @@ pub async fn fetch_speech_model(
     Ok(voice_screen(voice.fetch_model().await?, &hotkey))
 }
 
+/// Download the voice that reads answers aloud.
+///
+/// Sixteen files and about 401 MB, so it takes minutes and the screen says what it is doing.
+/// `Err` carries the sentence `zyris_voice` gives, which on a machine where `ZYRIS_TTS_MODELS`
+/// is set says that the directory is the operator's and Zyris does not write into it.
+#[tauri::command]
+pub async fn fetch_voice_model(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.fetch_voice().await?, &hotkey))
+}
+
 /// Delete the downloaded speech model.
 ///
 /// Turns listening off on the way, because the running session holds the model open. It refuses

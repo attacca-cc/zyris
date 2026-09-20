@@ -366,6 +366,17 @@ impl Voice {
         Err(NOT_COMPILED_IN.to_string())
     }
 
+    /// Download the voice the answers are read in. Answers `Err` with a sentence when it
+    /// could not be had — including when `ZYRIS_TTS_MODELS` names a directory of somebody's own.
+    pub async fn fetch_voice(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_voice().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
     /// Delete the downloaded speech model, and any wreckage a killed download left beside it.
     ///
     /// Turns listening off first: the running session holds the model, and a switch left on

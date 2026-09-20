@@ -210,6 +210,40 @@ pub enum SpeakingState {
     Session { id: String },
 }
 
+/// What is on disk where the voice that reads the answers should be.
+///
+/// [`crate::tts::VoiceState`] with the directory rendered as a string and one extra arm for the
+/// build that has no `tts` module at all — the same mapping [`ModelView`] is of `stt`.
+///
+/// **A field of its own rather than two more arms on [`SpeakingState`], because the session and
+/// the voice are independent facts.** A machine may name a session and have none of the 401 MB
+/// on disk, or have every byte of it and name no session, and an enum holding both would have to
+/// choose which of the two to be silent about. Before this existed the screen chose the wrong
+/// one: a session with no voice rendered as *answers are read aloud as they arrive*, which is
+/// exactly what was not happening.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum VoiceModelView {
+    /// Every one of the sixteen files is there at the size it should be.
+    #[serde(rename_all = "camelCase")]
+    Ready { dir: String },
+    /// Some are absent or the wrong size. `bytes` is what fetching **those** costs, not what the
+    /// whole snapshot costs: a download resumed with fifteen of sixteen files already down must
+    /// not ask for 401 MB again on the screen.
+    #[serde(rename_all = "camelCase")]
+    Incomplete { dir: String, missing: usize, bytes: u64 },
+    /// Something is in the way and could not be looked at. **Not the same as absent**, and a
+    /// download would not fix it.
+    #[serde(rename_all = "camelCase")]
+    Unreadable { dir: String, reason: String },
+    /// There is no directory to keep them in and none was named.
+    #[serde(rename_all = "camelCase")]
+    Nowhere { reason: String },
+    /// This build has no speech synthesis in it, so there is no voice it would use.
+    #[serde(rename_all = "camelCase")]
+    NotHere { reason: String },
+}
+
 /// Everything the Voice screen reads off this machine, in one answer.
 ///
 /// One structure rather than five commands, for the reason `bridge::AutostartView` gives: the
@@ -238,6 +272,14 @@ pub struct VoiceView {
     pub wake: WakeView,
     /// Whether anything is read aloud, and what stops it if not.
     pub speaking: SpeakingState,
+    /// What is on disk where the voice should be. Read every time, like [`VoiceView::model`].
+    pub voice_model: VoiceModelView,
+    /// The value of `ZYRIS_TTS_MODELS`, when it is set to something.
+    ///
+    /// [`VoiceView::model_env`]'s opposite number, and it buys the same thing: a directory an
+    /// operator pointed Zyris at gets no Download button, because those files are theirs to
+    /// manage and a fetch into them is this program overwriting a choice somebody made.
+    pub voice_model_env: Option<String>,
 }
 
 impl VoiceView {
@@ -255,6 +297,8 @@ impl VoiceView {
             model: ModelView::NotHere { reason: reason.clone() },
             model_env: None,
             speaking: SpeakingState::NotHere { reason: reason.clone() },
+            voice_model: VoiceModelView::NotHere { reason: reason.clone() },
+            voice_model_env: None,
             wake: WakeView {
                 state: WakeState::NotHere { reason },
                 dir: None,
