@@ -344,3 +344,4 @@ section { margin-bottom: 2rem; }
    look re-reads the whole recording and may revise it. */
 .sofar { opacity: 0.75; font-style: italic; }
 .sofar-mark { font-style: normal; font-size: 0.8em; opacity: 0.7; }
+.turn-woke { border-left-color: #b8860b; }

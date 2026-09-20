@@ -279,6 +279,20 @@ impl Endpointer {
         self.rule
     }
 
+    /// Change the rule without forgetting the audio.
+    ///
+    /// **Two ways into a turn need two rules.** A turn a key is holding open must not end on
+    /// silence — somebody pausing to think mid-sentence is one turn, which is why
+    /// crate::session::push_to_talk_rule sets the hangover to the whole cap. A turn a
+    /// phrase opened has no key to end it, so it must end the ordinary way.
+    ///
+    /// Not `reset`: the detector keeps three frames of context and throwing that away would
+    /// make the first frames after every switch worse than the ones before them, which is the
+    /// same argument this module already makes about turns.
+    pub fn use_rule(&mut self, rule: Rule) {
+        self.rule = rule;
+    }
+
     /// Hand it the next frame: exactly [`VAD_FRAME`] samples of 16 kHz mono, in `[-1, 1]`.
     ///
     /// A frame of the wrong length is [`Fault::WrongLength`] and **does not advance anything** —

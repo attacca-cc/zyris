@@ -24,6 +24,7 @@ type Line = { at: number; step: Trace };
 function half(step: Trace): "in" | "out" | "bad" {
   switch (step.step) {
     case "key":
+    case "woke":
     case "recording":
     case "recorded":
     case "hearing":
@@ -54,6 +55,11 @@ function describe(step: Trace): string {
       return step.down ? "key down" : "key up";
     case "recording":
       return step.started ? "recording started" : "recording stopped";
+    case "woke":
+      // Both numbers, because the threshold is calibrated from the takes rather than chosen:
+      // a run of matches just under it is a phrase about to stop being recognised, and
+      // nothing else would show that before it happened.
+      return `the wake word, at ${step.distance.toFixed(1)} against ${step.threshold.toFixed(1)}`;
     case "recorded":
       return step.kept
         ? `recorded ${seconds(step.seconds)}, ${seconds(step.speechSeconds)} of it speech`

@@ -208,6 +208,14 @@ pub enum Trace {
     /// the first question this stream is asked.
     #[serde(rename_all = "camelCase")]
     Key { down: bool },
+    /// The enrolled phrase was heard, and a turn was opened because of it.
+    ///
+    /// `distance` and `threshold` travel because the threshold is calibrated from the takes
+    /// rather than chosen, so the pair is the only thing that says how close a call it was.
+    /// A run of matches at 15.9 against a threshold of 16.0 is a phrase about to stop being
+    /// recognised, and nothing else would show that before it happened.
+    #[serde(rename_all = "camelCase")]
+    Woke { distance: f32, threshold: f32 },
     /// The key reached a running session, and a turn began or ended because of it.
     ///
     /// Always preceded by a [`Trace::Key`]. One without the other means the key arrived and

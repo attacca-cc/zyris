@@ -37,6 +37,7 @@ type Sentence = {
 };
 
 type Turn =
+  | { who: "woke"; distance: number; threshold: number }
   | {
       who: "you";
       state: "recording" | "thinking" | "said" | "lost";
@@ -82,6 +83,11 @@ function fold(turns: Turn[], step: Trace): Turn[] {
   };
 
   switch (step.step) {
+    case "woke":
+      // The turn itself is opened by the "recording" that follows; this only marks how it was
+      // started, because "I said the phrase and it heard me" and "I pressed the key" are
+      // different things to be looking at when nothing else happens afterwards.
+      return [...turns, { who: "woke", distance: step.distance, threshold: step.threshold }];
     case "recording":
       if (step.started) {
         return [...turns, { who: "you", state: "recording", text: "", detail: "", sofar: "" }];
@@ -265,14 +271,23 @@ export function Conversation() {
 
       {turns.length === 0 ? (
         <p className="note">
-          Nothing yet. Hold the push-to-talk key and say something. There is no wake word:
-          nothing matches the takes recorded on the Voice tab, so the key is the only way to
-          start a turn.
+          Nothing yet. Say the wake word you recorded on the Voice tab, or hold the
+          push-to-talk key. The wake word is only listened for while nothing is being read
+          aloud &mdash; without echo cancellation the microphone hears the loudspeaker, and a
+          machine listening then wakes itself on its own voice.
         </p>
       ) : (
         <ol className="turns">
           {turns.map((turn, at) =>
-            turn.who === "you" ? (
+            turn.who === "woke" ? (
+              <li key={at} className="turn turn-woke">
+                <span className="turn-who">Woke</span>
+                <p className="note">
+                  The wake word, at {turn.distance.toFixed(1)} against{" "}
+                  {turn.threshold.toFixed(1)}.
+                </p>
+              </li>
+            ) : turn.who === "you" ? (
               <Yours key={at} turn={turn} />
             ) : (
               <Theirs key={at} turn={turn} cursor={cursor} />

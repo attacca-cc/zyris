@@ -480,6 +480,9 @@ impl Engine {
             session = session.conversation(feed.clone());
         }
         session = session.tracing(self.traces.clone());
+        if let Some(phrase) = enrolled_phrase() {
+            session = session.listening_for(phrase);
+        }
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
@@ -885,6 +888,58 @@ fn voice_model_view(state: crate::tts::VoiceState) -> crate::view::VoiceModelVie
         }
         VoiceState::Nowhere { reason } => crate::view::VoiceModelView::Nowhere { reason },
     }
+}
+
+/// The enrolled phrase, ready to be compared against, or `None` if there is nothing to compare.
+///
+/// **Read once, when listening starts, and not on every utterance.** Building it reads five
+/// WAV files and computes their features and their pairwise distances — tens of milliseconds,
+/// which is nothing once and far too much per utterance. The cost of that choice is that
+/// recording a new take does not take effect until listening is turned off and on again; the
+/// Voice tab is where somebody records one, and they are not talking to the machine while
+/// they do it.
+fn enrolled_phrase() -> Option<crate::spot::Phrase> {
+    let store = wake::Store::on_this_machine().ok()?;
+    let takes = store.takes().ok()?;
+    if takes.is_empty() {
+        return None;
+    }
+    // **Trimmed to what the endpointer thought was speech, because the candidate will be.**
+    // A take is stored whole and untrimmed, deliberately — `wake` argues that a matcher may
+    // want its own boundaries — and the boundaries this matcher wants are the ones the live
+    // side is going to hand it: `Session::watching` slices an utterance to the endpointer's
+    // verdict, margins and all. Comparing a trimmed candidate against untrimmed templates
+    // measures the difference in how much room each recording has on the end, which is not
+    // about the phrase at all. Measured on synthetic takes: 0.26 s of trailing silence on one
+    // side moved the distance from 0 to 15.3.
+    let samples: Vec<Vec<f32>> = takes
+        .iter()
+        .map(|take| match take.spoken() {
+            Some(spoken) => {
+                let whole = take.samples();
+                let from = spoken.first.min(whole.len());
+                let to = (spoken.last + 1).min(whole.len());
+                whole[from.min(to)..to].to_vec()
+            }
+            // The endpointer found no speech in it. Kept whole rather than dropped: `wake`
+            // keeps such a take on purpose, because the silence rule was argued from one
+            // recorded sentence and not from a two-word phrase.
+            None => take.samples().to_vec(),
+        })
+        .collect();
+    let features = crate::mfcc::Features::new();
+    let phrase = crate::spot::Phrase::from_takes(&features, &samples);
+    // A set of takes nothing can be compared against is the same as no takes at all, and
+    // saying so here keeps the session from running a matcher that can only ever refuse.
+    let threshold = phrase.threshold()?;
+    tracing::info!(
+        takes = takes.len(),
+        threshold,
+        worst = phrase.spread().worst,
+        middle = phrase.spread().middle,
+        "listening for the wake word"
+    );
+    Some(phrase)
 }
 
 /// How far along the wake word is, as the screen renders it.

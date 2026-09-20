@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { listen, emit } = vi.hoisted(() => {
@@ -57,15 +57,30 @@ afterEach(() => {
 });
 
 describe("the Conversation screen", () => {
-  it("says there is no wake word rather than leaving somebody waiting for one", async () => {
+  it("names both ways into a turn, and why one of them stops while it is talking", async () => {
     render(<Conversation />);
     await act(async () => {
       await Promise.resolve();
     });
-    // Nothing reads the takes recorded on the Voice tab. A blank screen with a microphone
-    // switched on is exactly the state somebody sits in waiting to be heard.
-    expect(screen.getByText(/no wake word/i)).toBeTruthy();
-    expect(document.body.textContent ?? "").toMatch(/only way to start a turn/i);
+    const page = document.body.textContent ?? "";
+    expect(page).toMatch(/wake word/i);
+    expect(page).toMatch(/push-to-talk key/i);
+    // The rule somebody will otherwise report as a bug: it stops listening while it speaks.
+    expect(page).toMatch(/while nothing is being read aloud/i);
+  });
+
+  it("shows a turn the wake word opened as one the wake word opened", async () => {
+    // "I said the phrase and it heard me" and "I pressed the key" are different things to be
+    // looking at when nothing happens next, and the distance against the threshold is the
+    // only thing that says how close a call it was.
+    const page = await show([
+      { step: "woke", distance: 12.4, threshold: 16.3 },
+      ...AN_ANSWER.slice(1),
+    ]);
+    expect(page).toMatch(/woke/i);
+    expect(page).toContain("12.4");
+    expect(page).toContain("16.3");
+    expect(page).toContain("what is the time");
   });
 
   it("shows both sides of one exchange", async () => {

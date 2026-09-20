@@ -56,6 +56,7 @@ describe("the Debug screen", () => {
     const steps: Trace[] = [
       { step: "key", down: true },
       { step: "key", down: false },
+      { step: "woke", distance: 12.4, threshold: 16.3 },
       { step: "recording", started: true },
       { step: "recording", started: false },
       { step: "recorded", seconds: 2.5, speechSeconds: 1.8, kept: true },
