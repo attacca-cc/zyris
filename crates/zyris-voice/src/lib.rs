@@ -101,6 +101,16 @@ pub mod session;
 pub mod win_aec;
 
 // Recording a wake word, and keeping it. Nothing matches it -- see the module.
+/// What a phrase sounds like, as numbers two recordings of it can be compared on. The wake
+/// word.s front end, and nothing else uses it.
+#[cfg(feature = "voice")]
+pub mod mfcc;
+
+/// Whether what was just said is the phrase somebody enrolled. Dynamic time warping over
+/// [`mfcc`] features, against the takes [`wake`] keeps.
+#[cfg(feature = "voice")]
+pub mod spot;
+
 #[cfg(feature = "voice")]
 pub mod wake;
 
@@ -167,6 +177,127 @@ pub enum VoiceEvent {
     Interrupted,
 }
 
+/// Every step the audio takes, for somebody watching it work.
+///
+/// **A second stream rather than more arms on [`VoiceEvent`], and the split is the point.**
+/// `VoiceEvent` is the product: four or five things a person needs to be told, each of which a
+/// screen renders as a state. This is the trace — noisy, detailed, and about the *machine*
+/// rather than about the conversation. Folding them together would make every consumer of the
+/// product stream filter out the diagnostics, and would make the diagnostics something the
+/// product's copy has to be careful about.
+///
+/// It is published unconditionally and costs nothing when nobody is looking: `broadcast::send`
+/// on a channel with no receivers returns an error that is discarded, and every field here is
+/// already computed for another reason.
+///
+/// Like [`VoiceEvent`] it is declared outside the `voice` feature, because `zyris-app` forwards
+/// it to the window and may contain no `#[cfg(feature = "voice")]`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "step", rename_all = "camelCase")]
+pub enum Trace {
+    /// The push-to-talk key **arrived at Zyris**. The first thing to check when nothing
+    /// happens at all: on Wayland the compositor has to be told to send it, and until it is,
+    /// no `down` ever arrives.
+    ///
+    /// Published from [`Voice::push`], which runs whether or not anything is listening —
+    /// **not from the session**, and that distinction is the whole reason this arm exists
+    /// separately from [`Trace::Recording`]. A key that reaches the program and a key that
+    /// reaches a running session are two different facts, and the second is false on every
+    /// machine whose switch is off or whose model has not been downloaded. Reporting only the
+    /// second made "the key is not bound" and "nothing is listening" look identical, which is
+    /// the first question this stream is asked.
+    #[serde(rename_all = "camelCase")]
+    Key { down: bool },
+    /// The enrolled phrase was heard, and a turn was opened because of it.
+    ///
+    /// `distance` and `threshold` travel because the threshold is calibrated from the takes
+    /// rather than chosen, so the pair is the only thing that says how close a call it was.
+    /// A run of matches at 15.9 against a threshold of 16.0 is a phrase about to stop being
+    /// recognised, and nothing else would show that before it happened.
+    #[serde(rename_all = "camelCase")]
+    Woke { distance: f32, threshold: f32 },
+    /// The key reached a running session, and a turn began or ended because of it.
+    ///
+    /// Always preceded by a [`Trace::Key`]. One without the other means the key arrived and
+    /// nothing was listening to it.
+    #[serde(rename_all = "camelCase")]
+    Recording { started: bool },
+    /// A turn's recording ended, and what the silence rule made of it.
+    ///
+    /// `kept` is false when there was less than [`vad`]'s floor of speech in it — the turn is
+    /// discarded and whisper never sees it, which is the case that otherwise looks like a
+    /// transcription that returned nothing.
+    #[serde(rename_all = "camelCase")]
+    Recorded { seconds: f32, speech_seconds: f32, kept: bool },
+    /// The recording was handed to whisper. `seconds` is after trimming, so it is smaller than
+    /// [`Trace::Recorded`]'s.
+    #[serde(rename_all = "camelCase")]
+    Transcribing { seconds: f32 },
+    /// Whisper answered. An empty `text` is audio it found no speech in.
+    #[serde(rename_all = "camelCase")]
+    Transcribed { text: String, took_ms: u64 },
+    /// What whisper makes of the turn **so far**, while the key is still down.
+    ///
+    /// **Whisper is not a streaming recogniser**, so this is not a growing transcript: it is
+    /// the whole recording re-read from the start, and the words already shown can change when
+    /// the next one lands. That is a property of the model and not a bug to smooth over — a
+    /// screen that only ever appended would show a sentence the model has since revised.
+    ///
+    /// Display only. Nothing is sent to the agent until the key comes up and
+    /// [`Trace::Transcribed`] says what the turn actually was.
+    #[serde(rename_all = "camelCase")]
+    Hearing { text: String, seconds: f32 },
+    /// The transcript was posted into the Attacca session. The step the spec calls
+    /// `send_message`, and the one that joins the listening half to the speaking half.
+    #[serde(rename_all = "camelCase")]
+    Sent { text: String },
+    /// It was not posted, and this is why.
+    #[serde(rename_all = "camelCase")]
+    SendFailed { reason: String },
+    /// A delta from the agent, as the screen would have it. Every delta, reasoning included.
+    #[serde(rename_all = "camelCase")]
+    Delta { kind: String, text: String },
+    /// What the splitter cut out of the deltas to be spoken. **Not the same text as
+    /// [`Trace::Delta`]**: the filter drops code fences, asides, URLs and markdown, so a
+    /// fragment is what is left after all of that.
+    #[serde(rename_all = "camelCase")]
+    Fragment { text: String },
+    /// Supertonic turned a fragment into audio.
+    ///
+    /// Carries the text rather than a length, so a reader can pair it with the
+    /// [`Trace::Fragment`] it belongs to **without counting**. Pairing by order would be right
+    /// today — synthesis is one at a time, deliberately — and would silently mis-attribute
+    /// every later sentence the first time a [`Trace::Dropped`] appeared between them.
+    #[serde(rename_all = "camelCase")]
+    Synthesised { text: String, seconds: f32, took_ms: u64 },
+    /// The audio reached the speaker's queue, and where in the stream it sits.
+    ///
+    /// `at_sample` and `samples` are at [`crate::tts::SAMPLE_RATE`] and are what
+    /// [`Trace::Playing`] is read against: a fragment is sounding when the cursor is inside
+    /// its range, and the fraction of the way through is exact rather than timed.
+    #[serde(rename_all = "camelCase")]
+    Queued { text: String, at_sample: u64, samples: u64 },
+    /// How far the speaker has actually got, while anything is queued.
+    ///
+    /// **Samples written to the device, not a clock.** The queue is ahead of the loudspeaker by
+    /// whatever the device buffers — 42.67 ms here — and that is the whole of the uncertainty.
+    /// A position estimated from a timer would drift against it and would keep counting after
+    /// an interruption threw the queue away.
+    #[serde(rename_all = "camelCase")]
+    Playing { at_sample: u64 },
+    /// A fragment was refused by the speaker, which is what an interruption between synthesis
+    /// and the queue looks like.
+    Dropped,
+    /// The speaker ran out of things to play.
+    Spoke,
+    /// Speech was cut off by the key, and how much of the answer had been heard.
+    #[serde(rename_all = "camelCase")]
+    Interrupted { heard: usize, unheard: usize },
+    /// Something failed, said in the same words the product stream uses.
+    #[serde(rename_all = "camelCase")]
+    Failed { reason: String },
+}
+
 /// What the push-to-talk key did.
 ///
 /// The same two things `zyris-app`.s `hotkey::HotkeyEvent` carries, and deliberately a second
@@ -223,6 +354,9 @@ pub struct Voice {
     /// a microphone that has not been spoken into yet. A closed stream *ends*, which is what a
     /// `while let Ok(event) = rx.recv().await` loop needs in order to stop.
     events: Option<broadcast::Sender<VoiceEvent>>,
+    /// The diagnostic stream. `None` for the same reason `events` is: a subscriber to a voice
+    /// that will never publish has to be able to *end*, not wait.
+    traces: Option<broadcast::Sender<Trace>>,
     support: VoiceSupport,
     /// What is, or could be, listening. `None` on a [`Voice::disabled`]; always `Some` on one
     /// [`start`] built, because `run::Engine::new` cannot fail and opens nothing.
@@ -237,6 +371,7 @@ impl Voice {
     pub fn disabled(reason: impl Into<String>) -> Voice {
         Voice {
             events: None,
+            traces: None,
             support: VoiceSupport::Unavailable { reason: reason.into() },
             #[cfg(feature = "voice")]
             engine: None,
@@ -255,6 +390,19 @@ impl Voice {
         match &self.events {
             Some(tx) => tx.subscribe(),
             // The sender is dropped at the end of this expression, which closes the channel.
+            None => broadcast::channel(1).1,
+        }
+    }
+
+    /// A new subscription to the diagnostic stream. [`Voice::events`]'s neighbour, and closed
+    /// on a disabled voice for the same reason.
+    pub fn traces(&self) -> broadcast::Receiver<Trace> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.traces();
+        }
+        match &self.traces {
+            Some(tx) => tx.subscribe(),
             None => broadcast::channel(1).1,
         }
     }
@@ -366,6 +514,17 @@ impl Voice {
         Err(NOT_COMPILED_IN.to_string())
     }
 
+    /// Download the voice the answers are read in. Answers `Err` with a sentence when it
+    /// could not be had — including when `ZYRIS_TTS_MODELS` names a directory of somebody's own.
+    pub async fn fetch_voice(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_voice().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
     /// Delete the downloaded speech model, and any wreckage a killed download left beside it.
     ///
     /// Turns listening off first: the running session holds the model, and a switch left on
@@ -423,7 +582,7 @@ pub fn start(dir: Option<&std::path::Path>) -> Voice {
     {
         let events = broadcast::channel(EVENT_CAPACITY).0;
         let engine = std::sync::Arc::new(run::Engine::new(dir, events.clone()));
-        Voice { events: None, support: engine.support(), engine: Some(engine) }
+        Voice { events: None, traces: None, support: engine.support(), engine: Some(engine) }
     }
 }
 
@@ -485,6 +644,7 @@ mod tests {
         let (tx, _) = broadcast::channel(4);
         let voice = Voice {
             events: Some(tx),
+            traces: None,
             support: VoiceSupport::Ready,
             #[cfg(feature = "voice")]
             engine: None,

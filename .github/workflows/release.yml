@@ -204,3 +204,8 @@ jobs:
             bundles/**/*.exe
           fail_on_unmatched_files: true
           draft: false
+          # A tag carrying a pre-release suffix — v0.0.1-pre-alpha.1 — is marked as one, and a
+          # plain v1.2.3 is not. Written out rather than left to the action inferring it,
+          # because "is this a pre-release" is the one thing a person downloading it reads
+          # first and it should not depend on a default.
+          prerelease: ${{ contains(github.ref_name, '-') }}

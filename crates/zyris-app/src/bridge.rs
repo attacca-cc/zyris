@@ -168,6 +168,39 @@ pub fn after_falling_behind(bus: &EventBus, gate: &Gate, pending: &Pending) -> V
 /// `VoiceEvent` lives in `zyris-voice`'s `lib.rs` and not behind its feature.
 pub const VOICE_EVENT_NAME: &str = "voice-event";
 
+/// Every step the audio took, for the Debug screen. [`VOICE_EVENT_NAME`]'s noisy neighbour.
+pub const VOICE_TRACE_NAME: &str = "voice-trace";
+
+/// Republish the diagnostic stream onto the webview.
+///
+/// **A second channel rather than more arms on `VoiceEvent`.** The product stream is what the
+/// Voice screen renders as a state; this is what a person watching the pipeline reads, and the
+/// two have different audiences, different volumes and different rules about wording.
+///
+/// A lag is reported and nothing is resynced: a diagnostic stream with a gap in it is still
+/// worth reading, and there is no stored value that would fill the gap.
+pub fn forward_traces(
+    app: AppHandle,
+    mut traces: tokio::sync::broadcast::Receiver<zyris_voice::Trace>,
+    runtime: &tokio::runtime::Handle,
+) {
+    runtime.spawn(async move {
+        loop {
+            match traces.recv().await {
+                Ok(step) => {
+                    if let Err(error) = app.emit(VOICE_TRACE_NAME, &step) {
+                        tracing::warn!(%error, "could not forward a voice trace to the window");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "the window fell behind on voice traces");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
 /// Republish what the voice session says onto the webview, for as long as the app lives.
 ///
 /// **No catch-up half, deliberately, and the Voice screen is written to that.** A turn is four
@@ -280,6 +313,19 @@ pub async fn fetch_speech_model(
     hotkey: State<'_, Arc<dyn Hotkey>>,
 ) -> Result<VoiceScreen, String> {
     Ok(voice_screen(voice.fetch_model().await?, &hotkey))
+}
+
+/// Download the voice that reads answers aloud.
+///
+/// Sixteen files and about 401 MB, so it takes minutes and the screen says what it is doing.
+/// `Err` carries the sentence `zyris_voice` gives, which on a machine where `ZYRIS_TTS_MODELS`
+/// is set says that the directory is the operator's and Zyris does not write into it.
+#[tauri::command]
+pub async fn fetch_voice_model(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.fetch_voice().await?, &hotkey))
 }
 
 /// Delete the downloaded speech model.

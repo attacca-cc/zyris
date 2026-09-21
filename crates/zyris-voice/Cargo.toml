@@ -38,6 +38,11 @@ optional = true
 workspace = true
 optional = true
 
+# The wake word's feature front end. See the root manifest: this is already compiled.
+[dependencies.realfft]
+workspace = true
+optional = true
+
 [dependencies.whisper-rs]
 workspace = true
 optional = true
@@ -168,6 +173,7 @@ voice = [
     "dep:cpal",
     "dep:rubato",
     "dep:earshot",
+    "dep:realfft",
     "dep:whisper-rs",
     "dep:ort",
     "dep:unicode-normalization",

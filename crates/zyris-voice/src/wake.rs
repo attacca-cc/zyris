@@ -93,6 +93,26 @@ pub const TAKES: usize = 5;
 /// is a phrase and not a sentence.
 pub const MAX_TAKE: Duration = Duration::from_secs(5);
 
+/// The most a recorder that can only stop on a frame boundary may keep.
+///
+/// **[`MAX_TAKE`] is not a whole number of detector frames and that is a real difference, not a
+/// rounding one.** Five seconds is 80,000 samples and a frame is 256, so a recording that adds a
+/// frame and then asks whether it has enough stops at 80,128 — and [`Take::recorded`] refuses
+/// anything over 80,000. Every take that reached the cap was thrown away for being 8 ms too long,
+/// which is the whole of what a person saw: the recording did not stop, and then it failed.
+///
+/// Two layers counting one limit in two units, with nothing that goes red when they disagree —
+/// the shape this project keeps finding. So the recorder asks here rather than doing the
+/// arithmetic again, and the test below pins that what this returns is something
+/// [`Take::recorded`] accepts.
+///
+/// (The turn cap in `session.rs` has the same shape and gets away with it: 30 s is 480,000
+/// samples, which *is* 1,875 frames exactly. An accident, and it is asserted there.)
+pub fn longest_take(frame: usize) -> usize {
+    let longest = crate::stt::samples_in(MAX_TAKE);
+    longest - longest % frame
+}
+
 /// The file the takes are described in.
 pub const MANIFEST: &str = "wake-word.json";
 
@@ -835,6 +855,37 @@ mod tests {
     #[test]
     fn five_is_the_number_and_not_an_arbitrary_one() {
         assert_eq!(TAKES, 5);
+    }
+
+    /// What the recorder may keep is something the store accepts, and it is not obvious.
+    ///
+    /// **This is a bug that shipped and a person found in the first five minutes.** `MAX_TAKE`
+    /// is 80,000 samples and a detector frame is 256, so a recorder that adds a frame and then
+    /// asks whether it has enough stops at 80,128 — and `Take::recorded` refuses anything over
+    /// 80,000. Every take that reached the cap was thrown away for being 8 ms too long, and what
+    /// a person saw was a recording that would not stop and then failed.
+    ///
+    /// Two layers counting one limit in two units. The test is written against both of them at
+    /// once for that reason: it asks `longest_take` and hands the answer to `recorded`.
+    #[test]
+    fn the_longest_the_recorder_may_keep_is_a_length_the_store_accepts() {
+        let longest = longest_take(crate::capture::VAD_FRAME);
+        assert_eq!(longest % crate::capture::VAD_FRAME, 0, "a recorder stops on a frame boundary");
+
+        Take::recorded(vec![0.1; longest], Conditioning::Untouched { reason: "test".into() })
+            .expect("the longest take a recorder can make is one the store keeps");
+
+        // And one frame more is refused, which is what the recorder used to hand over.
+        let over = longest + crate::capture::VAD_FRAME;
+        assert!(
+            over > crate::stt::samples_in(MAX_TAKE),
+            "the next frame really does cross the limit, or this test proves nothing"
+        );
+        let refused = Take::recorded(
+            vec![0.1; over],
+            Conditioning::Untouched { reason: "test".into() },
+        );
+        assert!(matches!(refused, Err(Fault::TooLong { .. })), "{refused:?}");
     }
 
     #[test]

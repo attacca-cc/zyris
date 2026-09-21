@@ -288,3 +288,60 @@ section { margin-bottom: 2rem; }
    Its own class rather than styling `.caps label`, which the MCP and Tools lists share. */
 .choices label { align-items: baseline; display: flex; gap: 0.5rem; overflow-wrap: anywhere; }
 .choices input { flex: none; }
+
+/* The Debug screen's log. A list rather than a table: the lines are different lengths and a
+   table would make every one as tall as the longest cell in its row. */
+.trace {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.trace li {
+  padding: 0.15rem 0.4rem;
+  border-left: 3px solid transparent;
+  overflow-wrap: anywhere;
+}
+/* The two halves of the pipeline, and the things that went wrong. Colour is the *second*
+   signal here and never the only one — every line says what it is in words. */
+.trace-in { border-left-color: #4a90d9; }
+.trace-out { border-left-color: #58a55c; }
+.trace-bad { border-left-color: #c0392b; }
+.trace-at { opacity: 0.55; }
+
+/* The Conversation screen. */
+.turns { list-style: none; margin: 0; padding: 0; }
+.turn { margin: 0 0 1.1rem; padding: 0 0 0 0.7rem; border-left: 3px solid transparent; }
+.turn-you { border-left-color: #4a90d9; }
+.turn-agent { border-left-color: #58a55c; }
+.turn-who { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; }
+.turn p { margin: 0.2rem 0; }
+
+.sentences { list-style: none; margin: 0.45rem 0 0; padding: 0; }
+/* Each sentence is text, a state in words, and a bar. The bar is never the only signal —
+   a reader who cannot see it still gets "62% of 1.4s" beside it. */
+.sentence {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 0.6rem;
+  align-items: baseline;
+  padding: 0.2rem 0;
+  font-size: 0.85rem;
+}
+.sentence-text { overflow-wrap: anywhere; }
+.sentence-state { opacity: 0.65; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sentence-bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  overflow: hidden;
+}
+.sentence-bar > span { display: block; height: 100%; background: #58a55c; }
+/* A look at a turn still being spoken. Provisional, and it has to read that way: the next
+   look re-reads the whole recording and may revise it. */
+.sofar { opacity: 0.75; font-style: italic; }
+.sofar-mark { font-style: normal; font-size: 0.8em; opacity: 0.7; }
+.turn-woke { border-left-color: #b8860b; }

@@ -70,6 +70,14 @@ pub struct Settings {
     /// reaches whatever is watching the event stream, and the only thing missing is the half
     /// that speaks. Task 6 owns the screen that fills it in.
     pub session: Option<String>,
+    /// Which agent a session is created against, on an account with more than one.
+    ///
+    /// **Only ever needed when there is a choice.** One agent is not a choice and is taken; a
+    /// person with several is asked, because `list_agents` does not document its order and
+    /// picking the first would quietly change which agent this machine talks to the day
+    /// somebody adds one. By id or by name, whichever they have to hand.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// What the settings file is called, inside the instance's data directory.
@@ -83,6 +91,9 @@ pub const SETTINGS_FILE: &str = "voice.json";
 pub struct Engine {
     settings_path: Option<PathBuf>,
     events: broadcast::Sender<VoiceEvent>,
+    /// The diagnostic stream. Built here rather than handed in: nothing outside needs to send
+    /// on it, and `zyris-app` only ever subscribes.
+    traces: broadcast::Sender<crate::Trace>,
     /// Where `zyris-app` puts the push-to-talk key. Held by the engine rather than handed to the
     /// session, so that a session started later still gets every press after it started.
     keys: broadcast::Sender<Push>,
@@ -122,15 +133,25 @@ impl Engine {
     /// treated as the default — which is **off**, so the failure mode is a switch a person has
     /// to move again rather than a microphone that opens for a reason nobody can see.
     pub fn new(dir: Option<&Path>, events: broadcast::Sender<VoiceEvent>) -> Engine {
+        // Deeper than the product stream: a turn produces one or two `VoiceEvent`s and a dozen
+        // steps, and a window that fell behind would lose the middle of the pipeline, which is
+        // the part somebody is watching for.
         let settings_path = dir.map(|dir| dir.join(SETTINGS_FILE));
         let settings = settings_path.as_deref().map(read_settings).unwrap_or_default();
 
-        let feed = settings.session.as_deref().map(Feed::new);
+        // **A feed either way now.** Before this, no session in the settings meant no feed at
+        // all and a machine that could hear and never answer; the spec's loop begins *get a
+        // session* and nothing had ever done that, so the id had to be typed into a file.
+        let feed = match settings.session.as_deref() {
+            Some(session) => Feed::new(session),
+            None => Feed::making_one(settings.agent.clone()),
+        };
         Engine {
             settings_path,
             events,
+            traces: broadcast::channel(TRACE_CAPACITY).0,
             keys: broadcast::channel(KEY_CAPACITY).0,
-            feed,
+            feed: Some(feed),
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
         }
     }
@@ -141,12 +162,43 @@ impl Engine {
     /// to the microphone switch: `turn_events` with `after: None` replays nothing, so a feed that
     /// waited for somebody to turn listening on would miss every delta written before they did.
     pub async fn on_connect(&self, connection: zyris::Connection) {
-        match &self.feed {
-            Some(feed) => feed.on_connect(connection).await,
-            None => tracing::info!(
-                "no Attacca session is configured for the voice, so nothing is read aloud; set \
-                 `session` in {SETTINGS_FILE}"
+        let Some(feed) = &self.feed else { return };
+        feed.on_connect(connection).await;
+        self.remember_the_session(feed).await;
+    }
+
+    /// Write down a session the feed made, if it made one.
+    ///
+    /// **A session created and forgotten is a new one on every launch**, which fills the
+    /// account and loses the conversation each time — `zyris-runtime`'s "reuse the node token"
+    /// trap, one layer up.
+    ///
+    /// Here rather than in a task started by `Engine::new`, which is where it was first
+    /// written: `new` is synchronous and is called before there is a runtime, so the `spawn`
+    /// panicked with *there is no reactor running*. This is async, it is already the moment
+    /// the id can have changed, and it needs no channel.
+    async fn remember_the_session(&self, feed: &Feed) {
+        let Some(session) = feed.session_id() else { return };
+        let Some(path) = self.settings_path.clone() else { return };
+        {
+            let mut live = self.live.lock().await;
+            if live.settings.session.as_deref() == Some(session.as_str()) {
+                return;
+            }
+            live.settings.session = Some(session.clone());
+        }
+        // Written from the settings this engine holds, which are the current ones: the switch
+        // and the device may have moved since the file was read, and writing a value captured
+        // earlier would put them back.
+        let settings = self.live.lock().await.settings.clone();
+        match tokio::task::spawn_blocking(move || write_settings(&path, &settings)).await {
+            Ok(Ok(())) => tracing::info!(%session, "remembered the session"),
+            Ok(Err(error)) => tracing::warn!(
+                %error,
+                %session,
+                "the session could not be written down, so the next launch makes another"
             ),
+            Err(_) => tracing::warn!(%session, "writing the session down did not finish"),
         }
     }
 
@@ -155,12 +207,22 @@ impl Engine {
         self.events.subscribe()
     }
 
+    /// A new subscription to the diagnostic stream.
+    pub fn traces(&self) -> broadcast::Receiver<crate::Trace> {
+        self.traces.subscribe()
+    }
+
     /// The push-to-talk key went down or came up.
     ///
     /// Accepted whether or not anything is listening: `broadcast::send` fails only when nobody
     /// is subscribed, which is the ordinary state of a machine with the switch off. A key
     /// pressed then is not an error and not a reason to start.
     pub fn push(&self, push: Push) {
+        // **Before the send, and regardless of whether anybody receives it.** This is the arm
+        // that says the key reached Zyris at all; the session publishes its own when a turn
+        // actually starts. A stream carrying only the second cannot tell an unbound key from a
+        // microphone that is switched off.
+        let _ = self.traces.send(crate::Trace::Key { down: push == Push::Pressed });
         let _ = self.keys.send(push);
     }
 
@@ -197,14 +259,22 @@ impl Engine {
                 Some(id) => SpeakingState::Session { id },
                 // Not a failure, and not silence without a reason: the file is named so a
                 // person can put an id in it, and there is no control here that would.
-                None => SpeakingState::NoSession {
-                    settings: match &self.settings_path {
+                // Three answers where there was one, because they send a person to three
+                // different places: wait, add an agent, or name one.
+                None => {
+                    let settings = match &self.settings_path {
                         Some(path) => show(path),
                         None => SETTINGS_FILE.to_string(),
-                    },
-                },
+                    };
+                    match self.feed.as_ref().and_then(|feed| feed.agent_trouble()) {
+                        Some(agents) => SpeakingState::NoAgent { agents, settings },
+                        None => SpeakingState::NoSessionYet,
+                    }
+                }
             },
             wake: wake_view(),
+            voice_model: voice_model_view(crate::tts::state()),
+            voice_model_env: std::env::var(crate::tts::MODELS_ENV).ok().filter(|n| !n.is_empty()),
         }
     }
 
@@ -291,6 +361,35 @@ impl Engine {
             }
         }
         fetched.map(|_| ())
+    }
+
+    /// Download every file of the voice that is not already there.
+    ///
+    /// **Nothing else in this program fetches these**, which is what made a machine with a
+    /// session named and no voice on disk say it was reading answers aloud: the only way to the
+    /// 401 MB was an operator unpacking the archive by hand.
+    ///
+    /// It does not touch the listening state the way [`Voice::fetch_model`] does. Whisper gates
+    /// the microphone, so a download that finishes is a reason to start; the voice gates only
+    /// what is read back, and the speaking half is opened by the connection rather than by this.
+    pub async fn fetch_voice(&self) -> Result<(), String> {
+        let dir = match crate::tts::models_dir() {
+            Some(dir) => dir,
+            None => return Err(crate::model::Fault::NoCacheDirectory.to_string()),
+        };
+        // Refused rather than fetched into: `ZYRIS_TTS_MODELS` names somebody's own directory,
+        // and writing 401 MB into it is this program overruling their choice. The screen offers
+        // no button in that state either; this is the half that cannot be clicked around.
+        if std::env::var_os(crate::tts::MODELS_ENV).is_some_and(|n| !n.is_empty()) {
+            return Err(format!(
+                "{} names the directory the voice is read from, so Zyris does not download into it",
+                crate::tts::MODELS_ENV
+            ));
+        }
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            format!("{} could not be created: {error}", dir.display())
+        })?;
+        crate::tts::fetch_missing(&dir, |_| {}).await.map_err(|fault| fault.to_string())
     }
 
     /// Record one wake word take from the chosen microphone and keep it.
@@ -425,6 +524,16 @@ impl Engine {
         if let Some(speaking) = speaking {
             session = session.speaking(speaking);
         }
+        // **Not `if let Some(speaking)` above.** Sending what was heard needs the feed and
+        // nothing else, so a machine whose speaker would not open, or whose voice has not been
+        // downloaded, still talks to the agent — it just does not hear the answer back.
+        if let Some(feed) = &self.feed {
+            session = session.conversation(feed.clone());
+        }
+        session = session.tracing(self.traces.clone());
+        if let Some(phrase) = enrolled_phrase() {
+            session = session.listening_for(phrase);
+        }
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
@@ -480,6 +589,7 @@ impl Engine {
             feed.clone(),
             self.events.clone(),
         );
+        let speaking = speaking.tracing(self.traces.clone());
         tasks.push(tokio::spawn(speaking.clone().run(feed.events())));
         Ok((speaking, stop, tasks))
     }
@@ -540,6 +650,13 @@ impl Engine {
 /// reason: a hold is two events and a person cannot produce many per second. `Session` treats a
 /// lag as the end of a turn, so this being generous is what keeps that path out of ordinary use.
 const KEY_CAPACITY: usize = 32;
+
+/// How many diagnostic steps are held for a window that is not reading fast enough.
+///
+/// Deeper than the key or the product stream: a single turn is a dozen steps and an answer of
+/// ten sentences is fifty, and the middle of the pipeline is exactly what somebody watching it
+/// is looking for. A lag here costs nothing but a gap in a log.
+const TRACE_CAPACITY: usize = 512;
 
 /// Why listening cannot start, said in terms of the model.
 fn no_model(state: &stt::ModelState) -> String {
@@ -712,7 +829,9 @@ fn record_from(
     let mut to_vad = Chunker::new(VAD_FRAME);
     let mut endpointer = Endpointer::new();
     let mut kept: Vec<f32> = Vec::new();
-    let longest = stt::samples_in(wake::MAX_TAKE);
+    // Not `samples_in(MAX_TAKE)`: this loop can only stop on a frame boundary, and that figure
+    // is not one. See `wake::longest_take`.
+    let longest = wake::longest_take(VAD_FRAME);
 
     // `Handle::block_on` is legal here and only here: `record_one` is called from
     // `spawn_blocking`, which is not a runtime worker thread. `blocking_recv` has no deadline
@@ -798,6 +917,105 @@ fn model_view(state: stt::ModelState) -> ModelView {
         }
         stt::ModelState::Nowhere { reason } => ModelView::Nowhere { reason },
     }
+}
+
+/// What is on disk where the voice should be, as the screen renders it.
+///
+/// Four answers in and four out, plus the arm no `voice` build can produce. The arm that has to
+/// survive is `Incomplete`: a download button in front of somebody a download cannot help is the
+/// confident false negative `tts::VoiceState` was given four arms to prevent, and folding it
+/// into `Unreadable` here would put it back.
+fn voice_model_view(state: crate::tts::VoiceState) -> crate::view::VoiceModelView {
+    use crate::tts::VoiceState;
+    match state {
+        VoiceState::Ready { dir } => crate::view::VoiceModelView::Ready { dir: show(&dir) },
+        // Not `tts::total_bytes()`: what is left to fetch, which after fifteen of sixteen files
+        // is a few megabytes and not four hundred.
+        VoiceState::Incomplete { dir, missing, bytes } => {
+            crate::view::VoiceModelView::Incomplete { dir: show(&dir), missing: missing.len(), bytes }
+        }
+        VoiceState::Unreadable { dir, detail } => {
+            crate::view::VoiceModelView::Unreadable { dir: show(&dir), reason: detail }
+        }
+        VoiceState::Nowhere { reason } => crate::view::VoiceModelView::Nowhere { reason },
+    }
+}
+
+/// The enrolled phrase, ready to be compared against, or `None` if there is nothing to compare.
+///
+/// **Read once, when listening starts, and not on every utterance.** Building it reads five
+/// WAV files and computes their features and their pairwise distances — tens of milliseconds,
+/// which is nothing once and far too much per utterance. The cost of that choice is that
+/// recording a new take does not take effect until listening is turned off and on again; the
+/// Voice tab is where somebody records one, and they are not talking to the machine while
+/// they do it.
+fn enrolled_phrase() -> Option<crate::spot::Phrase> {
+    let store = wake::Store::on_this_machine().ok()?;
+    let takes = store.takes().ok()?;
+    if takes.is_empty() {
+        return None;
+    }
+    // **Trimmed to what the endpointer thought was speech, because the candidate will be.**
+    // A take is stored whole and untrimmed, deliberately — `wake` argues that a matcher may
+    // want its own boundaries — and the boundaries this matcher wants are the ones the live
+    // side is going to hand it: `Session::watching` slices an utterance to the endpointer's
+    // verdict, margins and all. Comparing a trimmed candidate against untrimmed templates
+    // measures the difference in how much room each recording has on the end, which is not
+    // about the phrase at all. Measured on synthetic takes: 0.26 s of trailing silence on one
+    // side moved the distance from 0 to 15.3.
+    // **A take conditioned by a different build is not the same recording**, and `wake` records
+    // which build made each one for exactly this reason. With `aec` on, the high-pass filter
+    // and noise suppression change the audio before the watch compares anything; a template
+    // that never went through them is a recording of the phrase *plus* the difference between
+    // two builds, and the distance measures both. Both wake tests passed under plain `voice`
+    // and failed under `aec` before the fixture was corrected, which is this, in miniature.
+    //
+    // Said rather than refused: the takes are still the best thing there is to compare against,
+    // a mismatch makes matching worse rather than impossible, and somebody who has just
+    // switched builds would otherwise have a wake word that quietly stopped working with
+    // nothing anywhere saying why.
+    let now = crate::apm::Apm::new().map(|apm| apm.describe()).ok();
+    if let Some(now) = &now {
+        for (nth, take) in takes.iter().enumerate() {
+            if take.conditioning() != now {
+                tracing::warn!(
+                    take = nth + 1,
+                    recorded = ?take.conditioning(),
+                    running = ?now,
+                    "this take was conditioned by a different build than the one comparing it, \
+                     so the wake word will match less well; record it again to be sure"
+                );
+            }
+        }
+    }
+    let samples: Vec<Vec<f32>> = takes
+        .iter()
+        .map(|take| match take.spoken() {
+            Some(spoken) => {
+                let whole = take.samples();
+                let from = spoken.first.min(whole.len());
+                let to = (spoken.last + 1).min(whole.len());
+                whole[from.min(to)..to].to_vec()
+            }
+            // The endpointer found no speech in it. Kept whole rather than dropped: `wake`
+            // keeps such a take on purpose, because the silence rule was argued from one
+            // recorded sentence and not from a two-word phrase.
+            None => take.samples().to_vec(),
+        })
+        .collect();
+    let features = crate::mfcc::Features::new();
+    let phrase = crate::spot::Phrase::from_takes(&features, &samples);
+    // A set of takes nothing can be compared against is the same as no takes at all, and
+    // saying so here keeps the session from running a matcher that can only ever refuse.
+    let threshold = phrase.threshold()?;
+    tracing::info!(
+        takes = takes.len(),
+        threshold,
+        worst = phrase.spread().worst,
+        middle = phrase.spread().middle,
+        "listening for the wake word"
+    );
+    Some(phrase)
 }
 
 /// How far along the wake word is, as the screen renders it.
@@ -898,7 +1116,7 @@ mod tests {
     fn nothing_listens_until_somebody_says_so() {
         assert_eq!(
             Settings::default(),
-            Settings { listen: false, device: Choice::Default, session: None }
+            Settings { listen: false, device: Choice::Default, session: None, agent: None }
         );
 
         let engine = Engine::new(None, broadcast::channel(4).0);
@@ -1019,6 +1237,86 @@ mod tests {
         for (at, view) in views.iter().enumerate() {
             for other in &views[at + 1..] {
                 assert_ne!(view, other, "two states about the model render the same");
+            }
+        }
+    }
+
+    /// **The voice is a separate card from the session, because the two fail apart.** Before
+    /// this, `SpeakingState` was the only thing the screen read about speech: a machine with a
+    /// session named and not one byte of the voice on disk rendered as *answers from this
+    /// session are read aloud as they arrive*, which is precisely what was not happening. The
+    /// two answers here are independent, so both are asserted from one view.
+    #[test]
+    fn a_named_session_does_not_say_the_voice_is_there() {
+        let view = crate::view::VoiceView {
+            speaking: SpeakingState::Session { id: "s-1".into() },
+            voice_model: voice_model_view(crate::tts::VoiceState::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: vec!["vocoder.onnx".into(), "tts.json".into()],
+                bytes: 300,
+            }),
+            ..crate::view::VoiceView::unavailable("stand-in".into())
+        };
+
+        assert_eq!(view.speaking, SpeakingState::Session { id: "s-1".into() });
+        assert_eq!(
+            view.voice_model,
+            crate::view::VoiceModelView::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: 2,
+                bytes: 300,
+            }
+        );
+    }
+
+    /// What is left to fetch, not what the whole snapshot costs. Fifteen of sixteen files down
+    /// and the screen must not ask for 401 MB again — `tts::total_bytes()` in that position
+    /// would be a number that is wrong exactly when somebody is looking at it.
+    #[test]
+    fn an_unfinished_download_asks_for_what_is_left_and_not_for_all_of_it() {
+        let view = voice_model_view(crate::tts::VoiceState::Incomplete {
+            dir: "/c/supertonic-3".into(),
+            missing: vec!["tts.json".into()],
+            bytes: 4_000,
+        });
+
+        assert_eq!(
+            view,
+            crate::view::VoiceModelView::Incomplete {
+                dir: "/c/supertonic-3".into(),
+                missing: 1,
+                bytes: 4_000,
+            }
+        );
+        assert!(4_000 < crate::tts::total_bytes(), "the stand-in has to be the smaller number");
+    }
+
+    /// Four states about the voice and each is a different sentence and a different set of
+    /// buttons. The one that has to survive is `Incomplete`: folded into `Unreadable` it puts a
+    /// Download button in front of somebody a download cannot help, which is the confident
+    /// false negative `tts::VoiceState` was given four arms to prevent.
+    #[test]
+    fn the_four_answers_about_the_voice_stay_four() {
+        let dir: PathBuf = "/c/supertonic-3".into();
+        let views = [
+            voice_model_view(crate::tts::VoiceState::Ready { dir: dir.clone() }),
+            voice_model_view(crate::tts::VoiceState::Incomplete {
+                dir: dir.clone(),
+                missing: vec!["tts.json".into()],
+                bytes: 4_000,
+            }),
+            voice_model_view(crate::tts::VoiceState::Unreadable {
+                dir: dir.clone(),
+                detail: "a directory is in the way".into(),
+            }),
+            voice_model_view(crate::tts::VoiceState::Nowhere {
+                reason: "no cache directory".into(),
+            }),
+        ];
+
+        for (at, view) in views.iter().enumerate() {
+            for other in &views[at + 1..] {
+                assert_ne!(view, other, "two states about the voice render the same");
             }
         }
     }
@@ -1200,14 +1498,15 @@ mod the_delay_watch {
     /// The setting a session id comes from, and the default that means a machine which listens
     /// and does not answer.
     #[test]
-    fn a_machine_with_no_session_named_has_no_feed_to_read_aloud_from() {
+    fn a_machine_with_no_session_named_gets_a_feed_that_will_make_one() {
         let (events, _) = broadcast::channel(4);
         let engine = Engine::new(None, events);
 
-        assert!(
-            engine.feed.is_none(),
-            "there is no screen for choosing a session yet, so an absent one has to be an \
-             ordinary state rather than a failure"
+        let feed = engine.feed.as_ref().expect("a feed that will make a session");
+        assert_eq!(
+            feed.session_id(),
+            None,
+            "a session that does not exist yet must not be named before it does"
         );
     }
 
@@ -1226,7 +1525,7 @@ mod the_delay_watch {
         let engine = Engine::new(Some(&dir), events);
 
         assert_eq!(
-            engine.feed.as_ref().map(|feed| feed.session_id().to_string()),
+            engine.feed.as_ref().and_then(|feed| feed.session_id()),
             Some("s-123".to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
