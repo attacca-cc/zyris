@@ -1784,6 +1784,28 @@ mod tests {
         samples
     }
 
+    /// A take, conditioned the way the live path conditions what it compares.
+    ///
+    /// **The processor is part of the comparison, not a detail of the capture.** With `aec`
+    /// on, noise suppression and the high-pass filter change the audio before the watch ever
+    /// sees it — so templates built from raw samples and a candidate that went through the
+    /// processor are two different recordings of one phrase, and the distance measures the
+    /// processing. Both of these tests passed under plain `voice` and failed under `aec` for
+    /// exactly that reason, which is the same asymmetry `wake` records `Conditioning` for.
+    fn conditioned(samples: &[f32]) -> Vec<f32> {
+        let apm = Apm::new().expect("a processor this machine can build");
+        let mut out = Vec::with_capacity(samples.len());
+        for frame in samples.chunks(crate::capture::APM_FRAME) {
+            if frame.len() != crate::capture::APM_FRAME {
+                break;
+            }
+            let mut frame = frame.to_vec();
+            apm.process_capture(&mut frame).expect("a frame of the right length");
+            out.extend_from_slice(&frame);
+        }
+        out
+    }
+
     fn the_phrase() -> crate::spot::Phrase {
         let features = crate::mfcc::Features::new();
         // **With the endpointer's margin on each end, because a real take has one.** A take
@@ -1801,7 +1823,7 @@ mod tests {
                 let mut take = margin.clone();
                 take.extend(said(300.0, 900.0, *seconds, voice as u32 + 1));
                 take.extend(margin.iter().copied());
-                take
+                conditioned(&take)
             })
             .collect();
         crate::spot::Phrase::from_takes(&features, &takes)

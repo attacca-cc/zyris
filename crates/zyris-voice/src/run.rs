@@ -963,6 +963,31 @@ fn enrolled_phrase() -> Option<crate::spot::Phrase> {
     // measures the difference in how much room each recording has on the end, which is not
     // about the phrase at all. Measured on synthetic takes: 0.26 s of trailing silence on one
     // side moved the distance from 0 to 15.3.
+    // **A take conditioned by a different build is not the same recording**, and `wake` records
+    // which build made each one for exactly this reason. With `aec` on, the high-pass filter
+    // and noise suppression change the audio before the watch compares anything; a template
+    // that never went through them is a recording of the phrase *plus* the difference between
+    // two builds, and the distance measures both. Both wake tests passed under plain `voice`
+    // and failed under `aec` before the fixture was corrected, which is this, in miniature.
+    //
+    // Said rather than refused: the takes are still the best thing there is to compare against,
+    // a mismatch makes matching worse rather than impossible, and somebody who has just
+    // switched builds would otherwise have a wake word that quietly stopped working with
+    // nothing anywhere saying why.
+    let now = crate::apm::Apm::new().map(|apm| apm.describe()).ok();
+    if let Some(now) = &now {
+        for (nth, take) in takes.iter().enumerate() {
+            if take.conditioning() != now {
+                tracing::warn!(
+                    take = nth + 1,
+                    recorded = ?take.conditioning(),
+                    running = ?now,
+                    "this take was conditioned by a different build than the one comparing it, \
+                     so the wake word will match less well; record it again to be sure"
+                );
+            }
+        }
+    }
     let samples: Vec<Vec<f32>> = takes
         .iter()
         .map(|take| match take.spoken() {
