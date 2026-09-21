@@ -101,6 +101,19 @@ pub trait TurnApi: Send + Sync + 'static {
     /// saying where speech was cut off rather than the transcript recording it: see
     /// [`crate::session::Interruption`]. An upstream issue asks for a delivery point.
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()>;
+
+    /// The agents on this account, so a session can be created against one.
+    ///
+    /// **Its ordering is not documented upstream.** `list_projects` promises "the default
+    /// first, then the rest oldest-first" and this one promises nothing, so a caller that took
+    /// the first would be relying on an order nobody offered. See [`Feed::choose_agent`].
+    async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>>;
+
+    /// Create a session against an agent, and answer its id.
+    ///
+    /// No title: Attacca names a session from its first message, and a title given at creation
+    /// is permanent and suppresses that. No project: the default one is made on demand.
+    async fn create_session(&self, agent_id: String) -> zyris::Result<String>;
 }
 
 #[zyris::async_trait]
@@ -121,6 +134,32 @@ impl TurnApi for AttaccaApiClient {
 
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()> {
         AttaccaApi::cancel_turn(self, session_id).await
+    }
+
+    async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>> {
+        // Reduced to (id, name) at the seam rather than carried whole: those are the two
+        // things this crate has any use for — one to create with and one to name in a
+        // sentence a person reads — and a double that had to build a `ZAgent` would be
+        // agreeing with a shape nothing here depends on.
+        Ok(AttaccaApi::list_agents(self)
+            .await?
+            .into_iter()
+            .map(|agent| (agent.id, agent.name))
+            .collect())
+    }
+
+    async fn create_session(&self, agent_id: String) -> zyris::Result<String> {
+        let session = AttaccaApi::create_session_with(
+            self,
+            zyris_attacca::ZNewSession {
+                agent_id,
+                title: None,
+                project_id: None,
+                preamble: None,
+            },
+        )
+        .await?;
+        Ok(session.id)
     }
 }
 
@@ -159,9 +198,19 @@ pub enum TurnEvent {
 /// **One session, created once and reused** — there is no screen for choosing one, so the id is
 /// given at construction and never changes.
 pub struct Feed {
-    session_id: String,
+    /// The session this feed is for. **`None` until one exists**, which is the ordinary state of
+    /// a fresh install: the spec's loop begins *get a session*, and nothing had ever done that.
+    session_id: Mutex<Option<String>>,
+    /// Which agent to create against, when the account has more than one. Read from settings.
+    agent: Option<String>,
     events: broadcast::Sender<TurnEvent>,
     state: Mutex<State>,
+    /// The agents this account has, recorded when they are the reason no session was made.
+    ///
+    /// **Only then.** A screen showing a list of agents on a machine that simply has not
+    /// connected yet would be answering a question nobody asked; this is set when the answer
+    /// is *your account has none* or *your account has several and I will not choose*.
+    agent_trouble: Mutex<Option<Vec<String>>>,
 }
 
 /// Everything about the feed that a reconnect replaces, under one lock so that a generation and
@@ -181,16 +230,41 @@ struct State {
 impl Feed {
     /// A feed for one session, with nothing attached to it yet.
     pub fn new(session_id: impl Into<String>) -> Arc<Feed> {
+        Feed::build(Some(session_id.into()), None)
+    }
+
+    /// A feed with no session yet: it makes one on the first connection that offers an agent.
+    ///
+    /// `agent` names which, for an account with more than one.
+    ///
+    /// **Whoever wants to write the id down asks for it**, rather than being told through a
+    /// channel. A channel meant a task waiting on it, and the only place to start one was
+    /// `Engine::new` — a synchronous constructor, called before there is a runtime. The id is
+    /// state, [`Feed::session_id`] answers it, and `on_connect` is already async and already
+    /// the moment it can have changed.
+    pub fn making_one(agent: Option<String>) -> Arc<Feed> {
+        Feed::build(None, agent)
+    }
+
+    fn build(session_id: Option<String>, agent: Option<String>) -> Arc<Feed> {
         Arc::new(Feed {
-            session_id: session_id.into(),
+            session_id: Mutex::new(session_id),
+            agent,
             events: broadcast::channel(EVENT_CAPACITY).0,
             state: Mutex::new(State { api: None, generation: 0, live: false, cursor: None }),
+            agent_trouble: Mutex::new(None),
         })
     }
 
-    /// The session this feed is for.
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    /// The session this feed is for, once there is one.
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id.lock().expect("the session id is not poisoned").clone()
+    }
+
+    /// The agents on the account, when they are why there is no session. `None` means the
+    /// question has not arisen — nothing has connected yet, or a session already exists.
+    pub fn agent_trouble(&self) -> Option<Vec<String>> {
+        self.agent_trouble.lock().expect("not poisoned").clone()
     }
 
     /// A new subscription to what the turn is producing. Each caller gets its own.
@@ -258,6 +332,13 @@ impl Feed {
             state.generation
         };
 
+        // **In front of the subscription, and only once.** The ordering rule this module is
+        // built on is that sending is only reachable through a feed that is already listening;
+        // a session that does not exist yet has to be made before there is anything to listen
+        // to, so it goes here rather than beside the first message.
+        if self.session_id().is_none() && !self.make_a_session(api.as_ref()).await {
+            return;
+        }
         let Some(items) = self.open(api.as_ref(), generation).await else { return };
         let feed = self.clone();
         tokio::spawn(async move { feed.run(api, generation, items).await });
@@ -285,7 +366,13 @@ impl Feed {
             // Unreachable: `live` is only ever set with a client in the same lock.
             return Err(WireError::new(ErrorCode::ConnectionLost, "no connection"));
         };
-        api.send_message(self.session_id.clone(), message.into()).await
+        let Some(session) = self.session_id() else {
+            // Unreachable while `live`: nothing subscribes without a session. Refused rather
+            // than unwrapped, because the cost of being wrong is a panic inside an audio
+            // session and the cost of being right is one branch.
+            return Err(WireError::new(ErrorCode::ConnectionLost, "there is no session"));
+        };
+        api.send_message(session, message.into()).await
     }
 
     /// Stop the turn that is running.
@@ -304,7 +391,82 @@ impl Feed {
                 "this node is not connected, so there is no turn it can stop",
             ));
         };
-        api.cancel_turn(self.session_id.clone()).await
+        let Some(session) = self.session_id() else {
+            return Err(WireError::new(
+                ErrorCode::ConnectionLost,
+                "there is no session, so there is no turn to stop",
+            ));
+        };
+        api.cancel_turn(session).await
+    }
+
+    /// Make a session on this connection. `false` means there is still none.
+    ///
+    /// Whatever goes wrong here is logged and not published: a feed with no session publishes
+    /// nothing either way, and the Voice screen is where a person is told — it reads the same
+    /// settings and asks the same question, before anybody has spoken.
+    async fn make_a_session(self: &Arc<Self>, api: &dyn TurnApi) -> bool {
+        let agents = match api.list_agents().await {
+            Ok(agents) => agents,
+            Err(error) => {
+                tracing::warn!(%error, "could not read this account's agents, so no session \
+                     was created; the next connection tries again");
+                return false;
+            }
+        };
+        let Some(agent) = Feed::choose_agent(&agents, self.agent.as_deref()) else {
+            *self.agent_trouble.lock().expect("not poisoned") =
+                Some(agents.into_iter().map(|(_, name)| name).collect());
+            return false;
+        };
+        *self.agent_trouble.lock().expect("not poisoned") = None;
+        let id = match api.create_session(agent).await {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%error, "could not create a session");
+                return false;
+            }
+        };
+        tracing::info!(session = %id, "created a session for the voice");
+        *self.session_id.lock().expect("the session id is not poisoned") = Some(id);
+        true
+    }
+
+    /// Which agent to create against.
+    ///
+    /// **One agent is not a choice, and several is.** `list_agents` does not document its
+    /// order — `list_projects` promises "the default first, then the rest oldest-first" and
+    /// this one promises nothing — so taking the first would be relying on an order nobody
+    /// offered, and would quietly change which agent this machine talks to the day somebody
+    /// adds one. The same reading `announce.rs` gives about controls that cannot work: an
+    /// arbitrary answer is worse than none, because nobody can tell it from a considered one.
+    fn choose_agent(agents: &[(String, String)], named: Option<&str>) -> Option<String> {
+        if let Some(named) = named {
+            let found = agents.iter().find(|(id, name)| id == named || name == named);
+            if found.is_none() {
+                tracing::warn!(
+                    agent = named,
+                    "the agent named in the voice settings is not on this account"
+                );
+            }
+            return found.map(|(id, _)| id.clone());
+        }
+        match agents {
+            [] => {
+                tracing::warn!("this account has no agent, so no session can be created");
+                None
+            }
+            [(id, _)] => Some(id.clone()),
+            several => {
+                tracing::warn!(
+                    agents = several.len(),
+                    names = several.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", "),
+                    "this account has more than one agent, so Zyris will not choose; name one \
+                     in the voice settings"
+                );
+                None
+            }
+        }
     }
 
     /// Open one subscription, and hand back its items. `None` means give up on this generation.
@@ -314,7 +476,11 @@ impl Feed {
         generation: u64,
     ) -> Option<zyris::ItemStream<ZTurnFrame>> {
         let after = self.state.lock().expect("the feed state is not poisoned").cursor;
-        let streaming = match api.turn_events(self.session_id.clone(), after).await {
+        let Some(session) = self.session_id() else {
+            // `attach` makes one before it gets here, so this is the case where it could not.
+            return None;
+        };
+        let streaming = match api.turn_events(session, after).await {
             Ok(streaming) => streaming,
             Err(error) => {
                 tracing::warn!(%error, "could not subscribe to this session's turns");
@@ -555,6 +721,8 @@ mod tests {
         Subscribe { after: Option<i64> },
         Send { message: String },
         Cancel,
+        Agents,
+        Create { agent: String },
     }
 
     #[derive(Default)]
@@ -569,6 +737,10 @@ mod tests {
         senders: Vec<Option<mpsc::UnboundedSender<zyris::Result<ZTurnFrame>>>>,
         /// Refuse the next `turn_events` outright.
         refuse_subscribe: bool,
+        /// What `list_agents` answers. Empty by default, which is an account with none.
+        agents: Vec<(String, String)>,
+        /// What `create_session` answers with.
+        made: Option<String>,
     }
 
     /// A stand-in for Attacca.
@@ -594,6 +766,13 @@ mod tests {
 
         fn subscriptions(&self) -> usize {
             self.script.lock().unwrap().senders.len()
+        }
+
+        /// What this account's agents are.
+        pub(super) fn with_agents(self: &Arc<Self>, agents: &[(&str, &str)]) -> Arc<Fake> {
+            self.script.lock().unwrap().agents =
+                agents.iter().map(|(id, name)| (id.to_string(), name.to_string())).collect();
+            self.clone()
         }
 
         fn head(self: &Arc<Self>, head: ZTurnStatus) -> Arc<Self> {
@@ -626,6 +805,18 @@ mod tests {
 
     #[zyris::async_trait]
     impl TurnApi for Fake {
+        async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>> {
+            let mut script = self.script.lock().unwrap();
+            script.calls.push(Call::Agents);
+            Ok(script.agents.clone())
+        }
+
+        async fn create_session(&self, agent_id: String) -> zyris::Result<String> {
+            let mut script = self.script.lock().unwrap();
+            script.calls.push(Call::Create { agent: agent_id });
+            Ok(script.made.clone().unwrap_or_else(|| "made-1".to_string()))
+        }
+
         async fn turn_events(
             &self,
             _session_id: String,
@@ -1067,5 +1258,120 @@ mod stopping_a_turn {
         let refused = feed.cancel().await.expect_err("there is no connection");
 
         assert_eq!(refused.code, ErrorCode::ConnectionLost);
+    }
+    // -----------------------------------------------------------------------------------------
+    // Making a session
+    // -----------------------------------------------------------------------------------------
+
+    /// **A fresh install has no session and nothing ever made one.** The spec's loop starts
+    /// *get a session*; until this, the id had to be hand-written into `voice.json` and a
+    /// person who installed Zyris had a speaking half that did nothing until they did.
+    #[tokio::test]
+    async fn a_feed_with_no_session_makes_one_before_it_subscribes() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
+        let feed = Feed::making_one(None);
+
+        feed.attach(api.clone()).await;
+
+        // The order is the assertion, not a timing: creating after subscribing would subscribe
+        // to nothing, and creating after the first message would lose its answer.
+        assert_eq!(
+            api.calls(),
+            vec![
+                Call::Agents,
+                Call::Create { agent: "agent-1".into() },
+                Call::Subscribe { after: None },
+            ]
+        );
+        assert_eq!(feed.session_id(), Some("made-1".to_string()));
+        // The id is state on the feed rather than something announced; `Engine::on_connect`
+        // reads it and writes it down.
+    }
+
+    /// **Once, not once per connection.** A node that made a session on every reconnect would
+    /// fill the account and lose the conversation every time the network moved — the same
+    /// failure `zyris-runtime`'s "reuse the node token" trap describes, one layer up.
+    #[tokio::test]
+    async fn a_reconnection_does_not_make_a_second_session() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
+        let feed = Feed::making_one(None);
+
+        feed.attach(api.clone()).await;
+        feed.attach(api.clone()).await;
+
+        let made = api.calls().iter().filter(|c| matches!(c, Call::Create { .. })).count();
+        assert_eq!(made, 1, "a reconnection made another session: {:?}", api.calls());
+    }
+
+    /// A session named in the settings is used as it stands. Nothing is created and the
+    /// account's agents are not even read.
+    #[tokio::test]
+    async fn a_session_that_was_given_is_not_replaced() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
+        let feed = Feed::new("session-1");
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(api.calls(), vec![Call::Subscribe { after: None }]);
+        assert_eq!(feed.session_id(), Some("session-1".to_string()));
+    }
+
+    /// **An account with no agent gets no session, and nothing is guessed.** There is nothing
+    /// to create against; creating an agent would be this program making something on somebody
+    /// else's account because it wanted a place to talk.
+    #[tokio::test]
+    async fn an_account_with_no_agent_gets_no_session() {
+        let api = Fake::new();
+        let feed = Feed::making_one(None);
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(api.calls(), vec![Call::Agents]);
+        assert_eq!(feed.session_id(), None);
+    }
+
+    /// **Several agents is a choice and Zyris does not make it.** `list_agents` does not
+    /// document its order, so taking the first would rely on an order nobody offered — and
+    /// would quietly change which agent this machine talks to the day somebody adds one.
+    #[tokio::test]
+    async fn several_agents_and_none_named_is_refused_rather_than_guessed() {
+        let api = Fake::new().with_agents(&[("a", "Ada"), ("b", "Grace")]);
+        let feed = Feed::making_one(None);
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(api.calls(), vec![Call::Agents]);
+        assert_eq!(feed.session_id(), None);
+    }
+
+    /// And naming one settles it. By id or by name: a person reads names and a settings file
+    /// holds whatever they typed.
+    #[tokio::test]
+    async fn naming_an_agent_settles_which() {
+        for named in ["b", "Grace"] {
+            let api = Fake::new().with_agents(&[("a", "Ada"), ("b", "Grace")]);
+            let feed = Feed::making_one(Some(named.to_string()));
+
+            feed.attach(api.clone()).await;
+
+            assert!(
+                api.calls().contains(&Call::Create { agent: "b".into() }),
+                "{named} did not settle it: {:?}",
+                api.calls()
+            );
+        }
+    }
+
+    /// An agent named that is not there is refused rather than falling back to a different
+    /// one. Somebody who named an agent meant that agent.
+    #[tokio::test]
+    async fn an_agent_that_is_not_there_is_not_replaced_by_another() {
+        let api = Fake::new().with_agents(&[("a", "Ada")]);
+        let feed = Feed::making_one(Some("Grace".to_string()));
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(api.calls(), vec![Call::Agents]);
+        assert_eq!(feed.session_id(), None);
     }
 }

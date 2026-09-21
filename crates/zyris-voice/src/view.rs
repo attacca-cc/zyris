@@ -201,10 +201,18 @@ pub enum SpeakingState {
     /// The audio stack is not in this build, or this machine cannot do speech at all.
     #[serde(rename_all = "camelCase")]
     NotHere { reason: String },
-    /// No Attacca session is named, so nothing is ever read aloud. `settings` is the file to put
-    /// one in; there is no control for it here, and the screen says so rather than implying one.
+    /// There is no session **yet**. One is made on the first connection, so this is *not yet*
+    /// rather than *not going to*: the screen says which, because a person looking at a
+    /// machine that has not connected has nothing to do and a person whose account has no
+    /// agent does.
     #[serde(rename_all = "camelCase")]
-    NoSession { settings: String },
+    NoSessionYet,
+    /// There is no session and the account's agents are why. Either none — nothing to create
+    /// against — or several, which is a choice Zyris does not make: `list_agents` does not
+    /// document its order, so picking the first would quietly change which agent this machine
+    /// talks to the day somebody adds one. `settings` is where to name one.
+    #[serde(rename_all = "camelCase")]
+    NoAgent { agents: Vec<String>, settings: String },
     /// Answers from this session are read aloud as they arrive.
     #[serde(rename_all = "camelCase")]
     Session { id: String },

@@ -84,7 +84,11 @@ type WakeView = {
 // would leave somebody wondering why it is silent.
 type Speaking =
   | { state: "notHere"; reason: string }
-  | { state: "noSession"; settings: string }
+  // Not yet, rather than not going to: a session is made on the first connection.
+  | { state: "noSessionYet" }
+  // The account's agents are why there is none — either no agent to create against, or
+  // several, which is a choice Zyris does not make.
+  | { state: "noAgent"; agents: string[]; settings: string }
   | { state: "session"; id: string };
 
 // `zyris_voice::view::VoiceModelView`. A card of its own rather than two more arms on
@@ -451,17 +455,38 @@ export function Voice() {
         )}
 
 
-        {voice.speaking.state === "noSession" && (
+        {voice.speaking.state === "noSessionYet" && (
+          <p>
+            Nothing is read aloud yet. A session is made the first time this computer connects
+            to Attacca, and then answers from it are read out here.
+          </p>
+        )}
+
+        {voice.speaking.state === "noAgent" && (
           <>
-            <p>
-              Nothing is read aloud. This computer hears you, writes down what you said and hands
-              it on &mdash; it just has no Attacca session to answer from.
-            </p>
-            <p className="note">
-              There is no control for that here yet. Put a session id in{" "}
-              <span className="mono">{voice.speaking.settings}</span> under{" "}
-              <span className="mono">session</span> and restart Zyris.
-            </p>
+            {voice.speaking.agents.length === 0 ? (
+              <p>
+                Nothing is read aloud. A session belongs to an agent and this account has none,
+                so there is nothing to create one against. Make an agent in Attacca and restart
+                Zyris.
+              </p>
+            ) : (
+              <>
+                <p>
+                  Nothing is read aloud. This account has{" "}
+                  {voice.speaking.agents.length} agents &mdash;{" "}
+                  {voice.speaking.agents.join(", ")} &mdash; and Zyris will not choose for you.
+                </p>
+                {/* Not arbitrary-but-convenient: list_agents does not promise an order, so
+                    taking the first would change which agent this machine talks to the day
+                    somebody adds one. */}
+                <p className="note">
+                  Put one of those names in{" "}
+                  <span className="mono">{voice.speaking.settings}</span> under{" "}
+                  <span className="mono">agent</span> and restart Zyris.
+                </p>
+              </>
+            )}
           </>
         )}
 

@@ -27,6 +27,7 @@ import { Voice, type VoiceScreen } from "./Voice";
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
 const TAKES = "/home/ada/.local/share/zyris/wake-word";
 const VOICE = "/home/ada/.cache/zyris/models/supertonic-3";
+const SETTINGS = "/home/ada/.local/share/zyris/voice.json";
 
 // The real shape, not a loose record. A field added to `VoiceView` in Rust and mirrored in
 // `Voice.tsx` is then a compile error here until the fixture carries it, which is the only thing
@@ -500,21 +501,44 @@ describe("Voice", () => {
   it("tells a reader a machine that hears and cannot answer apart from one that can", async () => {
     // The two halves fail apart, and only this says which half is missing. A machine with no
     // session listens, transcribes and publishes exactly as before and never says a word.
-    answers(machine({ speaking: { state: "noSession", settings: "/home/you/.local/share/zyris/voice.json" } }));
+    answers(machine({ speaking: { state: "noSessionYet" } }));
     render(<Voice />);
-    expect(await screen.findByText(/nothing is read aloud/i)).toBeTruthy();
+    expect(await screen.findByText(/nothing is read aloud yet/i)).toBeTruthy();
 
-    // It names the file and the field, because there is no control here that would do it.
-    const page = document.body.textContent ?? "";
-    expect(page).toContain("/home/you/.local/share/zyris/voice.json");
-    expect(page).toMatch(/session/);
-    expect(page).toMatch(/no control for that here/i);
+    // **Not yet, rather than not going to.** A session is made on the first connection, so a
+    // person looking at this has nothing to do — and telling them to edit a file, which is
+    // what this said before sessions created themselves, would be work that undoes itself.
+    expect(document.body.textContent ?? "").toMatch(/first time this computer connects/i);
 
     cleanup();
     answers(machine({ speaking: { state: "session", id: "sess-42" } }));
     render(<Voice />);
     expect(await screen.findByText(/read aloud/i)).toBeTruthy();
     expect(document.body.textContent ?? "").toContain("sess-42");
+  });
+
+  it("tells an account with no agent apart from one with several", async () => {
+    // A session belongs to an agent, and the two ways that can fail need different things
+    // done about them: make an agent, or name one. Collapsing them would send half the
+    // people who hit this to the wrong place.
+    answers(machine({ speaking: { state: "noAgent", agents: [], settings: SETTINGS } }));
+    render(<Voice />);
+    await screen.findByText(/nothing is read aloud/i);
+    expect(document.body.textContent ?? "").toMatch(/this account has none/i);
+    expect(document.body.textContent ?? "").not.toMatch(/will not choose/i);
+
+    cleanup();
+    answers(
+      machine({ speaking: { state: "noAgent", agents: ["Ada", "Grace"], settings: SETTINGS } }),
+    );
+    render(<Voice />);
+    await screen.findByText(/nothing is read aloud/i);
+    const page = document.body.textContent ?? "";
+    expect(page).toMatch(/will not choose/i);
+    expect(page).toContain("Ada, Grace");
+    // And it says where to say which, because that is the one thing to do about it.
+    expect(page).toContain(SETTINGS);
+    expect(page).toMatch(/agent/);
   });
 
   it("does not claim the agent's own record is cut short, and does not promise smooth speech", async () => {

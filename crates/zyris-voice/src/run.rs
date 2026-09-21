@@ -70,6 +70,14 @@ pub struct Settings {
     /// reaches whatever is watching the event stream, and the only thing missing is the half
     /// that speaks. Task 6 owns the screen that fills it in.
     pub session: Option<String>,
+    /// Which agent a session is created against, on an account with more than one.
+    ///
+    /// **Only ever needed when there is a choice.** One agent is not a choice and is taken; a
+    /// person with several is asked, because `list_agents` does not document its order and
+    /// picking the first would quietly change which agent this machine talks to the day
+    /// somebody adds one. By id or by name, whichever they have to hand.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 /// What the settings file is called, inside the instance's data directory.
@@ -131,13 +139,19 @@ impl Engine {
         let settings_path = dir.map(|dir| dir.join(SETTINGS_FILE));
         let settings = settings_path.as_deref().map(read_settings).unwrap_or_default();
 
-        let feed = settings.session.as_deref().map(Feed::new);
+        // **A feed either way now.** Before this, no session in the settings meant no feed at
+        // all and a machine that could hear and never answer; the spec's loop begins *get a
+        // session* and nothing had ever done that, so the id had to be typed into a file.
+        let feed = match settings.session.as_deref() {
+            Some(session) => Feed::new(session),
+            None => Feed::making_one(settings.agent.clone()),
+        };
         Engine {
             settings_path,
             events,
             traces: broadcast::channel(TRACE_CAPACITY).0,
             keys: broadcast::channel(KEY_CAPACITY).0,
-            feed,
+            feed: Some(feed),
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
         }
     }
@@ -148,12 +162,43 @@ impl Engine {
     /// to the microphone switch: `turn_events` with `after: None` replays nothing, so a feed that
     /// waited for somebody to turn listening on would miss every delta written before they did.
     pub async fn on_connect(&self, connection: zyris::Connection) {
-        match &self.feed {
-            Some(feed) => feed.on_connect(connection).await,
-            None => tracing::info!(
-                "no Attacca session is configured for the voice, so nothing is read aloud; set \
-                 `session` in {SETTINGS_FILE}"
+        let Some(feed) = &self.feed else { return };
+        feed.on_connect(connection).await;
+        self.remember_the_session(feed).await;
+    }
+
+    /// Write down a session the feed made, if it made one.
+    ///
+    /// **A session created and forgotten is a new one on every launch**, which fills the
+    /// account and loses the conversation each time — `zyris-runtime`'s "reuse the node token"
+    /// trap, one layer up.
+    ///
+    /// Here rather than in a task started by `Engine::new`, which is where it was first
+    /// written: `new` is synchronous and is called before there is a runtime, so the `spawn`
+    /// panicked with *there is no reactor running*. This is async, it is already the moment
+    /// the id can have changed, and it needs no channel.
+    async fn remember_the_session(&self, feed: &Feed) {
+        let Some(session) = feed.session_id() else { return };
+        let Some(path) = self.settings_path.clone() else { return };
+        {
+            let mut live = self.live.lock().await;
+            if live.settings.session.as_deref() == Some(session.as_str()) {
+                return;
+            }
+            live.settings.session = Some(session.clone());
+        }
+        // Written from the settings this engine holds, which are the current ones: the switch
+        // and the device may have moved since the file was read, and writing a value captured
+        // earlier would put them back.
+        let settings = self.live.lock().await.settings.clone();
+        match tokio::task::spawn_blocking(move || write_settings(&path, &settings)).await {
+            Ok(Ok(())) => tracing::info!(%session, "remembered the session"),
+            Ok(Err(error)) => tracing::warn!(
+                %error,
+                %session,
+                "the session could not be written down, so the next launch makes another"
             ),
+            Err(_) => tracing::warn!(%session, "writing the session down did not finish"),
         }
     }
 
@@ -214,12 +259,18 @@ impl Engine {
                 Some(id) => SpeakingState::Session { id },
                 // Not a failure, and not silence without a reason: the file is named so a
                 // person can put an id in it, and there is no control here that would.
-                None => SpeakingState::NoSession {
-                    settings: match &self.settings_path {
+                // Three answers where there was one, because they send a person to three
+                // different places: wait, add an agent, or name one.
+                None => {
+                    let settings = match &self.settings_path {
                         Some(path) => show(path),
                         None => SETTINGS_FILE.to_string(),
-                    },
-                },
+                    };
+                    match self.feed.as_ref().and_then(|feed| feed.agent_trouble()) {
+                        Some(agents) => SpeakingState::NoAgent { agents, settings },
+                        None => SpeakingState::NoSessionYet,
+                    }
+                }
             },
             wake: wake_view(),
             voice_model: voice_model_view(crate::tts::state()),
@@ -1040,7 +1091,7 @@ mod tests {
     fn nothing_listens_until_somebody_says_so() {
         assert_eq!(
             Settings::default(),
-            Settings { listen: false, device: Choice::Default, session: None }
+            Settings { listen: false, device: Choice::Default, session: None, agent: None }
         );
 
         let engine = Engine::new(None, broadcast::channel(4).0);
@@ -1422,14 +1473,15 @@ mod the_delay_watch {
     /// The setting a session id comes from, and the default that means a machine which listens
     /// and does not answer.
     #[test]
-    fn a_machine_with_no_session_named_has_no_feed_to_read_aloud_from() {
+    fn a_machine_with_no_session_named_gets_a_feed_that_will_make_one() {
         let (events, _) = broadcast::channel(4);
         let engine = Engine::new(None, events);
 
-        assert!(
-            engine.feed.is_none(),
-            "there is no screen for choosing a session yet, so an absent one has to be an \
-             ordinary state rather than a failure"
+        let feed = engine.feed.as_ref().expect("a feed that will make a session");
+        assert_eq!(
+            feed.session_id(),
+            None,
+            "a session that does not exist yet must not be named before it does"
         );
     }
 
@@ -1448,7 +1500,7 @@ mod the_delay_watch {
         let engine = Engine::new(Some(&dir), events);
 
         assert_eq!(
-            engine.feed.as_ref().map(|feed| feed.session_id().to_string()),
+            engine.feed.as_ref().and_then(|feed| feed.session_id()),
             Some("s-123".to_string())
         );
         let _ = std::fs::remove_dir_all(&dir);
