@@ -455,10 +455,12 @@ actually goes through it.
 
 ## Install
 
-Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the
-downloads are on the [releases page](https://github.com/attacca-cc/zyris/releases): a
-`Zyris_<version>_amd64.deb` for Debian and Ubuntu, a `Zyris_<version>_x64-setup.exe` for
-Windows. **Nothing is tagged yet** — see Status below for what is still being written.
+Every `v*` tag builds the installers and attaches them to a release, so the downloads are on the
+[releases page](https://github.com/attacca-cc/zyris/releases): a `Zyris_<version>_amd64.deb` for
+Debian and Ubuntu, built on this project's own `arc-vivace` runner, and a
+`Zyris_<version>_x64-setup.exe` for Windows, built on GitHub's Windows runner — an NSIS installer
+can only be bundled on Windows. **Nothing is tagged yet** — see Status below for what is still
+being written.
 
 **These need a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on anything
 older Zyris will not start at all.** Not the speech alone: the transcription engine is compiled

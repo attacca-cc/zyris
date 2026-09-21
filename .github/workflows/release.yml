@@ -35,21 +35,33 @@ permissions:
 
 jobs:
   bundle:
-    name: bundle (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: bundle (${{ matrix.label }})
+    # The Linux bundle builds on `arc-vivace`, this org's own Actions Runner Controller pool, not
+    # on `ubuntu-latest`. The Windows bundle cannot follow it: an NSIS installer is produced by
+    # Windows tooling and nowhere else, and this org has no Windows runner of its own — so the
+    # `.exe` stays on `windows-latest` and the matrix says which is which rather than pretending
+    # the two legs are interchangeable.
+    #
+    # **arc-vivace is the published `actions-runner` image and nothing else**: no Rust, no Node, no
+    # C toolchain, none of the GTK/WebKit development packages. Every one of those is installed by
+    # this job below — on `ubuntu-latest` several came with the image, which is why the steps that
+    # used to lean on that are spelled out here.
+    runs-on: ${{ matrix.runner }}
     strategy:
       # One platform failing says nothing about the other, and both are wanted.
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runner: arc-vivace
+            label: Linux
             artifact: zyris-deb
             # Speech, and the echo canceller with it. `aec` implies `voice`; it is spelled out
             # so a reader of this file can see both without opening a manifest.
             features: voice,aec
             # The filenames carry the version and the architecture, so glob rather than guess.
             bundles: target/release/bundle/deb/*.deb
-          - os: windows-latest
+          - runner: windows-latest
+            label: Windows
             artifact: zyris-nsis
             # No `aec`: `webrtc-audio-processing` has no supported Windows build upstream. The
             # canceller Windows gets is `win_aec.rs`, the DSP that ships with the OS, which is
@@ -91,6 +103,9 @@ jobs:
       # `bindgen` and the runner ships clang without the `.so`, and `meson`/`ninja-build` because
       # the echo canceller is vendored — no Debian or Ubuntu ships `webrtc-audio-processing` 2.x,
       # so there is no system copy to link against and a `.deb` could not name one.
+      #
+      # On arc-vivace none of this is a no-op: the ARC runner image carries no GTK, no WebKit and
+      # no `pkg-config`, and every one of these is a download it does on each run.
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
@@ -117,19 +132,35 @@ jobs:
             meson \
             ninja-build
 
-      - uses: pnpm/action-setup@v4
-
+      # **Node comes first on arc-vivace, and this order matters.** The ARC runner image ships no
+      # Node at all, and `pnpm/action-setup` needs one on `PATH` to install pnpm into (its
+      # `standalone` mode is for the case where there is none at all). `setup-node` installs a
+      # Node distribution of its own, so it works on a runner that has nothing.
+      #
+      # That rules out `setup-node`'s `cache: pnpm`, which resolves the store directory by running
+      # `pnpm store path` — pnpm has to exist by then. `pnpm/action-setup` caches the same store
+      # under the same lockfile, so the cache is not lost, it just moved to the action that knows
+      # pnpm is installed.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
+
+      - uses: pnpm/action-setup@v4
+        with:
+          cache: true
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # A release build shares nothing with the debug build `ci.yml` caches, hence its own key.
+      # A release build shares nothing with the debug build `ci.yml` caches, hence its own key —
+      # and the key names the *runner*, not the platform, because the Linux leg's artifacts are
+      # built by arc-vivace now and a cache the hosted runner wrote is not this machine's.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.os }}
+          key: release-${{ matrix.runner }}
+          # The first release on a new runner starts cold: a full Tauri release build with
+          # whisper.cpp and ONNX Runtime in it is long, and it is exactly the run whose cache is
+          # worth keeping when something later in the job fails.
+          cache-on-failure: true
 
       - run: pnpm install --frozen-lockfile
 
@@ -185,7 +216,9 @@ jobs:
     # The tag is the only thing that publishes. A `workflow_dispatch` run never reaches this job,
     # so it cannot create a release — not even a draft one.
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    # Publishing holds no build, so it runs where the Linux bundle ran rather than spending a
+    # hosted minute to download two files and call one action.
+    runs-on: arc-vivace
     permissions:
       contents: write
 
