@@ -79,7 +79,15 @@ jobs:
           set -euo pipefail
           config=crates/zyris-app/tauri.conf.json
           configured=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)
-          if [ "${GITHUB_REF_NAME#v}" != "$configured" ]; then
+          # **The pre-release suffix is release metadata, not a bundle version.** A tag of
+          # v0.0.1-pre-alpha.1 publishes assets stamped 0.0.1, and that is right: the suffix
+          # says how finished the release is, and the installers carry the version of the thing
+          # inside them. Comparing the whole tag refused exactly that, which is how this was
+          # found. What the guard is for is unchanged — a tag claiming one version must not
+          # attach assets stamped another — so the release part is still compared exactly.
+          release=${GITHUB_REF_NAME#v}
+          version=${release%%-*}
+          if [ "$version" != "$configured" ]; then
             echo "tag ${GITHUB_REF_NAME} would publish assets stamped ${configured:-<nothing>}; edit \"version\" in ${config} or retag" >&2
             exit 1
           fi
