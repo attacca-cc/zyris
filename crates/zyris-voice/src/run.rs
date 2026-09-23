@@ -170,8 +170,8 @@ impl Engine {
     /// Write down a session the feed made, if it made one.
     ///
     /// **A session created and forgotten is a new one on every launch**, which fills the
-    /// account and loses the conversation each time — `zyris-runtime`'s "reuse the node token"
-    /// trap, one layer up.
+    /// account and loses the conversation each time — the same trap as a machine that forgot its
+    /// credential and enrolled again, one layer up.
     ///
     /// Here rather than in a task started by `Engine::new`, which is where it was first
     /// written: `new` is synchronous and is called before there is a runtime, so the `spawn`

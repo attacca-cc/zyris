@@ -2,8 +2,8 @@
 //!
 //! Step 1 had single-instance protection in the GUI only, through a Tauri plugin, so `zyris` and
 //! `zyris --headless` could run side by side. That was harmless while nothing was held
-//! exclusively. It is not harmless now: there is one node token, and two processes minting and
-//! storing one would leave the account with a node nobody is using.
+//! exclusively. It is not harmless now: there is one credential, and two processes enrolling and
+//! storing one would leave the account with a credential nobody is using.
 
 use std::fs::File;
 use std::io;
@@ -66,7 +66,7 @@ mod tests {
 
         let second = InstanceLock::acquire_in(dir.path().to_path_buf(), "zyris").unwrap();
 
-        assert!(second.is_none(), "two instances would race over one node token");
+        assert!(second.is_none(), "two instances would race over one credential");
     }
 
     #[test]

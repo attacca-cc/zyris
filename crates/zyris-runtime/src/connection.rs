@@ -10,31 +10,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use zyris::enroll::{EnrollRequest, Progress};
-use zyris::{Account, AccountCredential, Node, NodeKind, NodeSpec, RegisterError, RotateError};
+use zyris::{Credential, Node, NodeKind};
 
 use crate::announcement::LiveCapabilities;
 use crate::event::{CoreEvent, EventBus};
 use crate::identity::Identity;
 
-/// What the account grant asks for.
+/// What the credential is granted, once, at enrollment. A `zc_` never widens afterwards and every
+/// node made with it carries exactly these, so a scope added here reaches a machine only when it
+/// enrols again.
 ///
-/// It must be a superset of [`NODE_SCOPES`] plus `nodes:write`. The server refuses to mint a
-/// node that asks for more than its account holds — `RegisterError::ScopeExceeded`, whose own
-/// documentation says the request is clamped to what the grant covers — so an account narrower
-/// than the node it is minting cannot mint it at all. `nodes:write` is what lets it mint one.
-pub const ACCOUNT_SCOPES: &[&str] = &[
-    "agents:read",
-    "sessions:read",
-    "sessions:write",
-    "events:read",
-    "peers:write",
-    "nodes:write",
-];
-
-/// What the node token carries, which is deliberately less. A static token must never be able to
-/// mint another one, so `nodes:write` stops at the account layer.
-pub const NODE_SCOPES: &[&str] =
+/// `sessions:*` and `events:read` are the voice conversation, `agents:read` is how it picks the
+/// agent to talk to, and `peers:write` is file transfer publishing where this machine is reached.
+pub const SCOPES: &[&str] =
     &["agents:read", "sessions:read", "sessions:write", "events:read", "peers:write"];
+
+/// The program the credential is issued to. Fixed on the credential, and the middle segment of
+/// every path this machine's node gets: `<system>/zyris/desktop`.
+pub const PROGRAM: &str = "zyris";
+
+/// What each connection asks to be called. The system segment already names the machine, so this
+/// names the kind of node rather than repeating it — `laptop/zyris/laptop` is legal, and says the
+/// same word twice. A second copy live at the same path is told `desktop-2`.
+pub const NODE_NAME: &str = "desktop";
 
 /// Work that has to happen again on every connection this node establishes, handed in by
 /// whoever owns the things that need it.
@@ -148,31 +146,25 @@ impl Connector {
     /// connect is still a running program with a window to show, and an `Err` here would take
     /// the whole app down with it.
     pub async fn run(self) {
-        let token = match self.token().await {
-            Some(token) => token,
-            None => return,
-        };
+        let Some(credential) = self.credential().await else { return };
 
-        let DialEnd::Refused(error) = self.dial(token).await else { return };
+        let DialEnd::Refused(error) = self.dial(&credential).await else { return };
 
-        // A refusal `dial` cannot retry its way out of. Recover at most once: discard the dead
-        // token and try again with whatever credential is already on disk, minting a fresh token
-        // with no browser and no person involved when that credential is still good, and falling
-        // all the way back to enrolment only when it is not. A second refusal after that is
-        // treated as final rather than recovered from again — a server that refuses every token
-        // it is handed would otherwise mint a new node on every pass and fill the account, which
-        // is the exact failure the whole token-reuse design exists to prevent.
-        let Some(token) = self.recover_from_dead_token(&error).await else { return };
+        // A refusal `dial` cannot retry its way out of: the credential was revoked, or is not one
+        // this server issued — which is what every machine enrolled before zyris-protocol#43 is
+        // holding. Recover at most once, by discarding it and asking a person to approve this
+        // machine again. A second refusal is final: a server that refuses everything would
+        // otherwise put a fresh code on the screen forever.
+        let Some(credential) = self.recover_from_refused_credential(&error).await else { return };
 
-        if let DialEnd::Refused(error) = self.dial(token).await {
+        if let DialEnd::Refused(error) = self.dial(&credential).await {
             tracing::warn!(
                 %error,
-                "the freshly registered node's token was also refused; giving up rather than \
-                 recovering again"
+                "the credential just issued was also refused; giving up rather than enrolling again"
             );
             self.bus.publish(CoreEvent::Disconnected {
                 reason: format!(
-                    "{error}, even after registering a new node with Attacca; giving up rather \
+                    "{error}, even with a credential Attacca had just issued; giving up rather \
                      than retrying forever"
                 ),
                 retrying: false,
@@ -187,8 +179,7 @@ impl Connector {
     /// link's life *ended*: [`DialEnd::Refused`] for the two `ConnectError` shades no retry can
     /// fix (`Revoked`, `Unauthorized`), [`DialEnd::Stopped`] for everything else, which is
     /// already published by the time this returns.
-    async fn dial(&self, token: zyris::NodeToken) -> DialEnd {
-        let name = zyris::machine_name().unwrap_or_else(|| "zyris".to_string());
+    async fn dial(&self, credential: &Credential) -> DialEnd {
         self.bus.publish(CoreEvent::Connecting);
 
         // **Built through the announcement rather than from a list this function read.** The two
@@ -197,12 +188,12 @@ impl Connector {
         // steps leaves a window in which a change goes into neither node — see
         // [`LiveCapabilities::install`]. This is also what makes the *second* dial announce what
         // is true now rather than what was true at startup: `run` builds a whole new node after
-        // recovering from a dead token, and whatever was enabled, disabled or withdrawn in
-        // between is in the list this reads.
+        // recovering from a refused credential, and whatever was enabled, disabled or withdrawn
+        // in between is in the list this reads.
         //
         // The capabilities are cloned rather than moved, which is what keeps both nodes'
         // `Guarded`s sharing one gate and one log.
-        let node = match self.node(&name).await {
+        let node = match self.node(NODE_NAME).await {
             Ok(node) => node,
             Err(error) => {
                 self.bus.publish(CoreEvent::Disconnected {
@@ -213,13 +204,13 @@ impl Connector {
             }
         };
 
-        let link = match node.connect(&self.server, token.as_str()).await {
+        let link = match node.connect(&self.server, credential.secret()).await {
             Ok(link) => link,
             Err(error) if is_permanent_refusal(&error) => return DialEnd::Refused(error),
             Err(error) => {
                 // A refusal no retry can fix, but not one recovery can do anything about either
                 // — a version mismatch or a missing TLS provider needs a different build, not a
-                // new token. Saying so is more useful than a spinner that never stops, and there
+                // new credential. Saying so is more useful than a spinner that never stops, and there
                 // is no link yet for anything to retry on.
                 self.bus.publish(CoreEvent::Disconnected {
                     reason: error.to_string(),
@@ -265,8 +256,8 @@ impl Connector {
     /// the handle it re-announces through; as two steps there is a window in which a change lands
     /// in neither — see that method. It is also what makes the *second* dial announce what is true
     /// now rather than what was true at startup: `run` builds a whole new node after recovering
-    /// from a dead token, and whatever was enabled, disabled or withdrawn in between is in the list
-    /// this reads.
+    /// from a refused credential, and whatever was enabled, disabled or withdrawn in between is in
+    /// the list this reads.
     ///
     /// The capabilities are cloned rather than moved, which is what keeps both nodes' `Guarded`s
     /// sharing one gate and one log.
@@ -324,10 +315,12 @@ impl Connector {
                 // recovery attempt, must never read a stale `false` and send a person who is
                 // already looking at a working connection to the onboarding screen.
                 ever_connected.store(true, Ordering::Relaxed);
-                bus.publish(CoreEvent::Connected {
-                    node_id: conn.info().node_id.clone(),
-                    node_name,
-                });
+                // The path the server put this node at, which is what a tool call is routed by
+                // and ends in `desktop-2` when another copy already holds `desktop`. The name
+                // asked for is only a fallback, for a server that assigns no address.
+                let node_name =
+                    conn.info().node.as_ref().map(|address| address.path()).unwrap_or(node_name);
+                bus.publish(CoreEvent::Connected { node_id: conn.info().node_id.clone(), node_name });
 
                 let per_connection_work = async {
                     // Spawned rather than awaited in turn: the hooks have nothing to do with
@@ -365,53 +358,30 @@ impl Connector {
         }
     }
 
-    /// Recovers from a node token that Attacca refused outright: discards it, then tries to mint
-    /// a replacement with whatever account credential is already on disk, before ever asking a
-    /// person for anything.
+    /// Recovers from a credential Attacca refused outright: discards it and enrols again, which
+    /// puts the onboarding screen up.
     ///
-    /// The common case is that only the node was removed from Attacca, not the account
-    /// authorized to run nodes on it — that account credential mints a fresh token with no
-    /// browser and no user action at all. Only when the credential itself cannot mint this node
-    /// (see [`credential_cannot_mint_this_node`]: revoked, or its grant too narrow for what a
-    /// node needs) does this fall back to a full enrolment, at which point `credential()` is
-    /// what puts the onboarding screen up. `mint_node_token` makes that same call for whichever
-    /// credential ends up being tried, so it is made in exactly one place.
+    /// Nothing quieter is possible any more. A `zc_` is the whole identity — there is no account
+    /// grant beside it to mint a replacement from — and the refusal means it was revoked or was
+    /// never this server's, neither of which a person can be spared.
     ///
     /// Called at most once per `run()`; see the comment at its one call site for why. Every
     /// failure here goes through `report_setup_failure` rather than publishing `SetupFailed`
     /// directly — this runs just as readily after a connection was already live (a redial
     /// permanently refused) as before one ever came up, and only the latter is what the
     /// onboarding screen is honest about.
-    async fn recover_from_dead_token(&self, error: &zyris::ConnectError) -> Option<zyris::NodeToken> {
-        tracing::warn!(%error, "the stored node token was refused; discarding it and recovering");
+    async fn recover_from_refused_credential(&self, error: &zyris::ConnectError) -> Option<Credential> {
+        tracing::warn!(%error, "the stored credential was refused; discarding it and enrolling again");
 
-        if let Err(error) = self.identity.forget_node_token() {
-            tracing::warn!(%error, "could not discard the dead node token; recovery cannot proceed");
+        if let Err(error) = self.identity.forget() {
+            tracing::warn!(%error, "could not discard the refused credential; recovery cannot proceed");
             self.report_setup_failure(error.to_string());
             return None;
         }
-
-        let stored_credential = match self.identity.load() {
-            Ok(stored) => stored.credential,
-            Err(error) => {
-                tracing::warn!(%error, "could not read stored identity while recovering from a dead node token");
-                self.report_setup_failure(error.to_string());
-                return None;
-            }
-        };
-
-        // With nothing stored to try, go straight to a fresh enrolment; otherwise try the
-        // credential already on disk first. Either way, `mint_node_token` is what discards a
-        // credential that cannot mint this node and falls back to enrolment itself — see its
-        // doc comment — so there is nothing left to special-case here.
-        let credential = match stored_credential {
-            Some(credential) => credential,
-            None => self.credential().await?,
-        };
-        self.mint_node_token(&self.account(credential)).await
+        self.credential().await
     }
 
-    /// Publishes the right event for a failure on the way to a working token: `SetupFailed` when
+    /// Publishes the right event for a failure on the way to a working credential: `SetupFailed` when
     /// no connection has come up yet during this `run()` — the onboarding screen is honest there
     /// — or `Disconnected { retrying: false }` once one has, since a connection having been live
     /// means the person may already be on the status screen, and sending them to onboarding
@@ -426,46 +396,52 @@ impl Connector {
     }
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
-    async fn credential(&self) -> Option<AccountCredential> {
+    async fn credential(&self) -> Option<Credential> {
         // Checked before anything else: if the identity actually lives in a backend this launch
         // cannot reach, `self.identity.load()` below will honestly report nothing stored — and
         // the rest of this method would honestly, wrongly, start a fresh enrolment over it,
-        // minting a second node while the first one's identity sits untouched in the backend
+        // issuing a second credential while the first one sits untouched in the backend
         // this launch cannot see. See `Identity::stranded_in`.
         if let Some(backend) = self.identity.stranded_in() {
             let reason = match backend {
-                crate::secret::Backend::Keychain => "the keychain holding this node's identity \
-                    is not reachable right now; not starting a fresh enrolment, since that would \
-                    register a second node for this machine. Restart once the keychain is \
-                    available again."
+                crate::secret::Backend::Keychain => "the keychain holding this machine's \
+                    credential is not reachable right now; not starting a fresh enrolment, since \
+                    that would issue a second credential for this machine. Restart once the \
+                    keychain is available again."
                     .to_string(),
-                crate::secret::Backend::File => "this node's identity is stored in a local file \
-                    this launch cannot see; not starting a fresh enrolment, since that would \
-                    register a second node for this machine. Restart in the same environment \
-                    this node was set up in."
+                crate::secret::Backend::File => "this machine's credential is stored in a local \
+                    file this launch cannot see; not starting a fresh enrolment, since that would \
+                    issue a second credential for this machine. Restart in the same environment \
+                    this machine was set up in."
                     .to_string(),
             };
             self.report_setup_failure(reason);
             return None;
         }
 
-        let stored = match self.identity.load() {
-            Ok(stored) => stored,
+        match self.identity.load() {
+            Ok(Some(credential)) => {
+                tracing::info!(program = %credential.program.name, system = %credential.system.name, "reusing this machine's credential");
+                return Some(credential);
+            }
+            Ok(None) => {}
             Err(error) => {
-                self.bus.publish(CoreEvent::EnrolmentFailed { reason: error.to_string() });
+                // The secret store itself refusing to answer, which has nothing to do with a
+                // connection going up or down; see `report_setup_failure` for which screen that
+                // belongs on.
+                self.report_setup_failure(error.to_string());
                 return None;
             }
-        };
-        if let Some(credential) = stored.credential {
-            return Some(credential);
         }
 
         self.bus.publish(CoreEvent::NeedsEnrolment);
 
         let request = EnrollRequest {
-            name: zyris::machine_name().unwrap_or_else(|| "zyris".to_string()),
+            program: PROGRAM.to_string(),
+            // Lets the approval screen preselect this machine. A hint, never verified.
+            system_hint: zyris::machine_name().unwrap_or_default(),
             platform: std::env::consts::OS.to_string(),
-            scopes: ACCOUNT_SCOPES.iter().map(|scope| scope.to_string()).collect(),
+            scopes: SCOPES.iter().map(|scope| scope.to_string()).collect(),
         };
         let mut enrollment = match zyris::enroll(&self.server, request).await {
             Ok(enrollment) => enrollment,
@@ -482,7 +458,7 @@ impl Connector {
                 // `poll` keeps the server's own interval, so this loop must not sleep.
                 Ok(Progress::Waiting { .. }) => {}
                 Ok(Progress::Granted(credential)) => {
-                    if let Err(error) = self.identity.save_credential(&credential) {
+                    if let Err(error) = self.identity.save(&credential) {
                         self.bus.publish(CoreEvent::EnrolmentFailed { reason: error.to_string() });
                         return None;
                     }
@@ -516,147 +492,6 @@ impl Connector {
             verification_uri: code.verification_uri.clone(),
         });
     }
-
-    /// The stored node token, if there is one — dialling needs nothing else. A missing or
-    /// unparseable credential is not this actor's problem when a working token is already on
-    /// disk; see `identity.rs`, which documents this exact combination and leaves deciding what
-    /// to do about it to this module. Only when there is no token does a credential — and the
-    /// `Account` built from it — enter the picture at all, to mint one.
-    async fn token(&self) -> Option<zyris::NodeToken> {
-        match self.identity.load() {
-            Ok(stored) => {
-                if let Some(token) = stored.node_token {
-                    tracing::info!("reusing this node's token");
-                    return Some(token);
-                }
-            }
-            Err(error) => {
-                // No link exists yet — this is the secret store itself refusing to answer, which
-                // has nothing to do with a connection going up or down. `report_setup_failure`
-                // publishes `SetupFailed` here, since nothing has connected yet in this `run()`
-                // — see its doc comment for the case where the same failure means something
-                // else.
-                self.report_setup_failure(error.to_string());
-                return None;
-            }
-        }
-
-        let credential = match self.credential().await {
-            Some(credential) => credential,
-            None => return None,
-        };
-
-        self.mint_node_token(&self.account(credential)).await
-    }
-
-    /// Wraps a stored credential in the `Account` handle that can mint node tokens and refreshes
-    /// its own access token — the same wiring `token` and `recover_from_dead_token` both need,
-    /// extracted so the "Ok only after the write lands" rule lives in one place.
-    fn account(&self, credential: AccountCredential) -> Account {
-        let identity = self.identity.clone();
-        Account::restore(&self.server, credential)
-            .on_rotate(move |rotated: AccountCredential| {
-                let identity = identity.clone();
-                async move {
-                    // Ok only after the write lands: a refresh token is single-use, and a crash
-                    // between "used" and "saved" is how a node gets revoked.
-                    identity
-                        .save_credential(&rotated)
-                        .map_err(|error| RotateError(error.to_string()))
-                }
-            })
-            .build()
-    }
-
-    /// Mints a node token against `account` and reports the outcome.
-    ///
-    /// Ordinarily terminal: there is no further recovery to attempt for either caller — `token`,
-    /// on the very first run, or `recover_from_dead_token`'s own fallback. The one exception is a
-    /// credential that cannot mint this node at all ([`credential_cannot_mint_this_node`]):
-    /// revoked, or granted a scope too narrow for what a node asks for. A stored credential
-    /// already in that state, or one a person just granted too narrowly at the approval screen,
-    /// would otherwise dead-end forever — every future launch reads back the same unusable
-    /// credential, and the only way out today is deleting it by hand. So for exactly those
-    /// failures this discards the credential and enrols exactly once more before giving up for
-    /// good. That retry is bounded, not a loop: it cannot itself trigger another one, so this
-    /// still enrols at most a small, fixed number of times per call, never repeatedly.
-    async fn mint_node_token(&self, account: &Account) -> Option<zyris::NodeToken> {
-        match self.register(account).await {
-            Ok(token) => token,
-            Err(error) if credential_cannot_mint_this_node(&error) => {
-                tracing::warn!(
-                    %error,
-                    "the account grant on disk cannot mint this node; discarding it and \
-                     enrolling again"
-                );
-                if let Err(error) = self.identity.forget() {
-                    tracing::warn!(
-                        %error,
-                        "could not discard the unusable credential; recovery cannot proceed"
-                    );
-                    self.report_setup_failure(error.to_string());
-                    return None;
-                }
-                let credential = self.credential().await?;
-                match self.register(&self.account(credential)).await {
-                    Ok(token) => token,
-                    Err(error) => {
-                        self.report_setup_failure(error.to_string());
-                        None
-                    }
-                }
-            }
-            Err(error) => {
-                self.report_setup_failure(error.to_string());
-                None
-            }
-        }
-    }
-
-    /// Mints a node token against `account` and stores it.
-    ///
-    /// Returns the `RegisterError` rather than reporting it, so `mint_node_token` can tell which
-    /// failures mean the credential itself cannot mint this node
-    /// ([`credential_cannot_mint_this_node`]) apart from every other failure, which no amount of
-    /// discarding and re-enrolling can do anything about. `Ok(None)` is the one outcome that
-    /// distinction cannot help with: the mint itself succeeded but the token could not be
-    /// written to disk, which is already reported below and terminal regardless of who called
-    /// this.
-    async fn register(&self, account: &Account) -> Result<Option<zyris::NodeToken>, RegisterError> {
-        let spec = NodeSpec {
-            name: zyris::machine_name().unwrap_or_else(|| "zyris".to_string()),
-            platform: Some(std::env::consts::OS.to_string()),
-            scopes: NODE_SCOPES.iter().map(|scope| scope.to_string()).collect(),
-        };
-        let token = account.register_node(spec).await?;
-        match self.identity.save_node_token(&token) {
-            Ok(()) => {
-                tracing::info!("registered this node");
-                Ok(Some(token))
-            }
-            Err(error) => {
-                // A node now exists in this person's Attacca account and its token has just
-                // been thrown away: nothing on disk remembers it, so the very next launch
-                // calls `register_node` again and mints a second node for the same machine —
-                // silently, unless this is loud about it. The account-integrity constraint
-                // this violates is the whole reason node tokens are read back before minting;
-                // say exactly what happened and what to do about it.
-                tracing::error!(
-                    %error,
-                    node_id = %token.node_id,
-                    "a node was registered with Attacca but its token could not be stored; \
-                     the next launch will register a duplicate node for this machine. Remove \
-                     the orphaned node from this account in Attacca, then restart Zyris."
-                );
-                self.report_setup_failure(format!(
-                    "a node was registered but its token could not be saved ({error}); \
-                     restarting will register a duplicate. Remove the orphaned node in \
-                     Attacca first."
-                ));
-                Ok(None)
-            }
-        }
-    }
 }
 
 /// How [`Connector::dial`] ended.
@@ -664,8 +499,8 @@ enum DialEnd {
     /// The link is down for good and there is nothing more this actor can do — already
     /// published.
     Stopped,
-    /// The link is down for good because of a refusal that discarding the token and trying
-    /// again might fix. Not yet published: the caller decides what to do about it.
+    /// The link is down for good because of a refusal that discarding the credential and
+    /// enrolling again might fix. Not yet published: the caller decides what to do about it.
     Refused(zyris::ConnectError),
 }
 
@@ -675,19 +510,6 @@ enum DialEnd {
 /// recovery must not trigger for them.
 fn is_permanent_refusal(error: &zyris::ConnectError) -> bool {
     matches!(error, zyris::ConnectError::Revoked | zyris::ConnectError::Unauthorized)
-}
-
-/// Whether a registration failure means the credential itself cannot mint this node — a dead
-/// grant chain (`Revoked`), or a grant too narrow for what a node asks for (`ScopeExceeded`, the
-/// server clamping the request to what the account holds, or `Forbidden`, the account never
-/// having `nodes:write` at all) — as opposed to something discarding the credential and
-/// re-enrolling cannot fix either (the server being unreachable). `mint_node_token` discards the
-/// credential and enrols again for exactly these three; every other `RegisterError` is terminal.
-fn credential_cannot_mint_this_node(error: &RegisterError) -> bool {
-    matches!(
-        error,
-        RegisterError::Revoked | RegisterError::ScopeExceeded { .. } | RegisterError::Forbidden
-    )
 }
 
 #[cfg(test)]
@@ -886,24 +708,20 @@ mod tests {
         assert_eq!(first, CoreEvent::NeedsEnrolment);
     }
 
-    /// The combination `identity.rs` documents and this module is the only place that decides
-    /// what to do about: a node token on disk with no credential beside it. Enrolling again would
-    /// send someone to a browser for a node that could dial right now.
+    /// A credential on disk is dialled with directly. Enrolling again would send someone to a
+    /// browser for a machine that could connect right now.
     #[tokio::test]
-    async fn a_stored_node_token_is_dialled_directly_without_a_credential() {
+    async fn a_stored_credential_is_dialled_directly() {
         let dir = tempfile::tempdir().unwrap();
         let identity = crate::identity::Identity::new(
             crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
         );
-        let token: zyris::NodeToken =
-            serde_json::from_str(r#"{"node_id":"n_1","slug":"laptop","token":"znt_abc"}"#)
-                .expect("NodeToken's shape changed; update this fixture");
-        identity.save_node_token(&token).unwrap();
+        identity.save(&a_credential()).unwrap();
         let bus = EventBus::new(16);
         let mut events = bus.subscribe();
 
-        // Same unreachable server as above: what matters is what is published before the token
-        // is even handed to the network.
+        // Same unreachable server as above: what matters is what is published before the
+        // credential is even handed to the network.
         let connector = Connector::new(identity, bus).with_server("wss://127.0.0.1:1/ws".into());
         tokio::spawn(connector.run());
 
@@ -914,32 +732,16 @@ mod tests {
         assert_eq!(
             first,
             CoreEvent::Connecting,
-            "a stored token must be dialled directly, not sent through enrolment first"
+            "a stored credential must be dialled directly, not sent through enrolment first"
         );
     }
 
+    /// `nodes:write` was the account layer's, and it is gone from the protocol. A server that no
+    /// longer knows a scope refuses the whole enrollment naming it (`EnrollError::UnknownScope`),
+    /// so carrying it over would make every new machine fail to enrol.
     #[test]
-    fn the_node_token_is_not_allowed_to_mint_another_token() {
-        assert!(
-            !NODE_SCOPES.contains(&"nodes:write"),
-            "a static node token that can mint node tokens is an escalation"
-        );
-        assert!(ACCOUNT_SCOPES.contains(&"nodes:write"));
-    }
-
-    #[test]
-    fn the_account_grant_covers_everything_a_node_asks_for() {
-        // The server refuses to mint a node that requests more than its account holds, so an
-        // account narrower than NODE_SCOPES cannot register anything at all. This is not
-        // theoretical: the first real enrolment failed with ScopeExceeded because the account
-        // asked for two scopes and the node asked for five.
-        let missing: Vec<_> =
-            NODE_SCOPES.iter().filter(|scope| !ACCOUNT_SCOPES.contains(scope)).collect();
-
-        assert!(
-            missing.is_empty(),
-            "the account grant is missing scopes its own node will ask for: {missing:?}"
-        );
+    fn the_credential_asks_for_no_scope_the_account_layer_had() {
+        assert!(!SCOPES.contains(&"nodes:write"), "{SCOPES:?}");
     }
 
     #[test]
@@ -963,21 +765,6 @@ mod tests {
         assert!(
             !is_permanent_refusal(&zyris::ConnectError::NoTlsProvider),
             "a missing TLS provider is a build problem, not a token problem"
-        );
-    }
-
-    #[test]
-    fn only_a_dead_or_too_narrow_grant_is_treated_as_unusable() {
-        assert!(credential_cannot_mint_this_node(&RegisterError::Revoked));
-        assert!(credential_cannot_mint_this_node(&RegisterError::Forbidden));
-        assert!(credential_cannot_mint_this_node(&RegisterError::ScopeExceeded {
-            requested: vec!["nodes:write".to_string()],
-            granted: vec!["agents:read".to_string()],
-        }));
-
-        assert!(
-            !credential_cannot_mint_this_node(&RegisterError::Unreachable(zyris::TransportError::Closed)),
-            "an unreachable server needs retrying, not a fresh enrolment"
         );
     }
 
@@ -1024,82 +811,34 @@ mod tests {
         );
     }
 
-    fn a_credential() -> AccountCredential {
-        AccountCredential::new(
-            "at_abc".to_string(),
-            "rt_abc".to_string(),
-            "n_1".to_string(),
-            "laptop".to_string(),
-            "person@example.com".to_string(),
-            4_102_444_800,
-        )
+    fn a_credential() -> Credential {
+        crate::identity::tests::a_credential()
     }
 
-    /// Recovery must not skip straight to enrolment when a perfectly good credential is sitting
-    /// on disk — that would send someone to a browser for a node that a stored account could
-    /// re-register on its own. This is checked without a real server: the only network call this
-    /// path makes is the mint itself, and an unreachable server answers that quickly enough to
-    /// prove the credential was tried at all, without needing to prove the mint succeeds.
+    /// A refused credential is dead — revoked, or from before zyris-protocol#43 — so recovery must
+    /// throw it away and ask a person, rather than dial with it again.
     #[tokio::test]
-    async fn recovery_tries_the_stored_credential_before_asking_a_person() {
+    async fn recovery_discards_the_refused_credential_and_asks_for_enrolment() {
         let dir = tempfile::tempdir().unwrap();
         let identity = crate::identity::Identity::new(
             crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
         );
-        identity.save_credential(&a_credential()).unwrap();
+        identity.save(&a_credential()).unwrap();
         let bus = EventBus::new(16);
         let mut events = bus.subscribe();
 
-        let connector = Connector::new(identity.clone(), bus).with_server("wss://127.0.0.1:1/ws".into());
-        let token = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            connector.recover_from_dead_token(&zyris::ConnectError::Revoked),
-        )
-        .await
-        .expect("recovery did not finish within 5s");
-
-        assert!(token.is_none(), "an unreachable server cannot mint anything");
-        let published = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-            .await
-            .expect("recovery published nothing within 5s")
-            .unwrap();
-        assert!(
-            matches!(published, CoreEvent::SetupFailed { .. }),
-            "the credential must be tried — and reported on — before any onboarding event fires, \
-             got {published:?}"
-        );
-        assert_eq!(
-            identity.load().unwrap().credential,
-            Some(a_credential()),
-            "a credential that was merely unreachable, not revoked, must not be discarded"
-        );
-    }
-
-    /// The other half of the same decision: with no credential to fall back on, recovery must go
-    /// straight to enrolment rather than reporting a bare failure and stopping.
-    #[tokio::test]
-    async fn recovery_with_no_credential_goes_straight_to_enrolment() {
-        let dir = tempfile::tempdir().unwrap();
-        let identity = crate::identity::Identity::new(
-            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
-        );
-        let bus = EventBus::new(16);
-        let mut events = bus.subscribe();
-
-        let connector = Connector::new(identity, bus).with_server("wss://127.0.0.1:1/ws".into());
+        let connector =
+            Connector::new(identity.clone(), bus).with_server("wss://127.0.0.1:1/ws".into());
         tokio::spawn(async move {
-            connector.recover_from_dead_token(&zyris::ConnectError::Unauthorized).await;
+            connector.recover_from_refused_credential(&zyris::ConnectError::Unauthorized).await;
         });
 
         let published = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
             .await
             .expect("recovery published nothing within 5s")
             .unwrap();
-        assert_eq!(
-            published,
-            CoreEvent::NeedsEnrolment,
-            "recovery with nothing to fall back on must ask a person, not just give up"
-        );
+        assert_eq!(published, CoreEvent::NeedsEnrolment);
+        assert_eq!(identity.load().unwrap(), None, "the refused credential must be gone");
     }
 
     /// The finding this covers: a credential already living in the keychain must not be
@@ -1176,7 +915,7 @@ mod tests {
             ["terminal", "mcp_notes"]
         );
 
-        // And a second node, the one `run` builds after recovering from a dead token, announces
+        // And a second node, the one `run` builds after recovering from a refused credential, announces
         // what is true *then* rather than what was true when the first one was built.
         assert!(live.remove("mcp_notes").await);
         live.add(Arc::new(Nothing("mcp_calendar"))).await.expect("a name nothing else uses");

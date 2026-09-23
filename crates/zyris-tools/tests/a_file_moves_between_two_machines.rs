@@ -49,7 +49,7 @@ use zyris::{
 };
 use zyris_attacca::{
     AttaccaApi, AttaccaApiServer, ZAgent, ZHistoryQuery, ZJob, ZJobFilter, ZJobUpdate, ZMe,
-    ZNewAgent, ZNewJob, ZNewNode, ZNewProject, ZNewSession, ZNewWork, ZNode, ZPeerAddr, ZPeerEntry,
+    ZNewAgent, ZNewJob, ZNewProject, ZNewSession, ZNewWork, ZPeerAddr, ZPeerEntry,
     ZProject, ZProjectUpdate, ZSession, ZSessionEvent, ZSessionFilter, ZTurnFrame, ZTurnStatus,
     ZUsage, ZWork, ZWorkFilter, ZWorkTasks, ZWorkUpdate,
 };
@@ -614,7 +614,7 @@ impl AttaccaApi for Rendezvous {
             .ok_or_else(|| WireError::internal(format!("this account has no node called {slug}")))?;
         Ok(ZPeerAddr {
             node_id: format!("node-{}", machine.slug),
-            slug: machine.slug.clone(),
+            path: machine.slug.clone(),
             endpoint_id: machine.endpoint_id.clone(),
             addrs: machine.addrs.clone(),
             // The deployment's relay, which there is not one of here: both endpoints are on this
@@ -630,7 +630,7 @@ impl AttaccaApi for Rendezvous {
             .iter()
             .map(|machine| ZPeerEntry {
                 node_id: format!("node-{}", machine.slug),
-                slug: machine.slug.clone(),
+                path: machine.slug.clone(),
                 endpoint_id: machine.endpoint_id.clone(),
                 online: true,
             })
@@ -744,15 +744,6 @@ impl AttaccaApi for Rendezvous {
         _session_id: String,
         _after: Option<i64>,
     ) -> Result<Streaming<ZTurnStatus, ZTurnFrame>> {
-        unused()
-    }
-    async fn register_node(&self, _request: ZNewNode) -> Result<ZNode> {
-        unused()
-    }
-    async fn list_nodes(&self) -> Result<Vec<ZNode>> {
-        unused()
-    }
-    async fn delete_node(&self, _node_id: String) -> Result<()> {
         unused()
     }
 }

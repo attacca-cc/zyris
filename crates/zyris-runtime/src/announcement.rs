@@ -9,8 +9,8 @@
 //!
 //! `Node::capabilities()` exists only after `NodeBuilder::build()`, which happens inside
 //! [`Connector::dial`](crate::connection::Connector::dial) — and `dial` runs **up to twice**: a
-//! node token Attacca refuses outright is discarded, a fresh one minted, and a second node built
-//! and dialled with it. So there can be two nodes in one run, and only the second one is
+//! credential Attacca refuses outright is discarded, a fresh one enrolled, and a second node
+//! built and dialled with it. So there can be two nodes in one run, and only the second one is
 //! connected to anything. A handle stored once, at the first build, would re-announce onto a node
 //! nobody is talking to, and every later change would be accepted and have no effect at all.
 //!
@@ -393,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_node_announces_what_changed_while_the_first_one_was_alive() {
-        // `dial` runs up to twice: a refused node token is discarded and a second node built. A
+        // `dial` runs up to twice: a refused credential is discarded and a second node built. A
         // change made while the first node was up must not be undone by the second one, and a
         // handle kept from the first must not be the one a later change reaches.
         let live = LiveCapabilities::new(vec![Named::new("terminal"), Named::new("mcp_notes")]);

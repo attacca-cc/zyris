@@ -156,8 +156,8 @@ pub fn run(
     // thing still refusing them.
     //
     // What it costs: two `--server` windows are no longer refused by the plugin. They are still
-    // refused by the lock when both point at the same server, which is the case that would mint
-    // two nodes; two runs pointed at *different* servers are two different instances and being
+    // refused by the lock when both point at the same server, which is the case that would
+    // enrol twice; two runs pointed at *different* servers are two different instances and being
     // able to have both is the point.
     //
     // Registered first when it is registered at all: a second launch has to reach the running
@@ -314,9 +314,9 @@ pub fn run(
                 //
                 // `NeedsEnrolment` comes from `connection.rs`'s `credential()`, which runs
                 // before the first dial — and runs again long after one, through
-                // `recover_from_dead_token` → `mint_node_token` → the arm for a credential
-                // that cannot mint this node. So this watcher can and does raise the window
-                // mid-session, hours into a run that was working.
+                // `recover_from_refused_credential`, when a redial finds the credential revoked.
+                // So this watcher can and does raise the window mid-session, hours into a run
+                // that was working.
                 //
                 // **That is the intended behaviour, not an oversight.** Bounding this to the
                 // first dial would leave a short enrolment code — one that expires while
