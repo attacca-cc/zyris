@@ -97,8 +97,8 @@ pub trait TurnApi: Send + Sync + 'static {
     ///
     /// **It takes a session and nothing else.** There is no way to tell the server *where* the
     /// answer stopped being useful, and no `Cancelled` frame comes back — from the stream alone
-    /// a cancel and an ordinary finish are the same thing. That is why barge-in posts a message
-    /// saying where speech was cut off rather than the transcript recording it: see
+    /// a cancel and an ordinary finish are the same thing. That is why barge-in puts a note saying
+    /// where speech was cut off in front of the person's next message: see
     /// [`crate::session::Interruption`]. An upstream issue asks for a delivery point.
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()>;
 
