@@ -34,6 +34,22 @@ pub fn cmake_off(value: Option<&str>) -> bool {
     }
 }
 
+/// Whether a value is CMake's spelling of true. Unset is not: whisper.cpp's default for every
+/// instruction-set option is OFF once `GGML_NATIVE` is, so an absent `GGML_AVX2` builds without it.
+pub fn cmake_on(value: Option<&str>) -> bool {
+    match value {
+        Some(value) => matches!(
+            value.trim().to_ascii_uppercase().as_str(),
+            "ON" | "1" | "TRUE" | "Y" | "YES"
+        ),
+        None => false,
+    }
+}
+
+/// The instruction sets a release must name, since `GGML_NATIVE=OFF` turns every one of them off.
+/// Haswell's, which is the floor the README gives for speech.
+pub const REQUIRED_SIMD: [&str; 5] = ["GGML_AVX", "GGML_AVX2", "GGML_FMA", "GGML_F16C", "GGML_BMI2"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +85,24 @@ mod tests {
         }
         assert!(!cmake_off(Some("ON")), "and true is still true");
         assert!(!cmake_off(None), "an unset GGML_NATIVE is whisper.cpp's default, which is ON");
+    }
+
+    /// An instruction set is compiled in only when it is asked for, so unset must read as absent.
+    #[test]
+    fn only_a_true_value_asks_for_an_instruction_set() {
+        for value in ["ON", "on", "1", "true", "YES", " y "] {
+            assert!(cmake_on(Some(value)), "{value:?} is CMake's true");
+        }
+        for value in ["OFF", "0", "no", ""] {
+            assert!(!cmake_on(Some(value)), "{value:?} is not");
+        }
+        assert!(!cmake_on(None), "unset builds without it once GGML_NATIVE is OFF");
+    }
+
+    /// The floor the README gives for speech is Haswell, and AVX2 is the one whose absence costs
+    /// the tenfold slowdown.
+    #[test]
+    fn a_release_needs_avx2_named() {
+        assert!(REQUIRED_SIMD.contains(&"GGML_AVX2"), "{REQUIRED_SIMD:?}");
     }
 }

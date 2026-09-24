@@ -19,7 +19,7 @@ import { Conversation } from "./Conversation";
 import type { Trace } from "./state";
 
 async function show(steps: Trace[]) {
-  render(<Conversation />);
+  render(<Conversation hidden={false} />);
   await act(async () => {
     await Promise.resolve();
   });
@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe("the Conversation screen", () => {
   it("names both ways into a turn, and why one of them stops while it is talking", async () => {
-    render(<Conversation />);
+    render(<Conversation hidden={false} />);
     await act(async () => {
       await Promise.resolve();
     });
@@ -223,8 +223,49 @@ describe("the Conversation screen", () => {
   it("says the rest was not read aloud after an interruption", async () => {
     const page = await show([...AN_ANSWER, { step: "interrupted", heard: 1, unheard: 2 }]);
     expect(page).toMatch(/not read aloud/i);
-    // And does not claim the agent's record is truncated, which it is not.
-    expect(page).toMatch(/record of the answer is whole/i);
+    // The note goes in front of the next thing said, not into a message of its own.
+    expect(page).toMatch(/what you say next tells the agent where it was cut off/i);
+  });
+
+  it("does not leave a turn writing itself down forever when transcription fails", async () => {
+    const page = await show([
+      { step: "recording", started: true },
+      { step: "recording", started: false },
+      { step: "failed", reason: "whisper could not be reached" },
+    ]);
+    expect(page).not.toMatch(/writing it down/i);
+    expect(page).toMatch(/nothing was sent/i);
+    expect(page).toContain("whisper could not be reached");
+  });
+
+  it("says a failure on the agent's side as a line of its own", async () => {
+    const page = await show([...AN_ANSWER, { step: "failed", reason: "the speaker went away" }]);
+    expect(page).toContain("It is four.");
+    expect(page).toContain("the speaker went away");
+  });
+
+  it("keeps two answers apart when nothing was said between them", async () => {
+    // An answer to a message typed on another device arrives with no turn of yours before it.
+    await show([
+      { step: "answering" },
+      { step: "delta", kind: "Assistant", text: "First." },
+      { step: "answering" },
+      { step: "delta", kind: "Assistant", text: "Second." },
+    ]);
+    expect(document.querySelectorAll(".turn-agent")).toHaveLength(2);
+  });
+
+  it("goes on folding the conversation while another tab is showing", async () => {
+    render(<Conversation hidden={true} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      AN_ANSWER.forEach(emit);
+    });
+    const screen = document.querySelector(".screen");
+    expect(screen?.hasAttribute("hidden")).toBe(true);
+    expect(screen?.textContent).toContain("what is the time");
   });
 
   it("attributes a repeated sentence to the one being worked on", async () => {

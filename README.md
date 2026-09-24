@@ -231,13 +231,26 @@ the answer is kept with the rest of this instance's settings and Zyris starts li
 next time it runs. A run started with `--headless` never listens, because it has no window and no
 push-to-talk key for anybody to hold.
 
-- **Hold the hotkey and talk.** Everything you say is a command. No wake word, no false triggers.
-- **While the switch is on** the microphone is open and nothing is recorded: a turn starts when
-  the key goes down and ends when it comes up, and the recording is gone once it has been turned
-  into text.
+- **Hold the hotkey and talk**, or say the wake word you recorded. A turn starts when the key goes
+  down and ends when it comes up — or, after the wake word, when you stop talking.
+- **While the switch is on** the microphone is open and nothing is recorded: the recording is gone
+  once it has been turned into text.
 
-The text does not go anywhere yet. It arrives in the window, and handing it to an agent is step 8
-below, along with speaking the answer back.
+**What you say goes to an agent on Attacca, and its answer is read aloud as it is written.** The
+first time this machine connects with the voice on, Zyris makes a session for it — with the one
+agent on your account, or, if there are several, the one named under `agent` in `voice.json` in
+this computer's data directory — and keeps using it. If that chat is deleted on Attacca, the next
+connection makes a new one. The Conversation tab shows both sides as they happen.
+
+**Korean and English are both understood and both spoken.** Whisper works out which language each
+turn is in, and the voice reads each sentence in the language its script says: Hangul as Korean,
+kana as Japanese, anything else as English. A test reads a Korean and an English sentence aloud,
+takes them through the same resampling a microphone goes through, and requires each to come back
+word for word — but that is the voice being heard by whisper, not a person by either.
+
+**Pressing the key while an answer is being read stops it**, and stops the agent writing it. What
+you say next is sent with a note in front of it saying how much of the answer you heard, so the
+agent knows where you cut in. Answers are read aloud only while listening is on.
 
 ### The push-to-talk key
 
@@ -274,10 +287,13 @@ owed.
 ### The wake word
 
 You can record one on the Voice tab: five takes, kept as 16 kHz WAV files in this computer's data
-directory alongside a manifest that says what was recorded and how. **Nothing listens for one
-yet.** Matching is a separate piece of work; the recordings exist so that it can be added later
-without asking you to record them again, and recording one today does not make Zyris respond to
-it.
+directory alongside a manifest that says what was recorded and how. **Saying it starts a turn** as
+the key does, and the turn ends when you stop talking. What you say is compared with the five
+takes (dynamic time warping over MFCCs, with a threshold calibrated from how much the takes differ
+from each other), so it is a close match rather than a certain one: expect it to wake now and then
+on something that sounds like it, and to miss you now and then. It is listened for only while
+listening is on and nothing is being read aloud, and new takes count from the next time listening
+is turned on.
 
 ### The model
 
@@ -373,8 +389,8 @@ Speech is tested as far as a file can stand in for a microphone: a recording goe
 rule and real whisper, and the sentence comes back out of the same `VoiceEvent` the window
 renders. What no test here has is a microphone, a finger on a key, a Wayland compositor, or a
 Windows machine. Ten things are owed, and **the first can still change what the product is.** The
-last four are about speaking rather than hearing, and need an Attacca session named in
-`voice.json` — there is no control for that on any screen yet, and the Voice tab says so.
+last four are about speaking rather than hearing, and need an agent on the Attacca account: the
+session is made for you the first time the voice connects.
 
 1. **Does letting go of the key get through? — Wayland only, and it is the one that matters.**
    Bind the shortcut as the Voice tab describes, turn listening on, hold the key for about two
@@ -411,42 +427,40 @@ last four are about speaking rather than hearing, and need an Attacca session na
    goes on producing turns. Fail: a take that will not start, a take that comes back silent, or a
    key that stops working afterwards — recording a take opens a **second** input stream on the
    same device without closing the first, and no machine has been asked to do that yet.
-6. **Korean.** Say something in Korean and read the transcript. **Only English has ever been
-   measured**, and one thing about this is already known rather than owed: Zyris *tells* whisper
-   the audio is English instead of asking it to work the language out, because detection measured
-   over three times slower on this machine. That is a bias and a cost rather than a switch —
-   telling it the wrong language was tried here on an English recording and it still produced the
-   English sentence, six times more slowly — so what a Korean sentence comes back as could be
-   anything from usable to nonsense, and nobody knows which. What this check is for is deciding
-   whether the answer is a language setting and what it should cost, and that decision belongs
-   with the step that hands the text to an agent rather than here.
+6. **Korean, heard.** Say something in Korean and read the transcript. Whisper detects the
+   language of each turn now, because told `en` it did not mishear Korean, it replaced it with a
+   different English sentence. What is measured is the voice reading Korean and English sentences
+   to whisper through the microphone's resampler, and each coming back word for word (0.37 s for
+   a three-second sentence, detection included, on an i5-10400F). **A person's voice, accent and
+   room have not been tried**, and `ggml-base` is a small model: whether that is good enough for
+   ordinary Korean speech, or needs a larger one, is what this check decides.
 
-7. **An answer read aloud at all.** Put a session id in `voice.json`, restart, and ask an
-   agent something with a few sentences in the reply.
+7. **An answer read aloud at all.** Turn listening on and ask an agent something with a few
+   sentences in the reply.
    Pass: it starts speaking while the text is still arriving, and stops at the end.
    Fail: silence, or it waits for the whole answer first.
-   **Expect gaps between sentences.** Synthesis here runs slower than speech — a real-time factor
-   of 1.2 to 1.9 measured on the development machine — so the speaker catches up with the queue
-   and waits. That is the engine and the hardware, not the splitter, and no arrangement of
-   fragments removes it.
+   **Gaps between sentences depend on the machine.** Synthesis ran slower than speech on the
+   development machine — a real-time factor of 1.2 to 1.9 — so the speaker caught up with the
+   queue and waited; on an i5-10400F it runs at about 0.25, four times faster than speech.
 
-8. **Korean, spoken.** Ask for an answer in Korean and listen to it. **Nobody has ever heard this
-   voice say a Korean word.** What is proven is narrower than it sounds: the model's character
-   table has no entry for any of the 11,172 composed Hangul syllables and does have entries for
-   the 69 conjoining jamo, so Zyris decomposes the text before handing it over and a test fails
-   if it stops. Whether the result is good Korean, accented Korean or nonsense is unknown.
+8. **Korean, spoken.** Ask for an answer in Korean and listen to it. Each sentence with Hangul in
+   it is read with the Korean tag, and whisper transcribes what the voice makes of one exactly —
+   so it is intelligible Korean to a machine. **No person has listened to it**, and whether it
+   sounds natural is what this check is for.
 
-9. **Interrupting it.** While it is speaking, press and hold the push-to-talk key.
-   Pass: the speaking stops at once, and the conversation on Attacca gains a line saying which
-   sentences were heard, which was cut off and how far in.
-   Note what this is *not*: **the agent's own record of that answer is not shortened**, because
-   the protocol's cancel carries no delivery point — [an issue asking for
-   one](https://github.com/attacca-cc/zyris-protocol/issues/42) is open. The line Zyris posts is
-   the whole of the repair.
+9. **Interrupting it.** While it is speaking, or while the agent is still thinking, press and
+   hold the push-to-talk key and say something.
+   Pass: the speaking stops at once, nothing more of that answer is read, and on Attacca your
+   message arrives as **one** message — a bracketed note saying which sentences were heard,
+   which was cut off and how far in, and then your words — answered by **one** reply.
+   Note what this is *not*: **an answer the agent had already finished writing is not
+   shortened**, because the protocol's cancel carries no delivery point — [an issue asking for
+   one](https://github.com/attacca-cc/zyris-protocol/issues/42) is open. The note is the whole of
+   the repair.
    **The key is the only way to interrupt, and that is a decision rather than a limitation of the
-   microphone.** Echo cancellation is behind a build flag that nothing releases, so a shipping
-   build hears its own loudspeaker; a microphone allowed to interrupt would cut the answer off on
-   its first word.
+   microphone.** Windows builds have no echo canceller wired in, and the one Linux ships has been
+   measured on a synthetic echo and never in a room; a microphone allowed to interrupt would risk
+   cutting the answer off on its own first word.
 
 10. **Both models at once.** With listening on and an answer being spoken, look at how much memory
     Zyris is using. Measured separately: about 213 MB for the listening half and 451 MB for the
@@ -547,6 +561,21 @@ pnpm tauri dev                                        # starts Vite first, then 
 pnpm tauri build                                      # a .deb or .exe, assets embedded
 cargo run --release --features custom-protocol -p zyris-app   # the same, without the bundler
 ```
+
+**Speech is a feature of its own, `voice`**, and a build without it has no microphone and no
+voice. It compiles whisper.cpp through CMake, generates bindings with `bindgen` (so `libclang`
+has to be findable) and links ONNX Runtime, which `ort` downloads once per machine:
+
+```bash
+cargo run --release --features custom-protocol,voice -p zyris-app
+```
+
+**whisper.cpp is compiled for the AVX2 set by `.cargo/config.toml`**, for every build in this
+workspace. `GGML_NATIVE=OFF` keeps a release from depending on the CPU that built it, and on its
+own it also turns every instruction set off, which makes transcription about ten times slower;
+the lines beside it put AVX2 back. A release with the voice refuses to build without them.
+`whisper-rs-sys` does not rebuild when these change, so after changing one run
+`cargo clean -p whisper-rs-sys` (with `--release` for that profile).
 
 ## Status
 

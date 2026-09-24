@@ -272,8 +272,8 @@ async fn a_recording_held_under_the_key_comes_back_as_what_was_said() {
 ///   context of 192 and it still comes back right, once, and quickly. The floor is a latency
 ///   guard with whisper's own temperature fallback behind it, and what keeps it is `stt.rs`'s
 ///   gated test, which compares three contexts against each other rather than reading one.
-/// - **It does catch the language being wrong, and the eleven-second test does not.** `LANGUAGE`
-///   mutated to `"ko"` leaves the long recording's sentence standing and takes this short one
+/// - **It does catch the language being wrong, and the eleven-second test does not.** Whisper
+///   told `"ko"` leaves the long recording's sentence standing and takes this short one
 ///   apart — and the file went from 7 s to 220 s doing it, which is the other half of what a
 ///   wrong language costs.
 #[tokio::test]

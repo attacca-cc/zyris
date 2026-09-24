@@ -1,0 +1,20 @@
+# What whisper.cpp is compiled for, on every build — a local `cargo build`, CI and the release
+# bundles alike. `whisper-rs-sys/build.rs` forwards any `GGML_*` variable to CMake.
+#
+# **`GGML_NATIVE=OFF` alone builds whisper with no SIMD at all.** ggml's CMake defaults every
+# instruction-set option to OFF once `GGML_NATIVE` is explicitly OFF, so a release built with only
+# that line runs a scalar encoder: 2.06 s for a 3.5 s clip on an i5-10400F, against 0.22 s with the
+# lines below — and 9.8 s against 0.98 s when whisper detects the language. The AVX2 set is what
+# the README already said speech requires (Haswell / Excavator, 2013 and later), now actually
+# compiled in. `crates/zyris-voice/build.rs` refuses a release without them.
+#
+# **Changing a value here does not rebuild whisper.** `whisper-rs-sys` declares no
+# `rerun-if-env-changed` for these, so an existing build keeps whatever it was configured with
+# until `cargo clean -p whisper-rs-sys` (add `--release` for that profile).
+[env]
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+GGML_BMI2 = "ON"

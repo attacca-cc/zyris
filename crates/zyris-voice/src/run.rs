@@ -143,7 +143,7 @@ impl Engine {
         // all and a machine that could hear and never answer; the spec's loop begins *get a
         // session* and nothing had ever done that, so the id had to be typed into a file.
         let feed = match settings.session.as_deref() {
-            Some(session) => Feed::new(session),
+            Some(session) => Feed::continuing(session, settings.agent.clone()),
             None => Feed::making_one(settings.agent.clone()),
         };
         Engine {
@@ -1044,7 +1044,7 @@ fn wake_view_of(enrolment: wake::Enrolment, dir: Option<String>) -> WakeView {
         wanted: wake::TAKES,
         seconds: wake::MAX_TAKE.as_secs(),
         // The constant, not a second copy of the sentence in TypeScript.
-        note: wake::NOTHING_READS_THESE.to_string(),
+        note: wake::WHAT_THE_TAKES_DO.to_string(),
     }
 }
 
@@ -1325,7 +1325,7 @@ mod tests {
     /// it. The constant has a test on each of its claims; a copy would have none.
     #[test]
     fn the_wake_word_note_is_the_constant_with_the_test_on_it() {
-        assert_eq!(wake_view().note, wake::NOTHING_READS_THESE);
+        assert_eq!(wake_view().note, wake::WHAT_THE_TAKES_DO);
         assert_eq!(wake_view().wanted, wake::TAKES);
     }
 

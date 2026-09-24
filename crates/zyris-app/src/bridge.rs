@@ -343,8 +343,8 @@ pub async fn forget_speech_model(
 
 /// Record one take of the wake word, from the chosen microphone.
 ///
-/// **Nothing matches what this records**, and the window says so: `zyris_voice::wake`'s
-/// `NOTHING_READS_THESE` is carried in the answer rather than written again here, because that
+/// What the recording is for is said by `zyris_voice::wake`'s `WHAT_THE_TAKES_DO`, carried in
+/// the answer rather than written again here, because that
 /// constant has a test on each of its claims and a second copy of the sentence would have none.
 #[tauri::command]
 pub async fn record_wake_take(

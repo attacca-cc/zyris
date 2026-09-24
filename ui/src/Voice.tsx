@@ -70,7 +70,7 @@ type WakeView = {
   dir: string | null;
   wanted: number;
   seconds: number;
-  // `zyris_voice::wake::NOTHING_READS_THESE`, carried rather than written again here. That
+  // `zyris_voice::wake::WHAT_THE_TAKES_DO`, carried rather than written again here. That
   // constant has a test on each of its claims; a second copy of the sentence in TypeScript would
   // have none, and this is the claim that must not drift.
   note: string;
@@ -389,8 +389,8 @@ export function Voice() {
             {last && <p className="note">{heardLine(last)}</p>}
 
             <p className="muted note">
-              What you said is shown here and nowhere else: nothing is sent to an agent yet, and
-              no recording is kept once it has been turned into text. A run started with{" "}
+              What you said is sent to the agent in this computer&rsquo;s Attacca session, and no
+              recording is kept once it has been turned into text. A run started with{" "}
               <span className="mono">--headless</span> never listens — it has no window and no key
               for anybody to hold.
             </p>
@@ -498,8 +498,9 @@ export function Voice() {
             <p>
               {voice.voiceModel.state === "ready" ? (
                 <>
-                  Answers from session <span className="mono">{voice.speaking.id}</span> are read
-                  aloud as they are written.
+                  While listening is on, answers from session{" "}
+                  <span className="mono">{voice.speaking.id}</span> are read aloud as they are
+                  written.
                 </>
               ) : (
                 <>
@@ -512,8 +513,8 @@ export function Voice() {
             {voice.voiceModel.state === "ready" && (
               <p className="note">
                 Speaking runs behind writing, so there are pauses between sentences. Pressing the
-                push-to-talk key stops the speaking: your side of the conversation records where
-                it was cut off, and the agent&rsquo;s own record of the answer stays whole.
+                push-to-talk key stops the speaking and the answer, and what you say next tells
+                the agent where it was cut off.
               </p>
             )}
           </>
@@ -752,7 +753,7 @@ export function Voice() {
           <p className="problem">{voice.wake.state.reason}</p>
         ) : (
           <>
-            {/* The sentence that must not drift, carried from `wake::NOTHING_READS_THESE` rather
+            {/* The sentence that must not drift, carried from `wake::WHAT_THE_TAKES_DO` rather
                 than written here. First, before anything that could read as a feature. */}
             <p>{voice.wake.note}</p>
 

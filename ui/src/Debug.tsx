@@ -88,7 +88,9 @@ function describe(step: Trace): string {
     case "playing":
       return `played as far as sample ${step.atSample}`;
     case "dropped":
-      return "a fragment was finished after the key went down, so nobody heard it";
+      return "a fragment arrived or was finished after the key went down, so nobody heard it";
+    case "answering":
+      return "the agent started a new answer";
     case "spoke":
       return "the speaker ran out — the room is quiet";
     case "interrupted":
