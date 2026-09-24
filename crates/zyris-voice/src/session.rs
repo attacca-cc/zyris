@@ -286,6 +286,9 @@ pub struct Session {
     /// Whisper reading an utterance heard while no turn was open, to see whether it was the
     /// phrase. One at a time: an utterance that ends while one is being read is not read.
     checking: Option<tokio::task::JoinHandle<Result<String, stt::Fault>>>,
+    /// The whisper those checks use, when it is not the one turns are transcribed with. See
+    /// `run::Engine::wake_checker`.
+    checker: Option<Arc<dyn Transcribe>>,
 
     /// Whatever length the device chose, re-cut to what the processor accepts. The processor
     /// **panics** rather than erroring on a wrong count, so nothing may reach it unmeasured.
@@ -357,6 +360,7 @@ impl Session {
             partial_from: 0,
             partial_next: PARTIAL_EVERY,
             checking: None,
+            checker: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
             // one, and nothing reads them then.
@@ -396,6 +400,12 @@ impl Session {
             ends: Endpointer::new(),
             heard: Vec::new(),
         });
+        self
+    }
+
+    /// Check for the phrase with this whisper rather than the one turns are transcribed with.
+    pub fn checking_with(mut self, checker: Arc<dyn Transcribe>) -> Session {
+        self.checker = Some(checker);
         self
     }
 
@@ -661,7 +671,7 @@ impl Session {
             return;
         }
         let Some(watch) = &self.watch else { return };
-        let stt = self.stt.clone();
+        let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
         let phrase = watch.phrase.said().to_string();
         self.checking =
             Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
@@ -2502,6 +2512,41 @@ mod tests {
         assert_eq!(zyris.next().await, VoiceEvent::Thinking);
         assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
         assert_eq!(zyris.scribe.calls(), 1, "one reading of one utterance");
+        zyris.stops().await;
+    }
+
+    /// **The phrase is checked with the checker, and the turn with the chosen model.** A large
+    /// model reading every sentence said in the room would hold every core for seconds at a
+    /// time; Base already hears the phrase exactly.
+    #[tokio::test]
+    async fn the_phrase_is_checked_with_the_checker_and_the_turn_with_the_chosen_model() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let chosen = Scribe::always("what is the time");
+        let checker = Scribe::always("hey zyris");
+        let session = Session::new(audio_rx, keys_rx, apm, chosen.clone(), events)
+            .listening_for(the_phrase())
+            .checking_with(checker.clone());
+        let mut zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe: chosen,
+            session: tokio::spawn(session.run()),
+        };
+
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(checker.calls(), 1, "the checker read the phrase");
+        assert_eq!(zyris.scribe.calls(), 0, "and the chosen model was not asked");
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
         zyris.stops().await;
     }
 

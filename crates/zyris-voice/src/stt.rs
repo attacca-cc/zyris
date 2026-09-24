@@ -81,7 +81,8 @@ pub const MODELS: [Choosable; 3] = [
     Choosable {
         id: "base",
         name: "Base",
-        note: "Fastest, and the least accurate: names and borrowed words often come out wrong.",
+        note: "Fastest, and the least accurate: names and borrowed words often come out wrong. \
+               Kept on disk, it also listens for the wake word when a larger model is chosen.",
         model: BASE,
     },
     Choosable {

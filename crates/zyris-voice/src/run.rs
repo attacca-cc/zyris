@@ -374,7 +374,9 @@ impl Engine {
     /// Stop and start again with the settings as they are now, if anything is running or was
     /// meant to be.
     async fn restart_if_running(&self, live: &mut Live) {
-        if live.running.is_none() && !matches!(live.state, ListeningState::Failed { .. }) {
+        // Asked for and not running covers a start that failed for want of the model this
+        // change has just provided.
+        if live.running.is_none() && !live.settings.listen {
             return;
         }
         self.halt(live).await;
@@ -387,36 +389,21 @@ impl Engine {
         };
     }
 
-    /// Download the speech model, and start listening afterwards if that is what was asked for.
+    /// Download a speech model and use it.
     ///
-    /// Blocking for as long as 141 MB takes, which is why the screen shows what it is doing
-    /// rather than a button that appears to do nothing.
+    /// **Downloading one is choosing it.** A person who fetched Large expected to be heard by
+    /// Large; with the two apart it downloaded, listening went on with Base, and nothing on the
+    /// screen said why it sounded no different.
+    ///
+    /// The listening state is left alone while the file arrives: listening may be running on
+    /// another model, and it goes on until this one is there to switch to.
     pub async fn fetch_model(&self, id: String) -> Result<(), String> {
         let model = stt::choosable(Some(&id)).model;
         let dir = stt::cache_dir()
             .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
-        {
-            let mut live = self.live.lock().await;
-            live.state = ListeningState::Starting {
-                detail: "the speech model is being downloaded".to_string(),
-            };
-        }
-
-        let fetched = stt::fetch(&model, &dir, |_| {}).await.map_err(|f| f.to_string());
-
-        let wanted = {
-            let live = self.live.lock().await;
-            live.settings.listen && stt::choosable(live.settings.speech_model.as_deref()).id == id
-        };
-        match (&fetched, wanted) {
-            // It was already asked for; now there is something to start.
-            (Ok(_), true) => self.set_listening(true).await,
-            (Ok(_), false) => self.live.lock().await.state = ListeningState::Off,
-            (Err(reason), _) => {
-                self.live.lock().await.state = ListeningState::Failed { reason: reason.clone() };
-            }
-        }
-        fetched.map(|_| ())
+        stt::fetch(&model, &dir, |_| {}).await.map_err(|f| f.to_string())?;
+        self.choose_model(id).await;
+        Ok(())
     }
 
     /// Download every file of the voice that is not already there.
@@ -562,11 +549,12 @@ impl Engine {
             .map_err(|_| "loading the speech model stopped before it finished".to_string())?
             .map_err(|fault| fault.to_string())?;
         let stt = Arc::new(stt);
+        let checker = self.wake_checker(settings, &stt).await;
         // Before the microphone opens, while whisper is doing nothing else: reading the takes is
         // five short transcriptions.
         let phrase = {
-            let stt = stt.clone();
-            tokio::task::spawn_blocking(move || enrolled_phrase(&stt, typed_phrase))
+            let checker = checker.clone();
+            tokio::task::spawn_blocking(move || enrolled_phrase(&checker, typed_phrase))
                 .await
                 .unwrap_or(None)
         };
@@ -608,12 +596,34 @@ impl Engine {
         }
         session = session.tracing(self.traces.clone());
         if let Some(phrase) = phrase {
-            session = session.listening_for(phrase);
+            session = session.listening_for(phrase).checking_with(checker);
         }
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
         ))
+    }
+
+    /// The whisper the wake word is checked with: Base when a larger model is chosen and Base is
+    /// in the cache, and otherwise the chosen one.
+    ///
+    /// **Everything said in the room is checked**, so this is the whisper that runs most. Base
+    /// told to expect the phrase already hears it exactly (see `wake::Phrase`), and on the
+    /// machine this was measured on it answers in half a second where Large v3 Turbo takes ten
+    /// — ten seconds of every core for each sentence somebody says to someone else. The chosen
+    /// model is kept for what matters: the request.
+    async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>) -> Arc<stt::Stt> {
+        let named = std::env::var_os(stt::MODEL_ENV).is_some_and(|n| !n.is_empty());
+        if named || stt::choosable(settings.speech_model.as_deref()).model == stt::BASE {
+            return chosen.clone();
+        }
+        let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else {
+            return chosen.clone();
+        };
+        match tokio::task::spawn_blocking(move || stt::Stt::load(&path)).await {
+            Ok(Ok(base)) => Arc::new(base),
+            _ => chosen.clone(),
+        }
     }
 
     /// Open the speaker, load the voice, and start the three things that keep it fed.

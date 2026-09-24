@@ -742,6 +742,9 @@ export function Voice() {
                   {model.name} ({megabytes(model.bytes)})
                 </label>
                 <p className="note muted">{model.note}</p>
+                {refused[`model:${model.id}`] && (
+                  <p className="note problem">{refused[`model:${model.id}`]}</p>
+                )}
                 {model.state.state === "ready" && (
                   <p className="note">
                     On this computer.{" "}
@@ -750,9 +753,9 @@ export function Voice() {
                       className="button button-quiet"
                       aria-label={`Delete ${model.name}`}
                       disabled={busy !== null}
-                      onClick={() => act("model", "forget_speech_model", { id: model.id })}
+                      onClick={() => act(`model:${model.id}`, "forget_speech_model", { id: model.id })}
                     >
-                      {busy === "model" ? "Working" : "Delete it"}
+                      {busy === `model:${model.id}` ? "Deleting" : "Delete it"}
                     </button>
                   </p>
                 )}
@@ -776,9 +779,9 @@ export function Voice() {
                       className="button"
                       aria-label={`Download ${model.name}`}
                       disabled={busy !== null}
-                      onClick={() => act("model", "fetch_speech_model", { id: model.id })}
+                      onClick={() => act(`model:${model.id}`, "fetch_speech_model", { id: model.id })}
                     >
-                      {busy === "model" ? "Downloading" : "Download"}
+                      {busy === `model:${model.id}` ? "Downloading" : "Download and use"}
                     </button>
                   </p>
                 )}
@@ -793,7 +796,7 @@ export function Voice() {
           </ul>
         )}
 
-        {busy === "model" && (
+        {busy?.startsWith("model:") && (
           <p className="note muted">
             This takes a few minutes on a slow connection, and Zyris keeps nothing until the
             whole file has arrived and been checked.
