@@ -360,8 +360,37 @@ pub const LANGUAGES: [&str; 32] = [
     "vi", "na",
 ];
 
-/// The language used when nothing has chosen one. `stt::LANGUAGE`'s opposite number.
+/// The language a fragment is read in when its script does not say otherwise.
 pub const LANGUAGE: &str = "en";
+
+/// The language to read `text` in, judged from the script it is written in.
+///
+/// **From the text and not from what the person said**, because the answer is what is being
+/// read, and an agent asked in Korean may still answer a line in English. Per fragment, since
+/// the splitter hands over a sentence or so at a time and an answer can change language between
+/// two of them.
+///
+/// Hangul reads as Korean even among Latin words — "Rust의 borrow checker는" is a Korean
+/// sentence — and kana as Japanese. Everything else is [`LANGUAGE`]: the other thirty languages
+/// share the Latin, Cyrillic or Greek scripts with each other, and telling them apart is a
+/// language-identification problem this does not pretend to solve.
+pub fn language_for(text: &str) -> &'static str {
+    let (mut hangul, mut kana) = (0usize, 0usize);
+    for c in text.chars() {
+        match c {
+            '\u{AC00}'..='\u{D7A3}' | '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' => hangul += 1,
+            '\u{3040}'..='\u{30FF}' => kana += 1,
+            _ => {}
+        }
+    }
+    if hangul > 0 && hangul >= kana {
+        "ko"
+    } else if kana > 0 {
+        "ja"
+    } else {
+        LANGUAGE
+    }
+}
 
 /// Whether the model knows this language tag.
 pub fn is_language(lang: &str) -> bool {
@@ -787,9 +816,10 @@ impl Tts {
         self.speed
     }
 
-    /// Say one fragment. Blocking, and for several hundred milliseconds — see [`TOTAL_STEP`].
+    /// Say one fragment, in the language its script says ([`language_for`]). Blocking, and for
+    /// several hundred milliseconds — see [`TOTAL_STEP`].
     pub fn say(&mut self, text: &str) -> Result<Utterance, Fault> {
-        self.say_in(text, LANGUAGE)
+        self.say_in(text, language_for(text))
     }
 
     /// Say one fragment in a named language. An unknown tag is refused rather than spoken:
@@ -1003,6 +1033,16 @@ fn noise(count: usize, seed: u64) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fragment_is_read_in_the_language_its_script_says() {
+        assert_eq!(language_for("The file is already there."), "en");
+        assert_eq!(language_for("내일 아침 서울 날씨가 어떨지 알려줘."), "ko");
+        assert_eq!(language_for("Rust의 borrow checker는 엄격합니다."), "ko", "Hangul among Latin words");
+        assert_eq!(language_for("ファイルはもうあります。"), "ja");
+        assert_eq!(language_for("12:30, 3 files."), "en", "nothing but digits and punctuation");
+        assert!(is_language(language_for("")), "whatever it answers has to be a tag the model knows");
+    }
 
     /// A table shaped like the one on disk, built from what was measured rather than copied out
     /// of it: precomposed Hangul unmapped, conjoining jamo mapped, ASCII mapped.

@@ -249,12 +249,18 @@ pub fn exact_cut(samples: usize) -> u16 {
     samples.div_ceil(SAMPLES_PER_CTX).min(FULL_CTX as usize) as u16
 }
 
-/// The language whisper is told it is hearing.
+/// The language a warm-up decode is told it is hearing — and only a warm-up's. A turn is decoded
+/// with the language **detected**, since the same person says one thing in Korean and the next in
+/// English.
 ///
-/// **Told, not asked.** `set_language(None)` turns on detection, and detection cost 10.79 s
-/// against 3.44 s on the same 3 s clip here — over three times slower, for a question this
-/// product already knows the answer to. Korean is unmeasured and is step 8's problem.
-pub const LANGUAGE: &str = "en";
+/// Told for the warm-up because detection is exactly what the warm-up exists to make cheap: see
+/// [`Stt::warm_state`].
+///
+/// Measured on an i5-10400F with ggml-base, TTS-generated clips of three to four seconds: telling
+/// whisper `en` for a Korean sentence does not produce Korean with an accent, it produces **a
+/// different English sentence** ("내일 아침 서울 날씨가 어떨지 알려줘" came back as "Tomorrow
+/// morning, what day of the day is the Seoul weather?"). Detection read both languages right.
+pub const WARM_LANGUAGE: &str = "en";
 
 /// How many threads whisper gets.
 ///
@@ -272,7 +278,7 @@ pub fn threads() -> usize {
 /// otherwise only assert on them by reading this file as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// `Some(LANGUAGE)`. `None` would mean detection; see [`LANGUAGE`].
+    /// `None`, which is whisper detecting it; see [`WARM_LANGUAGE`] for why a turn is not told.
     pub language: Option<&'static str>,
     /// See [`threads`].
     pub threads: usize,
@@ -290,10 +296,29 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whisper's parameters for these settings.
+    fn params(&self) -> whisper_rs::FullParams<'static, 'static> {
+        let mut params =
+            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(self.language);
+        params.set_n_threads(self.threads as std::ffi::c_int);
+        params.set_audio_ctx(self.audio_ctx as std::ffi::c_int);
+        params.set_translate(self.translate);
+        params.set_no_context(!self.carry_previous_turn);
+        // Nothing of whisper's own goes to stdout: this process has a window and a log, and
+        // neither of them is a terminal it may print to.
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_no_timestamps(true);
+        params
+    }
+
     /// The settings for one utterance of `samples` 16 kHz mono samples.
     pub fn for_audio(samples: usize) -> Settings {
         Settings {
-            language: Some(LANGUAGE),
+            language: None,
             threads: threads(),
             audio_ctx: audio_ctx(samples),
             translate: false,
@@ -308,6 +333,16 @@ impl Settings {
 /// handed to [`transcribe`]'s blocking task over and over rather than reloaded per turn.
 pub struct Stt {
     context: whisper_rs::WhisperContext,
+    /// Decoder states that have each run once, waiting for the next turn. One is taken per
+    /// transcription and put back after, so the final transcript and a partial one running beside
+    /// it each have their own.
+    ///
+    /// **Kept rather than made per turn because of where whisper.cpp detects the language.**
+    /// `whisper_full_with_state` runs detection *before* it applies `audio_ctx`, so detection on a
+    /// fresh state encodes the full thirty-second window: 0.98 s for a clip a fixed language
+    /// decodes in 0.22 s. A state keeps the context of its last decode, so on a state that has run
+    /// once detection costs the short window too — 0.37 s.
+    idle: std::sync::Mutex<Vec<whisper_rs::WhisperState>>,
 }
 
 impl Stt {
@@ -327,7 +362,31 @@ impl Stt {
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
-        Ok(Stt { context })
+        let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()) };
+        // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
+        let first = stt.warm_state()?;
+        stt.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(first);
+        Ok(stt)
+    }
+
+    /// A decoder state that has run once, so its encoder context is short rather than whisper's
+    /// thirty-second default. See [`Stt::idle`](Stt) for why that matters.
+    ///
+    /// One second of silence in a told language: long enough to get past whisper's
+    /// too-short-input return, which comes before the line that records the context, and told so
+    /// that the warm-up itself does not pay for the detection it is there to make cheap.
+    fn warm_state(&self) -> Result<whisper_rs::WhisperState, Fault> {
+        let mut state = self
+            .context
+            .create_state()
+            .map_err(|e| Fault::Whisper { detail: format!("no decoder state: {e}") })?;
+        let silence = vec![0.0f32; SAMPLE_RATE as usize];
+        let mut settings = Settings::for_audio(silence.len());
+        settings.language = Some(WARM_LANGUAGE);
+        state
+            .full(settings.params(), &silence)
+            .map_err(|e| Fault::Whisper { detail: format!("the warm-up decode failed: {e}") })?;
+        Ok(state)
     }
 
     /// Transcribe one utterance. **Blocks** — see [`transcribe`] for the callable-from-async
@@ -353,28 +412,14 @@ impl Stt {
         }
         let settings = Settings::for_audio(audio.len());
 
-        let mut state = self
-            .context
-            .create_state()
-            .map_err(|e| Fault::Whisper { detail: format!("no decoder state: {e}") })?;
-
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(settings.language);
-        params.set_n_threads(settings.threads as std::ffi::c_int);
-        params.set_audio_ctx(settings.audio_ctx as std::ffi::c_int);
-        params.set_translate(settings.translate);
-        params.set_no_context(!settings.carry_previous_turn);
-        // Nothing of whisper's own goes to stdout: this process has a window and a log, and
-        // neither of them is a terminal it may print to.
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_no_timestamps(true);
+        let taken = self.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop();
+        let mut state = match taken {
+            Some(state) => state,
+            None => self.warm_state()?,
+        };
 
         state
-            .full(params, audio)
+            .full(settings.params(), audio)
             .map_err(|e| Fault::Whisper { detail: format!("transcription failed: {e}") })?;
 
         let mut text = String::new();
@@ -385,6 +430,9 @@ impl Stt {
                 detail: format!("a transcribed segment could not be read: {e}"),
             })?.as_ref());
         }
+        // Back only after a decode that worked: a state whisper failed in is not one to trust
+        // with the next turn, and a fresh one is a second of work away.
+        self.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(state);
         Ok(clean(&text))
     }
 }
@@ -568,14 +616,13 @@ mod tests {
         );
     }
 
-    /// Whisper is *told* the language. Detecting it cost 10.79 s against 3.44 s on the same
-    /// clip, and this program already knows the answer.
+    /// A turn's language is detected, not told: told `en`, whisper answers a Korean sentence
+    /// with a different English one. See [`WARM_LANGUAGE`].
     #[test]
-    fn the_language_is_configured_and_not_detected() {
+    fn the_language_is_detected_rather_than_told() {
         let settings = Settings::for_audio(seconds(3.0));
 
-        assert_eq!(settings.language, Some(LANGUAGE));
-        assert!(settings.language.is_some(), "None here is `detect the language`, three times slower");
+        assert_eq!(settings.language, None);
     }
 
     /// The two that are quietly dangerous rather than slow.
@@ -773,7 +820,7 @@ mod tests {
         let mut state = stt.context.create_state().expect("state");
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some(LANGUAGE));
+        params.set_language(Some(WARM_LANGUAGE));
         params.set_n_threads(threads() as std::ffi::c_int);
         params.set_audio_ctx(ctx as std::ffi::c_int);
         params.set_no_context(true);
