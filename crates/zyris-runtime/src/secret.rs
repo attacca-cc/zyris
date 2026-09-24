@@ -164,7 +164,7 @@ fn default_file_dir(service: &str) -> PathBuf {
     // unset or malformed). The process's current working directory is not an acceptable
     // fallback: it is `/` under a systemd unit and whatever a shortcut happens to set for a
     // desktop launch, so a secret written there lands somewhere different — or unwritable —
-    // every launch, reads back as absent, and mints a second node token. The user's home
+    // every launch, reads back as absent, and enrols the machine all over again. The user's home
     // directory is stable across launches and present whenever the platform can name one at all.
     if let Some(dirs) = directories::BaseDirs::new() {
         return dirs.home_dir().join(format!(".{service}")).join("secrets");

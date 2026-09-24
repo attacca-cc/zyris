@@ -61,6 +61,10 @@ folder named after the machine that sent it — `~/.local/share/zyris/inbox` on 
 `%APPDATA%\attacca\zyris\data\inbox` on Windows. The Tools tab lists what is in there, newest
 first, with each file's full path.
 
+A machine is named by its node path, `system/program/node`: this app is always `<machine>/zyris/
+desktop`, so sending to your laptop is sending to `laptop/zyris/desktop`, and what it sends here
+lands in a folder called `laptop_zyris_desktop`. The Status screen shows this machine's own path.
+
 **The two directions are not gated the same way, and it is worth knowing which is which.**
 
 *Receiving* is gated on your account rather than on an approval. An arriving connection is
@@ -123,6 +127,11 @@ ignored.
 The first time it runs, the window shows a short code and a link. Open the link, approve the code
 in your browser, and Zyris connects this machine to your account. From then on it reconnects on
 its own every time it starts, with no window required.
+
+**A machine enrolled before the switch to credentials is asked once more.** What it kept was an
+account grant and a node token, and Attacca no longer accepts either: it now issues one credential
+per program on each machine, and that is what Zyris keeps. The old pair is refused at the first
+dial, thrown away, and the code comes back up.
 
 It can start itself, too — a Task Scheduler entry on Windows, a systemd user unit on Linux,
 turned on from the Settings screen or with `zyris --install-autostart`. Started that way it puts

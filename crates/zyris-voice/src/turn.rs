@@ -1290,7 +1290,7 @@ mod stopping_a_turn {
 
     /// **Once, not once per connection.** A node that made a session on every reconnect would
     /// fill the account and lose the conversation every time the network moved — the same
-    /// failure `zyris-runtime`'s "reuse the node token" trap describes, one layer up.
+    /// failure as a machine that forgot its credential and enrolled again, one layer up.
     #[tokio::test]
     async fn a_reconnection_does_not_make_a_second_session() {
         let api = Fake::new().with_agents(&[("agent-1", "Ada")]);

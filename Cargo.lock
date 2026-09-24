@@ -9063,8 +9063,7 @@ dependencies = [
 [[package]]
 name = "zyris"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a231eb37a5f282c34373dd6fdb85b8269173187b48c3f5b475bace6e63fd7a90"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "zyris-caps",
  "zyris-core",
@@ -9102,8 +9101,7 @@ dependencies = [
 [[package]]
 name = "zyris-attacca"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae807723d2648a983b8a431f1fabc2cb02589567dddd017f991fd8f7120b65c"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -9126,7 +9124,7 @@ dependencies = [
 [[package]]
 name = "zyris-caps"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -9137,7 +9135,7 @@ dependencies = [
 [[package]]
 name = "zyris-core"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9160,8 +9158,7 @@ dependencies = [
 [[package]]
 name = "zyris-fs"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d426a9e08ba67f678cf5dd49f0133669f80e666ea83408f370102b851aa88c7"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "bytes",
  "futures-util",
@@ -9173,7 +9170,7 @@ dependencies = [
 [[package]]
 name = "zyris-input"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "enigo",
  "tokio",
@@ -9184,7 +9181,7 @@ dependencies = [
 [[package]]
 name = "zyris-macros"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9208,8 +9205,7 @@ dependencies = [
 [[package]]
 name = "zyris-p2p"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e85e3a8137e43f88cde2dcd94418aaed231124484aacfe02a82565ad504262e"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9227,7 +9223,7 @@ dependencies = [
 [[package]]
 name = "zyris-proto"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=274e9af154071e878ea2cf30f7f90420b80ce742#274e9af154071e878ea2cf30f7f90420b80ce742"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -9258,8 +9254,7 @@ dependencies = [
 [[package]]
 name = "zyris-screen"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23d6efd91ec33bad28d9709ff62378f665dca36fe6dfb303759417cba3016c75"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "image",
  "libwayshot-xcap",
@@ -9273,8 +9268,7 @@ dependencies = [
 [[package]]
 name = "zyris-terminal"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db7c725e324c73a5326035fcec0def572028fc2861b136fc833bee818cea0c6b"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "bytes",
  "futures-util",
@@ -9312,8 +9306,7 @@ dependencies = [
 [[package]]
 name = "zyris-transfer"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da8b3c3b72cd99f009270e08827e295ff4778bb8686543aa9920afdee8ac997f"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
 dependencies = [
  "async-trait",
  "bytes",

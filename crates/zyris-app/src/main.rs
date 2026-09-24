@@ -53,10 +53,10 @@ fn main() -> anyhow::Result<()> {
     // Everything that names this instance on this machine — the keychain service, the instance
     // lock, the directory the audit log lands in — comes from this one string, and `--server`
     // changes it. A run pointed at a development server is a different node in every sense that
-    // matters: its account credential and its node token belong to that server, so it must not
-    // read or write the production ones. The sharp edge is `connection.rs`'s
-    // `recover_from_dead_token`, whose first action on a permanently refused token is to forget
-    // the stored one — a dev server answering 401 would otherwise destroy the real node's token.
+    // matters: its credential belongs to that server, so it must not read or write the
+    // production one. The sharp edge is `connection.rs`'s `recover_from_refused_credential`,
+    // whose first action on a permanently refused credential is to forget the stored one — a dev
+    // server answering 401 would otherwise destroy the real machine's credential.
     // Derived here, before any of the three names is used, because all three have to agree.
     let instance = instance_name(cli.server());
     if let Some(server) = cli.server() {
@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // A second instance must not mint a second node token — but the two modes take the
+    // A second instance must not enrol a second credential — but the two modes take the
     // instance lock in different places, because they need different things from a refusal.
     //
     // Headless takes it right here, before anything else does work (in particular, before
@@ -712,14 +712,14 @@ mod tests {
     fn the_default_instance_keeps_the_name_an_existing_install_already_uses() {
         // This exact string is the keychain service, the lock's name and the audit directory on
         // every machine already running Zyris. Changing it orphans their stored credentials and
-        // mints a second node on the next launch.
+        // enrols the machine again on the next launch.
         assert_eq!(instance_name(None), "zyris");
     }
 
     #[test]
     fn a_server_run_is_a_different_instance_from_the_default_one() {
-        // Otherwise a development run reads and writes the production account credential and
-        // node token — and a dev server that refuses that token makes this app forget it.
+        // Otherwise a development run reads and writes the production credential — and a dev
+        // server that refuses it makes this app forget it.
         assert_ne!(
             instance_name(None),
             instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws"))

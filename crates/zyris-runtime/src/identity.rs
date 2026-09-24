@@ -1,30 +1,30 @@
-//! The two secrets this app keeps between runs, and the rule for reading them back.
+//! The one secret this app keeps between runs, and the rule for reading it back.
 //!
-//! They are stored apart rather than as one blob because they are written at different moments:
-//! the credential rotates on its own schedule, and rewriting the node token every time it did
-//! would risk losing a token that never changes.
+//! Since zyris-protocol#43 that is a single `zc_` [`Credential`]: issued once by an enrollment,
+//! never rotated, never expiring, and dialled with directly. The account credential and node token
+//! this used to keep apart are gone from the protocol, and every server that speaks it refuses
+//! them, so a machine that still has them on disk simply enrols again.
 
-use zyris::{AccountCredential, NodeToken};
+use zyris::Credential;
 
 use crate::secret::{Backend, SecretError, SecretStore};
 
-/// The names the two secrets live under. Changing one strands whatever is already stored, so
-/// they are constants rather than literals scattered through the file.
-const CREDENTIAL: &str = "account-credential";
-const NODE_TOKEN: &str = "node-token";
+/// The name the credential lives under. Changing it strands whatever is already stored, so it is
+/// a constant rather than a literal scattered through the file.
+///
+/// **Not `account-credential`**, which is what the account layer wrote: that JSON does not parse
+/// as a [`Credential`] (the protocol's own test pins that it fails on a missing field), and a
+/// name of its own keeps "nothing stored yet" from ever depending on that.
+const CREDENTIAL: &str = "credential";
+
+/// What the account layer stored, which no server honours any more. Deleted whenever this
+/// identity is written or forgotten, so an upgraded machine does not keep a dead bearer on disk.
+const RETIRED: &[&str] = &["account-credential", "node-token"];
 
 /// Not a secret — just the name of whichever backend last held one. Lives beside the file
 /// backend's own secrets (see `SecretStore::file_dir`) so it does not move depending on which
 /// backend a given launch happens to probe its way onto.
 const BACKEND_MARKER: &str = "backend";
-
-/// What was found on disk. Either may be absent, and the combinations mean different things —
-/// see `connection.rs`, which is the only place that decides what to do about them.
-#[derive(Debug, Default)]
-pub struct Stored {
-    pub credential: Option<AccountCredential>,
-    pub node_token: Option<NodeToken>,
-}
 
 #[derive(Clone)]
 pub struct Identity {
@@ -38,54 +38,48 @@ impl Identity {
 
     /// Unparseable stored JSON reads as absent. The only recovery from a corrupt secret is to
     /// enrol again, and that path starts by loading — so failing here would leave no way out.
-    pub fn load(&self) -> Result<Stored, SecretError> {
-        Ok(Stored {
-            credential: self.read(CREDENTIAL)?,
-            node_token: self.read(NODE_TOKEN)?,
-        })
+    pub fn load(&self) -> Result<Option<Credential>, SecretError> {
+        self.read(CREDENTIAL)
     }
 
-    pub fn save_credential(&self, credential: &AccountCredential) -> Result<(), SecretError> {
-        self.write(CREDENTIAL, credential)
+    pub fn save(&self, credential: &Credential) -> Result<(), SecretError> {
+        self.write(CREDENTIAL, credential)?;
+        self.forget_retired();
+        Ok(())
     }
 
-    pub fn save_node_token(&self, token: &NodeToken) -> Result<(), SecretError> {
-        self.write(NODE_TOKEN, token)
-    }
-
-    /// Clears both secrets and forgets which backend held them — a genuinely cleared machine
-    /// must enrol cleanly, with nothing left behind to disagree with whatever backend the next
-    /// launch happens to resolve to.
+    /// Clears the credential and forgets which backend held it — a genuinely cleared machine must
+    /// enrol cleanly, with nothing left behind to disagree with whatever backend the next launch
+    /// happens to resolve to.
     pub fn forget(&self) -> Result<(), SecretError> {
         self.store.delete(CREDENTIAL)?;
-        self.store.delete(NODE_TOKEN)?;
+        self.forget_retired();
         if let Err(error) = self.clear_backend_marker() {
-            // The secrets themselves are gone, which is what callers actually depend on; losing
-            // the marker only means a stale backend name might outlive them, not that anything
-            // this method promises has failed.
+            // The secret itself is gone, which is what callers actually depend on; losing the
+            // marker only means a stale backend name might outlive it, not that anything this
+            // method promises has failed.
             tracing::warn!(%error, "could not clear the backend marker while forgetting this identity");
         }
         Ok(())
     }
 
-    /// Discards only the node token, keeping the credential beside it.
-    ///
-    /// What recovering from a dead token needs: the node itself can be gone from Attacca while
-    /// the account that minted it is still good, and re-minting a replacement only needs that
-    /// credential to still be on disk. The backend marker is left alone too, for the same
-    /// reason: the credential it describes is still exactly where it was.
-    pub fn forget_node_token(&self) -> Result<(), SecretError> {
-        self.store.delete(NODE_TOKEN)
+    /// Best effort: a retired secret that will not delete is dead weight, not a failure.
+    fn forget_retired(&self) {
+        for name in RETIRED {
+            if let Err(error) = self.store.delete(name) {
+                tracing::warn!(%error, secret = name, "could not delete a retired secret");
+            }
+        }
     }
 
     /// Which backend this launch cannot reach the identity in, if any.
     ///
     /// `Some(backend)` means an earlier launch recorded the identity as living in `backend`, and
     /// this launch's `SecretStore` resolved to a *different* one — the state that must never be
-    /// papered over by quietly starting a fresh enrolment, since that mints a second node while
-    /// the first one's identity sits untouched in the backend this launch cannot see. `None`
-    /// covers every safe case alike: nothing has ever been saved, this predates the marker, or
-    /// the recorded backend and this launch's backend already agree.
+    /// papered over by quietly starting a fresh enrolment, since that issues a second credential
+    /// while the first one sits untouched in the backend this launch cannot see. `None` covers
+    /// every safe case alike: nothing has ever been saved, this predates the marker, or the
+    /// recorded backend and this launch's backend already agree.
     pub fn stranded_in(&self) -> Option<Backend> {
         match self.recorded_backend() {
             Some(recorded) if recorded != self.store.backend() => Some(recorded),
@@ -130,9 +124,7 @@ impl Identity {
         self.store.set(name, &raw)?;
         if let Err(error) = self.record_backend(self.store.backend()) {
             // The secret is safely stored, which is the part that must not be undone by a
-            // marker-write hiccup — in particular, `Account::on_rotate` in `connection.rs`
-            // revokes the node if saving the rotated credential itself fails, and a spurious
-            // failure here must not be mistaken for that.
+            // marker-write hiccup.
             tracing::warn!(%error, "could not record which backend holds this node's identity");
         }
         Ok(())
@@ -155,91 +147,40 @@ fn parse_backend(text: &str) -> Option<Backend> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn identity(dir: &std::path::Path) -> Identity {
         Identity::new(crate::secret::SecretStore::with_file_dir("zyris-test", dir.to_path_buf()))
     }
 
-    fn a_token() -> NodeToken {
-        serde_json::from_str(r#"{"node_id":"n_1","slug":"laptop","token":"znt_abc"}"#)
-            .expect("NodeToken's shape changed; update this fixture")
-    }
-
-    fn a_credential() -> AccountCredential {
-        AccountCredential::new(
-            "at_abc".to_string(),
-            "rt_abc".to_string(),
-            "n_1".to_string(),
-            "laptop".to_string(),
-            "person@example.com".to_string(),
-            4_102_444_800,
-        )
+    pub(crate) fn a_credential() -> Credential {
+        serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "secret": "zc_abc",
+            "system": {"id": "sys-1", "name": "Laptop", "slug": "laptop"},
+            "program": {"id": "cred-1", "name": "zyris", "slug": "zyris"},
+            "scopes": ["agents:read"],
+            "owner_email": "person@example.com"
+        }))
+        .expect("Credential's shape changed; update this fixture")
     }
 
     #[test]
     fn nothing_stored_reads_as_a_clean_slate() {
         let dir = tempfile::tempdir().unwrap();
 
-        let stored = identity(dir.path()).load().unwrap();
-
-        assert!(stored.credential.is_none());
-        assert!(stored.node_token.is_none());
-    }
-
-    #[test]
-    fn a_saved_node_token_reads_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let identity = identity(dir.path());
-
-        identity.save_node_token(&a_token()).unwrap();
-
-        let stored = identity.load().unwrap();
-        assert_eq!(stored.node_token.unwrap().as_str(), "znt_abc");
-    }
-
-    #[test]
-    fn a_node_token_without_a_credential_still_loads() {
-        // This is the state after a credential is revoked but the node token is not. The node
-        // can still dial with the token it has, so refusing to load it would strand a node that
-        // is in fact still able to work.
-        let dir = tempfile::tempdir().unwrap();
-        let identity = identity(dir.path());
-
-        identity.save_node_token(&a_token()).unwrap();
-
-        let stored = identity.load().unwrap();
-        assert!(stored.node_token.is_some());
-        assert!(stored.credential.is_none());
+        assert!(identity(dir.path()).load().unwrap().is_none());
     }
 
     #[test]
     fn a_saved_credential_reads_back() {
-        // The credential is the secret that *rotates*: `on_rotate` in `connection.rs` saves a
-        // fresh one on every refresh, and a failed save there revokes the node. It deserves the
-        // same round-trip coverage the node token already has.
         let dir = tempfile::tempdir().unwrap();
         let identity = identity(dir.path());
 
-        identity.save_credential(&a_credential()).unwrap();
+        identity.save(&a_credential()).unwrap();
 
-        let stored = identity.load().unwrap();
-        assert_eq!(stored.credential, Some(a_credential()));
-    }
-
-    #[test]
-    fn unreadable_stored_credential_json_reads_as_absent_rather_than_failing() {
-        // Mirrors `unreadable_stored_json_reads_as_absent_rather_than_failing` below, but for the
-        // credential file rather than the node token — the same corruption can happen to either.
-        let dir = tempfile::tempdir().unwrap();
-        let identity = identity(dir.path());
-        std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("account-credential"), "{ this is not json").unwrap();
-
-        let stored = identity.load().unwrap();
-
-        assert!(stored.credential.is_none());
+        assert_eq!(identity.load().unwrap(), Some(a_credential()));
     }
 
     #[test]
@@ -249,43 +190,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = identity(dir.path());
         std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("node-token"), "{ this is not json").unwrap();
+        std::fs::write(dir.path().join("credential"), "{ this is not json").unwrap();
 
-        let stored = identity.load().unwrap();
+        assert!(identity.load().unwrap().is_none());
+    }
 
-        assert!(stored.node_token.is_none());
+    /// A machine upgraded from the account layer has its `zna_`/`znt_` pair on disk. Neither is a
+    /// credential, so it enrols — and the dead bearers must not outlive that.
+    #[test]
+    fn what_the_account_layer_stored_is_not_a_credential_and_is_cleared_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = identity(dir.path());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("account-credential"),
+            r#"{"version":1,"access_token":"zna_old","refresh_token":"znr_old"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("node-token"), r#"{"token":"znt_old"}"#).unwrap();
+
+        assert!(identity.load().unwrap().is_none(), "an old account grant is not a credential");
+
+        identity.save(&a_credential()).unwrap();
+
+        assert!(!dir.path().join("account-credential").exists());
+        assert!(!dir.path().join("node-token").exists());
     }
 
     #[test]
-    fn forget_clears_both() {
+    fn forget_clears_the_credential() {
         let dir = tempfile::tempdir().unwrap();
         let identity = identity(dir.path());
-        identity.save_node_token(&a_token()).unwrap();
+        identity.save(&a_credential()).unwrap();
 
         identity.forget().unwrap();
 
-        assert!(identity.load().unwrap().node_token.is_none());
-    }
-
-    #[test]
-    fn forget_node_token_discards_only_the_token() {
-        // The whole point of having this apart from `forget`: recovering from a node Attacca
-        // refused must not also throw away a credential that is still good, or every recovery
-        // would send someone to a browser instead of quietly minting a replacement node.
-        let dir = tempfile::tempdir().unwrap();
-        let identity = identity(dir.path());
-        identity.save_node_token(&a_token()).unwrap();
-        identity.save_credential(&a_credential()).unwrap();
-
-        identity.forget_node_token().unwrap();
-
-        let stored = identity.load().unwrap();
-        assert!(stored.node_token.is_none(), "the dead token must be gone");
-        assert_eq!(
-            stored.credential,
-            Some(a_credential()),
-            "the credential must survive discarding the token"
-        );
+        assert!(identity.load().unwrap().is_none());
     }
 
     #[test]
@@ -300,19 +240,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = identity(dir.path());
 
-        identity.save_credential(&a_credential()).unwrap();
+        identity.save(&a_credential()).unwrap();
 
-        // `identity()` always pins the file backend, so a second handle to the very same
-        // directory must see itself as in step with what the first one recorded.
         assert_eq!(identity.stranded_in(), None);
         assert_eq!(std::fs::read_to_string(dir.path().join("backend")).unwrap(), "file");
     }
 
     #[test]
     fn a_marker_naming_a_different_backend_than_this_launch_resolved_reads_as_stranded() {
-        // Simulates the case this guards against: an earlier launch stored the identity in the
-        // keychain, and this launch's `SecretStore` — pinned to the file backend here, the way
-        // an unavailable keychain would resolve for real — cannot see it.
+        // An earlier launch stored the identity in the keychain, and this launch's `SecretStore` —
+        // pinned to the file backend here, the way an unavailable keychain would resolve for real
+        // — cannot see it.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join("backend"), "keychain").unwrap();
@@ -322,8 +260,6 @@ mod tests {
 
     #[test]
     fn an_unreadable_marker_is_not_stranded_either() {
-        // Mirrors how corrupt secret JSON is treated: the recovery from "I cannot read this" is
-        // to proceed normally, not to invent a failure out of it.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join("backend"), "not-a-real-backend").unwrap();
@@ -333,30 +269,13 @@ mod tests {
 
     #[test]
     fn forget_clears_the_backend_marker_too() {
-        // A machine that is genuinely starting over must not have a stale marker disagree with
-        // wherever the next enrolment's `SecretStore` happens to land.
         let dir = tempfile::tempdir().unwrap();
         let identity = identity(dir.path());
-        identity.save_credential(&a_credential()).unwrap();
+        identity.save(&a_credential()).unwrap();
         assert!(dir.path().join("backend").exists(), "the marker must exist before it can be cleared");
 
         identity.forget().unwrap();
 
         assert!(!dir.path().join("backend").exists());
-    }
-
-    #[test]
-    fn forget_node_token_leaves_the_backend_marker_alone() {
-        // The credential the marker describes is still exactly where it was; only the node
-        // token to go with it is gone.
-        let dir = tempfile::tempdir().unwrap();
-        let identity = identity(dir.path());
-        identity.save_credential(&a_credential()).unwrap();
-        identity.save_node_token(&a_token()).unwrap();
-
-        identity.forget_node_token().unwrap();
-
-        assert!(dir.path().join("backend").exists());
-        assert_eq!(identity.stranded_in(), None);
     }
 }
