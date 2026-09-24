@@ -143,7 +143,7 @@ impl Engine {
         // all and a machine that could hear and never answer; the spec's loop begins *get a
         // session* and nothing had ever done that, so the id had to be typed into a file.
         let feed = match settings.session.as_deref() {
-            Some(session) => Feed::new(session),
+            Some(session) => Feed::continuing(session, settings.agent.clone()),
             None => Feed::making_one(settings.agent.clone()),
         };
         Engine {
