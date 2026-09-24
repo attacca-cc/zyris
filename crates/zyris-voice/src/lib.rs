@@ -498,13 +498,34 @@ impl Voice {
         self.look().await
     }
 
-    /// Download the speech model. Answers `Err` with a sentence when it could not be had.
-    pub async fn fetch_model(&self) -> Result<view::VoiceView, String> {
+    /// Choose which speaker answers are read through, now and at the next launch.
+    pub async fn choose_speaker(&self, speaker: view::Choice) -> view::VoiceView {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
-            engine.fetch_model().await?;
+            engine.choose_speaker(speaker.clone()).await;
+        }
+        let _ = speaker;
+        self.look().await
+    }
+
+    /// Choose which speech model listening uses, by id, now and at the next launch.
+    pub async fn choose_model(&self, id: String) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_model(id.clone()).await;
+        }
+        let _ = id;
+        self.look().await
+    }
+
+    /// Download a speech model, by id. Answers `Err` with a sentence when it could not be had.
+    pub async fn fetch_model(&self, id: String) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_model(id).await?;
             return Ok(self.look().await);
         }
+        let _ = id;
         Err(NOT_COMPILED_IN.to_string())
     }
 
@@ -523,12 +544,13 @@ impl Voice {
     ///
     /// Turns listening off first: the running session holds the model, and a switch left on
     /// over a model that is gone is a screen claiming something it cannot do.
-    pub async fn forget_model(&self) -> Result<view::VoiceView, String> {
+    pub async fn forget_model(&self, id: String) -> Result<view::VoiceView, String> {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
-            engine.forget_model().await?;
+            engine.forget_model(id).await?;
             return Ok(self.look().await);
         }
+        let _ = id;
         Err(NOT_COMPILED_IN.to_string())
     }
 

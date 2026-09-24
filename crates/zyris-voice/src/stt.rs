@@ -50,9 +50,7 @@ pub use crate::model::{
     model_path_given,
 };
 
-/// The model the product ships against: whisper `base`, multilingual, 141 MB.
-///
-/// A different size is a code change, deliberately — see the plan's "Deliberately not here".
+/// Whisper `base`, multilingual, 141 MB: the model used when nothing else was chosen.
 pub const BASE: Model = Model {
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
           5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
@@ -60,6 +58,63 @@ pub const BASE: Model = Model {
     bytes: 147_951_465,
     sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
 };
+
+/// A speech model a person can choose, and what choosing it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choosable {
+    /// What `voice.json` stores.
+    pub id: &'static str,
+    pub name: &'static str,
+    /// One line for the screen: what it is better at, and what it costs.
+    pub note: &'static str,
+    pub model: Model,
+}
+
+/// The models on offer, smallest first. **All pinned to one revision of the whisper.cpp
+/// repository**, each checked against the SHA-256 its LFS pointer publishes there.
+///
+/// Measured on an i5-10400F (six cores, AVX2, no GPU) on three- to four-second Korean and English
+/// sentences: `base` 0.4-0.5 s and gets names and loanwords wrong ("기토부" for 깃허브), `small`
+/// 1.6-2.1 s and mostly right, `large-v3-turbo` quantized 9-10 s and right. The notes say this in
+/// words, because the numbers are one machine's.
+pub const MODELS: [Choosable; 3] = [
+    Choosable {
+        id: "base",
+        name: "Base",
+        note: "Fastest, and the least accurate: names and borrowed words often come out wrong.",
+        model: BASE,
+    },
+    Choosable {
+        id: "small",
+        name: "Small",
+        note: "Noticeably more accurate, and about four times slower than Base.",
+        model: Model {
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
+                  5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+            file: "ggml-small.bin",
+            bytes: 487_601_967,
+            sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        },
+    },
+    Choosable {
+        id: "large-v3-turbo",
+        name: "Large v3 Turbo",
+        note: "The most accurate, and slow without a fast processor: several seconds a sentence.",
+        model: Model {
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
+                  5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+            file: "ggml-large-v3-turbo-q5_0.bin",
+            bytes: 574_041_195,
+            sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        },
+    },
+];
+
+/// The model `id` names, or [`BASE`]'s entry for an id this build does not offer — a setting
+/// written by a later version, or by hand — so that listening still starts.
+pub fn choosable(id: Option<&str>) -> &'static Choosable {
+    id.and_then(|id| MODELS.iter().find(|m| m.id == id)).unwrap_or(&MODELS[0])
+}
 
 /// Names a model file directly, bypassing the cache directory entirely.
 ///
@@ -126,6 +181,17 @@ pub fn state(model: &Model) -> ModelState {
         Some(model.bytes)
     };
     inspect(&path, expected)
+}
+
+/// Whether `model` is in the cache Zyris downloads into, **ignoring [`MODEL_ENV`]**: what the
+/// list of models on the screen shows, where each row is about that model's own file.
+pub fn cached_state(model: &Model) -> ModelState {
+    match model_path_given(model, None) {
+        Some(path) => inspect(&path, Some(model.bytes)),
+        None => ModelState::Nowhere {
+            reason: "this system does not name a cache directory for downloaded files".into(),
+        },
+    }
 }
 
 /// Download the speech model into `dir`. See [`crate::model::fetch`] for what it guarantees.
@@ -505,6 +571,29 @@ pub fn clean(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A setting written by a later version, or by hand, must not stop listening from starting.
+    #[test]
+    fn a_model_id_this_build_does_not_offer_falls_back_to_base() {
+        assert_eq!(choosable(Some("small")).id, "small");
+        assert_eq!(choosable(Some("large-v9")).model, BASE);
+        assert_eq!(choosable(None).model, BASE);
+    }
+
+    /// Each download is the file it says, from the one revision every digest was read at.
+    #[test]
+    fn every_model_on_offer_is_its_own_file_at_the_pinned_revision() {
+        for (at, one) in MODELS.iter().enumerate() {
+            assert!(one.model.url.contains("5359861c739e955e79d9a303bcbc70fb988958b1"), "{}", one.id);
+            assert!(one.model.url.ends_with(one.model.file), "{}", one.id);
+            assert_eq!(one.model.sha256.len(), 64, "{}", one.id);
+            for other in &MODELS[at + 1..] {
+                assert_ne!(one.id, other.id);
+                assert_ne!(one.model.file, other.model.file);
+            }
+        }
+        assert_eq!(MODELS[0].model, BASE, "Base is first, and it is what nothing chosen means");
+    }
 
     fn seconds(s: f64) -> usize {
         (s * SAMPLE_RATE as f64) as usize

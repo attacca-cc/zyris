@@ -102,6 +102,16 @@ type VoiceModelView =
   | { state: "nowhere"; reason: string }
   | { state: "notHere"; reason: string };
 
+// `view::SpeechModelView`: one speech model on offer, and what is in the cache for it.
+type SpeechModel = {
+  id: string;
+  name: string;
+  note: string;
+  bytes: number;
+  state: ModelView;
+  chosen: boolean;
+};
+
 type HotkeySupport =
   | { state: "working"; trigger: string; releaseConfirmed: boolean }
   | { state: "needsAKeyBound"; shortcutId: string; desktop: string; line: string | null; how: string }
@@ -116,7 +126,10 @@ export type VoiceScreen = {
     listening: Listening;
     devices: DeviceList;
     chosen: Choice;
+    speakers: DeviceList;
+    speaker: Choice;
     model: ModelView;
+    models: SpeechModel[];
     modelEnv: string | null;
     wake: WakeView;
     speaking: Speaking;
@@ -203,6 +216,85 @@ function heardLine(event: VoiceEvent): string {
 // ---------------------------------------------------------------------------------------------
 // The screen
 // ---------------------------------------------------------------------------------------------
+
+// One list of devices to choose from — the microphone's or the speaker's, which are the same
+// shape and must say the same things about a list that could not be read.
+function DevicePicker({
+  list,
+  chosen,
+  name,
+  noun,
+  disabled,
+  onChoose,
+}: {
+  list: DeviceList;
+  chosen: Choice;
+  name: string;
+  noun: string;
+  disabled: boolean;
+  onChoose: (choice: Choice) => void;
+}) {
+  if (list.state === "notHere") return <p className="problem">{list.reason}</p>;
+  if (list.state === "unreadable") {
+    // Never "no devices" on a failed read. A sound server that is not running answers nothing
+    // at all, which is a different thing from a computer that has none — and telling somebody
+    // the second when it is the first sends them shopping.
+    return (
+      <p className="problem">
+        The list of {noun}s could not be read, so there is nothing to choose from here.{" "}
+        {list.reason}
+      </p>
+    );
+  }
+  if (list.devices.length === 0) {
+    return <p className="muted">The sound system answered and listed no {noun}s on this computer.</p>;
+  }
+  return (
+    <>
+      <ul className="caps choices">
+        <li>
+          <label>
+            <input
+              type="radio"
+              name={name}
+              checked={chosen.kind === "default"}
+              disabled={disabled}
+              onChange={() => onChoose({ kind: "default" })}
+            />{" "}
+            Whichever this computer calls the default
+          </label>
+          <p className="note muted">
+            Zyris follows the default when you change it. A named device below does not move.
+          </p>
+        </li>
+        {list.devices.map((device) => (
+          <li key={device.id}>
+            <label>
+              <input
+                type="radio"
+                name={name}
+                checked={chosen.kind === "device" && chosen.id === device.id}
+                disabled={disabled}
+                onChange={() => onChoose({ kind: "device", id: device.id })}
+              />{" "}
+              {device.name}
+            </label>
+            <p className="note muted">
+              {device.isDefault ? "This computer's default, and " : ""}
+              {whatItIs(device)}.
+            </p>
+          </li>
+        ))}
+      </ul>
+      <p className="muted note">
+        Two entries can carry exactly the same name — on many computers a loudspeaker's monitor is
+        listed beside the microphone built into the same chip. The line under each one is what
+        tells them apart. Nothing is filtered out of this list: on some sound systems the device
+        that always works is the one that will not say what it is.
+      </p>
+    </>
+  );
+}
 
 export function Voice() {
   // The answer, or `undefined` while the first read is in flight. Never an empty object for a
@@ -579,80 +671,32 @@ export function Voice() {
 
       <section>
         <h2>Microphone</h2>
-
-        {voice.devices.state === "notHere" && <p className="problem">{voice.devices.reason}</p>}
-
-        {voice.devices.state === "unreadable" && (
-          // Never "no microphones" on a failed read. A sound server that is not running answers
-          // nothing at all, which is a different thing from a computer that has no microphone —
-          // and telling somebody the second when it is the first sends them shopping.
-          <p className="problem">
-            The list of microphones could not be read, so there is nothing to choose from here.{" "}
-            {voice.devices.reason}
-          </p>
-        )}
-
-        {voice.devices.state === "listed" && voice.devices.devices.length === 0 && (
-          <p className="muted">
-            The sound system answered and listed no microphones on this computer.
-          </p>
-        )}
-
-        {voice.devices.state === "listed" && voice.devices.devices.length > 0 && (
-          <>
-            <ul className="caps choices">
-              <li>
-                <label>
-                  <input
-                    type="radio"
-                    name="microphone"
-                    checked={voice.chosen.kind === "default"}
-                    disabled={busy !== null}
-                    onChange={() =>
-                      act("device", "set_voice_device", { device: { kind: "default" } })
-                    }
-                  />{" "}
-                  Whichever this computer calls the default
-                </label>
-                <p className="note muted">
-                  Zyris follows the default when you change it. A named device below does not
-                  move.
-                </p>
-              </li>
-              {voice.devices.devices.map((device) => (
-                <li key={device.id}>
-                  <label>
-                    <input
-                      type="radio"
-                      name="microphone"
-                      checked={
-                        voice.chosen.kind === "device" && voice.chosen.id === device.id
-                      }
-                      disabled={busy !== null}
-                      onChange={() =>
-                        act("device", "set_voice_device", {
-                          device: { kind: "device", id: device.id },
-                        })
-                      }
-                    />{" "}
-                    {device.name}
-                  </label>
-                  <p className="note muted">
-                    {device.isDefault ? "This computer's default, and " : ""}
-                    {whatItIs(device)}.
-                  </p>
-                </li>
-              ))}
-            </ul>
-            <p className="muted note">
-              Two entries can carry exactly the same name — on many computers a loudspeaker's
-              monitor is listed beside the microphone built into the same chip. The line under
-              each one is what tells them apart. Nothing is filtered out of this list: on some
-              sound systems the device that always works is the one that will not say what it is.
-            </p>
-          </>
-        )}
+        <DevicePicker
+          list={voice.devices}
+          chosen={voice.chosen}
+          name="microphone"
+          noun="microphone"
+          disabled={busy !== null}
+          onChoose={(device) => act("device", "set_voice_device", { device })}
+        />
         {refused.device && <p className="note problem">{refused.device}</p>}
+      </section>
+
+      <section>
+        <h2>Speaker</h2>
+        <DevicePicker
+          list={voice.speakers}
+          chosen={voice.speaker}
+          name="speaker"
+          noun="speaker"
+          disabled={busy !== null}
+          onChoose={(speaker) => act("speaker", "set_voice_speaker", { speaker })}
+        />
+        <p className="muted note">
+          Answers are read through it while listening is on. Choosing another reopens the
+          microphone and the speaker together.
+        </p>
+        {refused.speaker && <p className="note problem">{refused.speaker}</p>}
       </section>
 
       <section>
@@ -674,61 +718,79 @@ export function Voice() {
           </p>
         )}
 
-        {voice.model.state === "ready" && (
-          <p>
-            The speech model is on this computer, at{" "}
-            <span className="mono">{voice.model.path}</span> ({megabytes(voice.model.bytes)}).
-          </p>
-        )}
-        {voice.model.state === "absent" && (
-          <p>
-            The speech model has not been downloaded yet. It is about{" "}
-            {megabytes(voice.model.bytes)}, it is downloaded once, and it is kept at{" "}
-            <span className="mono">{voice.model.path}</span>.
-          </p>
-        )}
-        {voice.model.state === "damaged" && (
-          <p className="problem">
-            The file at <span className="mono">{voice.model.path}</span> is{" "}
-            {megabytes(voice.model.bytes)} and the speech model is{" "}
-            {megabytes(voice.model.expected)}, so it is not the model and cannot be loaded.
-            Downloading it again replaces it.
-          </p>
-        )}
-
         {voice.modelEnv !== null ? (
-          // No button at all for a file somebody named themselves. Downloading would fetch into
-          // the cache that this setting overrides, and deleting would throw away a file that is
-          // not Zyris's to throw away.
+          // No list at all when somebody named a file themselves: that file is what listening
+          // uses, and downloading or deleting here would be about a different file.
           <p className="muted note">
             The model in use was named by <span className="mono">ZYRIS_WHISPER_MODEL</span> (
             <span className="mono">{voice.modelEnv}</span>). Zyris takes that file as given: it
             does not check its size, will not replace it, and will not delete it. Remove that
-            setting to go back to the model Zyris downloads.
+            setting to choose one of the models Zyris downloads.
           </p>
         ) : (
-          <div className="switch-row">
-            {(voice.model.state === "absent" || voice.model.state === "damaged") && (
-              <button
-                type="button"
-                className="button"
-                disabled={busy !== null}
-                onClick={() => act("model", "fetch_speech_model")}
-              >
-                {busy === "model" ? "Downloading" : "Download the speech model"}
-              </button>
-            )}
-            {voice.model.state === "ready" && (
-              <button
-                type="button"
-                className="button button-quiet"
-                disabled={busy !== null}
-                onClick={() => act("model", "forget_speech_model")}
-              >
-                {busy === "model" ? "Deleting" : "Delete it"}
-              </button>
-            )}
-          </div>
+          <ul className="caps choices">
+            {voice.models.map((model) => (
+              <li key={model.id}>
+                <label>
+                  <input
+                    type="radio"
+                    name="speech-model"
+                    checked={model.chosen}
+                    disabled={busy !== null}
+                    onChange={() => act("model", "set_speech_model", { id: model.id })}
+                  />{" "}
+                  {model.name} ({megabytes(model.bytes)})
+                </label>
+                <p className="note muted">{model.note}</p>
+                {model.state.state === "ready" && (
+                  <p className="note">
+                    On this computer.{" "}
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      aria-label={`Delete ${model.name}`}
+                      disabled={busy !== null}
+                      onClick={() => act("model", "forget_speech_model", { id: model.id })}
+                    >
+                      {busy === "model" ? "Working" : "Delete it"}
+                    </button>
+                  </p>
+                )}
+                {(model.state.state === "absent" || model.state.state === "damaged") && (
+                  <p className="note">
+                    {model.state.state === "damaged"
+                      ? `The file on disk is ${megabytes(model.state.bytes)} and this model is ` +
+                        `${megabytes(model.state.expected)}, so it cannot be loaded; downloading ` +
+                        "replaces it. "
+                      : model.chosen
+                        ? "Chosen, and not downloaded yet: listening needs it. "
+                        : "Not downloaded. "}
+                    {model.state.state === "absent" && (
+                      <>
+                        It is downloaded once and kept at{" "}
+                        <span className="mono">{model.state.path}</span>.{" "}
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      className="button"
+                      aria-label={`Download ${model.name}`}
+                      disabled={busy !== null}
+                      onClick={() => act("model", "fetch_speech_model", { id: model.id })}
+                    >
+                      {busy === "model" ? "Downloading" : "Download"}
+                    </button>
+                  </p>
+                )}
+                {model.state.state === "unreadable" && (
+                  <p className="note problem">
+                    Something at <span className="mono">{model.state.path}</span> could not be
+                    read. {model.state.reason}
+                  </p>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
 
         {busy === "model" && (
@@ -741,8 +803,9 @@ export function Voice() {
 
         <p className="muted note">
           Transcription runs on this computer and needs a processor with AVX2, which Intel and AMD
-          have shipped since 2013. Deleting the model turns listening off, because there would be
-          nothing left to turn what you say into text.
+          have shipped since 2013. A larger model is more accurate and slower; how much slower
+          depends on this computer's processor. Choosing one takes effect at once if listening is
+          on, and deleting the one in use turns listening off.
         </p>
       </section>
 

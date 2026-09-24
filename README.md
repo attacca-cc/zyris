@@ -310,13 +310,24 @@ and "Hey, I see" kept their own words; a test holds both halves.
 
 ### The model
 
-**The speech model is 141 MB and is downloaded once**, into this computer's cache directory
-(`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\attacca\zyris\cache\models` on Windows)
-rather than into the installer. It is checked against a published SHA-256 before it is put in
-place, so an interrupted or intercepted download leaves nothing behind and the next run simply
-offers to fetch it again. If you already have a `ggml-base.bin`, set `ZYRIS_WHISPER_MODEL` to it
-and no download happens at all — Zyris then takes that file as given, and will neither replace it
-nor delete it.
+**Three speech models, chosen on the Voice tab, each downloaded once** into this computer's cache
+directory (`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\attacca\zyris\cache\models` on
+Windows) rather than into the installer:
+
+| Model | Download | On an i5-10400F, a 3-4 s sentence | |
+|---|---|---|---|
+| Base | 141 MB | 0.4-0.5 s | the default; gets names and borrowed words wrong ("기토부" for 깃허브) |
+| Small | 465 MB | 1.6-2.1 s | mostly right |
+| Large v3 Turbo (q5_0) | 547 MB | 9-10 s | right, and slow without a GPU, which this build does not use |
+
+Each is checked against the SHA-256 published for it at one pinned revision before it is put in
+place, so an interrupted or intercepted download leaves nothing behind. Choosing a model takes
+effect at once if listening is on; the choice is `"speechModel"` in `voice.json`. If you already
+have a `ggml-*.bin`, set `ZYRIS_WHISPER_MODEL` to it and that file is used whatever is chosen —
+Zyris takes it as given, and will neither replace it nor delete it.
+
+**The microphone and the speaker are both chosen there too**, or left to follow whatever this
+computer calls the default. Answers are read through the chosen speaker while listening is on.
 
 ### The voice
 

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The whole of what this screen can do to the machine, mocked at the module boundary. Through
@@ -62,7 +62,39 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
         ],
       },
       chosen: over.chosen ?? { kind: "default" },
+      speakers: over.speakers ?? {
+        state: "listed",
+        devices: [
+          {
+            id: "alsa_output.hdmi",
+            name: "HDMI Audio",
+            isDefault: true,
+            direction: "output",
+          },
+        ],
+      },
+      speaker: over.speaker ?? { kind: "default" },
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
+      // The chosen row carries whatever `model` says, so a test that breaks the model in use
+      // sees it in the list too.
+      models: over.models ?? [
+        {
+          id: "base",
+          name: "Base",
+          note: "Fastest, and the least accurate.",
+          bytes: 147951465,
+          state: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
+          chosen: true,
+        },
+        {
+          id: "small",
+          name: "Small",
+          note: "Noticeably more accurate.",
+          bytes: 487601967,
+          state: { state: "absent", path: "/home/ada/.cache/zyris/models/ggml-small.bin", bytes: 487601967 },
+          chosen: false,
+        },
+      ],
       modelEnv: over.modelEnv ?? null,
       speaking: over.speaking ?? { state: "session", id: "s-1" },
       voiceModel: over.voiceModel ?? { state: "ready", dir: VOICE },
@@ -90,6 +122,12 @@ function answers(first: Screen, then?: Screen) {
 // Everything a person can actually read, as one string. Deliberately the rendered text and not
 // the DOM: a test on class names passes for a screen that paints two states identically and says
 // the same words about both.
+// The microphone's own choices. The speaker and the model are chosen with radios too, and a
+// count of every radio on the page would be a count of three lists.
+function microphones(): HTMLInputElement[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>('input[name="microphone"]'));
+}
+
 function readable(): string {
   return document.body.textContent ?? "";
 }
@@ -343,7 +381,7 @@ describe("Voice", () => {
 
     await screen.findByText(/the sound server is not running/i);
     expect(readable()).not.toMatch(/listed no microphones/i);
-    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(microphones()).toHaveLength(0);
   });
 
   it("says there are none only when the list was read and is empty", async () => {
@@ -359,7 +397,7 @@ describe("Voice", () => {
     // records the loudspeakers. A screen showing only names cannot be used at all.
     render(<Voice />);
 
-    await waitFor(() => expect(screen.getAllByRole("radio").length).toBe(3));
+    await waitFor(() => expect(microphones().length).toBe(3));
     expect(screen.getAllByText("Built-in Audio Analog Stereo")).toHaveLength(2);
     expect(readable()).toMatch(/a microphone/i);
     expect(readable()).toMatch(/what this computer is playing/i);
@@ -370,8 +408,8 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await waitFor(() => expect(screen.getAllByRole("radio")).toHaveLength(3));
-    const [followDefault, builtIn, monitor] = screen.getAllByRole<HTMLInputElement>("radio");
+    await waitFor(() => expect(microphones()).toHaveLength(3));
+    const [followDefault, builtIn, monitor] = microphones();
     // A screen that showed the wrong one as chosen would have somebody recording their
     // loudspeakers and reading that they had picked the microphone.
     expect(followDefault.checked).toBe(false);
@@ -397,7 +435,7 @@ describe("Voice", () => {
 
     render(<Voice />);
     const download = await screen.findByRole<HTMLButtonElement>("button", {
-      name: /download the speech model/i,
+      name: /download base/i,
     });
     download.click();
 
@@ -413,12 +451,41 @@ describe("Voice", () => {
   // The model
   // ------------------------------------------------------------------------------------------
 
+  it("chooses the speaker answers are read through", async () => {
+    answers(machine({}));
+    render(<Voice />);
+
+    const hdmi = await screen.findByRole("radio", { name: /hdmi audio/i });
+    fireEvent.click(hdmi);
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_voice_speaker", {
+        speaker: { kind: "device", id: "alsa_output.hdmi" },
+      }),
+    );
+  });
+
+  it("chooses and downloads a speech model by its id", async () => {
+    answers(machine({}));
+    render(<Voice />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /small/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "small" }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /download small/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
+    );
+  });
+
   it("says how big the download is before anybody agrees to it", async () => {
     answers(machine({ model: { state: "absent", path: MODEL, bytes: 147951465 } }));
 
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /download the speech model/i });
+    await screen.findByRole("button", { name: /download base/i });
     expect(readable()).toContain("141 MB");
     expect(readable()).toContain(MODEL);
   });
@@ -439,7 +506,7 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/could not read/i);
-    expect(screen.queryByRole("button", { name: /download/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /download base/i })).toBeNull();
     expect(readable()).not.toMatch(/has not been downloaded/i);
   });
 
@@ -450,7 +517,7 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /download the speech model/i });
+    await screen.findByRole("button", { name: /download base/i });
     expect(readable()).toContain("1 MB");
     expect(readable()).toContain("141 MB");
   });
@@ -466,15 +533,15 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/takes that file as given/i);
-    expect(screen.queryByRole("button", { name: /download/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /download base/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
   });
 
   it("offers to delete a model it downloaded, and says what that costs", async () => {
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /delete it/i });
-    expect(readable()).toMatch(/deleting the model turns listening off/i);
+    await screen.findByRole("button", { name: /delete base/i });
+    expect(readable()).toMatch(/deleting the one in use turns listening off/i);
   });
 
   // ------------------------------------------------------------------------------------------

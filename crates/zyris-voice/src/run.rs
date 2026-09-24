@@ -46,7 +46,8 @@ use crate::session::{Session, Speaking, Stopped};
 use crate::turn::Feed;
 use crate::vad::{Endpointer, Listening};
 use crate::view::{
-    DeviceList, ListeningState, ModelView, SpeakingState, VoiceView, WakeState, WakeView, show,
+    DeviceList, ListeningState, ModelView, SpeakingState, SpeechModelView, VoiceView, WakeState,
+    WakeView, show,
 };
 use crate::{Push, VoiceEvent, VoiceSupport, stt, wake};
 
@@ -82,6 +83,12 @@ pub struct Settings {
     /// from the takes. Wins over the takes when both are there.
     #[serde(default)]
     pub wake_phrase: Option<String>,
+    /// Which speaker answers are read through.
+    #[serde(default)]
+    pub speaker: Choice,
+    /// Which speech model listening uses, by [`stt::Choosable::id`]. `None` is Base.
+    #[serde(default)]
+    pub speech_model: Option<String>,
 }
 
 /// What the settings file is called, inside the instance's data directory.
@@ -257,7 +264,26 @@ impl Engine {
                 Err(problem) => DeviceList::Unreadable { reason: problem.reason },
             },
             chosen: live.settings.device.clone(),
-            model: model_view(stt::state(&stt::BASE)),
+            speakers: match crate::playback::devices() {
+                Ok(devices) => DeviceList::Listed { devices },
+                Err(problem) => DeviceList::Unreadable { reason: problem.reason },
+            },
+            speaker: live.settings.speaker.clone(),
+            model: model_view(stt::state(&stt::choosable(live.settings.speech_model.as_deref()).model)),
+            models: {
+                let chosen = stt::choosable(live.settings.speech_model.as_deref()).id;
+                stt::MODELS
+                    .iter()
+                    .map(|choosable| SpeechModelView {
+                        id: choosable.id.to_string(),
+                        name: choosable.name.to_string(),
+                        note: choosable.note.to_string(),
+                        bytes: choosable.model.bytes,
+                        state: model_view(stt::cached_state(&choosable.model)),
+                        chosen: choosable.id == chosen,
+                    })
+                    .collect()
+            },
             model_env: std::env::var(stt::MODEL_ENV).ok().filter(|named| !named.is_empty()),
             speaking: match live.settings.session.clone() {
                 Some(id) => SpeakingState::Session { id },
@@ -308,7 +334,7 @@ impl Engine {
         }
         self.halt(&mut live).await;
 
-        live.state = match self.begin(&live.settings.device, live.settings.wake_phrase.clone()).await {
+        live.state = match self.begin(&live.settings).await {
             Ok((running, device)) => {
                 live.running = Some(running);
                 ListeningState::On { device }
@@ -325,12 +351,34 @@ impl Engine {
         let mut live = self.live.lock().await;
         live.settings.device = device;
         self.store(&live.settings);
+        self.restart_if_running(&mut live).await;
+    }
 
+    /// Choose the speaker answers are read through, and reopen it if listening is on — the
+    /// speaker is opened with the microphone, so both are opened again.
+    pub async fn choose_speaker(&self, speaker: Choice) {
+        let mut live = self.live.lock().await;
+        live.settings.speaker = speaker;
+        self.store(&live.settings);
+        self.restart_if_running(&mut live).await;
+    }
+
+    /// Choose the speech model, and start listening again on it if listening is on.
+    pub async fn choose_model(&self, id: String) {
+        let mut live = self.live.lock().await;
+        live.settings.speech_model = Some(stt::choosable(Some(&id)).id.to_string());
+        self.store(&live.settings);
+        self.restart_if_running(&mut live).await;
+    }
+
+    /// Stop and start again with the settings as they are now, if anything is running or was
+    /// meant to be.
+    async fn restart_if_running(&self, live: &mut Live) {
         if live.running.is_none() && !matches!(live.state, ListeningState::Failed { .. }) {
             return;
         }
-        self.halt(&mut live).await;
-        live.state = match self.begin(&live.settings.device, live.settings.wake_phrase.clone()).await {
+        self.halt(live).await;
+        live.state = match self.begin(&live.settings).await {
             Ok((running, device)) => {
                 live.running = Some(running);
                 ListeningState::On { device }
@@ -343,7 +391,8 @@ impl Engine {
     ///
     /// Blocking for as long as 141 MB takes, which is why the screen shows what it is doing
     /// rather than a button that appears to do nothing.
-    pub async fn fetch_model(&self) -> Result<(), String> {
+    pub async fn fetch_model(&self, id: String) -> Result<(), String> {
+        let model = stt::choosable(Some(&id)).model;
         let dir = stt::cache_dir()
             .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
         {
@@ -353,9 +402,12 @@ impl Engine {
             };
         }
 
-        let fetched = stt::fetch(&stt::BASE, &dir, |_| {}).await.map_err(|f| f.to_string());
+        let fetched = stt::fetch(&model, &dir, |_| {}).await.map_err(|f| f.to_string());
 
-        let wanted = self.live.lock().await.settings.listen;
+        let wanted = {
+            let live = self.live.lock().await;
+            live.settings.listen && stt::choosable(live.settings.speech_model.as_deref()).id == id
+        };
         match (&fetched, wanted) {
             // It was already asked for; now there is something to start.
             (Ok(_), true) => self.set_listening(true).await,
@@ -433,7 +485,8 @@ impl Engine {
     /// own choice of model, kept wherever they keep it; this button is for the cache Zyris
     /// filled, and deleting somebody else's file because it happens to be in use here is not
     /// this program's to do.
-    pub async fn forget_model(&self) -> Result<(), String> {
+    pub async fn forget_model(&self, id: String) -> Result<(), String> {
+        let model = stt::choosable(Some(&id)).model;
         if std::env::var_os(stt::MODEL_ENV).is_some_and(|named| !named.is_empty()) {
             return Err(format!(
                 "the speech model in use was named by the {} environment variable, so Zyris will \
@@ -441,11 +494,19 @@ impl Engine {
                 stt::MODEL_ENV
             ));
         }
-        self.set_listening(false).await;
+        // Only the model in use is held open by a running session.
+        let in_use = {
+            let live = self.live.lock().await;
+            stt::choosable(live.settings.speech_model.as_deref()).id == id
+        };
+        if in_use {
+            self.set_listening(false).await;
+        }
 
         let dir = stt::cache_dir()
             .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
-        let model = dir.join(stt::BASE.file);
+        let file = model.file;
+        let model = dir.join(file);
         match std::fs::remove_file(&model) {
             Ok(()) => {}
             // Nothing to delete is not a failure: it is what the screen already says is there.
@@ -460,7 +521,7 @@ impl Engine {
         // never sweeps one, because the cache is shared and the file it swept might be another
         // instance's download in flight. A person pressing this button is the one case where
         // sweeping is asked for rather than guessed at.
-        let prefix = format!("{}{}", stt::BASE.file, stt::PART_SUFFIX);
+        let prefix = format!("{}{}", file, stt::PART_SUFFIX);
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with(&prefix) {
@@ -485,12 +546,10 @@ impl Engine {
     // ------------------------------------------------------------------------------------
 
     /// Open a microphone and put a session over it.
-    async fn begin(
-        &self,
-        choice: &Choice,
-        typed_phrase: Option<String>,
-    ) -> Result<(Running, String), String> {
-        let path = match stt::state(&stt::BASE) {
+    async fn begin(&self, settings: &Settings) -> Result<(Running, String), String> {
+        let choice = &settings.device;
+        let typed_phrase = settings.wake_phrase.clone();
+        let path = match stt::state(&stt::choosable(settings.speech_model.as_deref()).model) {
             stt::ModelState::Ready { path, .. } => path,
             // Everything else is the screen's business: it renders the same `ModelState` and has
             // a button for the one case a button fixes. The sentence here is about listening.
@@ -520,7 +579,7 @@ impl Engine {
         // each of them is a run that listens, transcribes and publishes exactly as before, and
         // says why it is not talking in the log rather than by failing to start.
         let mut tasks = Vec::new();
-        let (speaking, speaker_stop) = match self.open_speaker(apm.clone(), &capture_delay).await {
+        let (speaking, speaker_stop) = match self.open_speaker(apm.clone(), &capture_delay, &settings.speaker).await {
             Ok((speaking, stop, started)) => {
                 tasks = started;
                 (Some(speaking), Some(stop))
@@ -565,6 +624,7 @@ impl Engine {
         &self,
         apm: Arc<Apm>,
         capture_delay: &Arc<AtomicU64>,
+        speaker: &Choice,
     ) -> Result<
         (Arc<Speaking>, std::sync::mpsc::Sender<()>, Vec<tokio::task::JoinHandle<()>>),
         String,
@@ -587,7 +647,7 @@ impl Engine {
             .map_err(|_| "loading the voice stopped before it finished".to_string())?
             .map_err(|fault| fault.to_string())?;
 
-        let (speaker, tap, rate, stop) = open_speaker_on_a_thread().await?;
+        let (speaker, tap, rate, stop) = open_speaker_on_a_thread(speaker.clone()).await?;
 
         let mut tasks = Vec::new();
         // The render side of the echo canceller. Started before anything can be queued, so that
@@ -745,7 +805,7 @@ async fn open_on_a_thread(
 /// `Send` on every platform, so a `Playback` cannot be held by anything that is. What crosses
 /// the thread boundary is a [`Speaker`] — channels and atomics — the render tap, the rate the
 /// stream was actually opened at, and the handle that closes it.
-async fn open_speaker_on_a_thread() -> Result<
+async fn open_speaker_on_a_thread(choice: Choice) -> Result<
     (Speaker, tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>, u32, std::sync::mpsc::Sender<()>),
     String,
 > {
@@ -754,7 +814,7 @@ async fn open_speaker_on_a_thread() -> Result<
 
     std::thread::Builder::new()
         .name("zyris-speaker".to_string())
-        .spawn(move || match Playback::open(&Choice::Default) {
+        .spawn(move || match Playback::open(&choice) {
             Ok((playback, tap)) => {
                 let rate = playback.config().sample_rate;
                 if ready.send(Ok((playback.handle(), tap, rate))).is_err() {
@@ -1105,7 +1165,7 @@ mod tests {
     fn nothing_listens_until_somebody_says_so() {
         assert_eq!(
             Settings::default(),
-            Settings { listen: false, device: Choice::Default, session: None, agent: None, wake_phrase: None }
+            Settings { listen: false, device: Choice::Default, session: None, agent: None, wake_phrase: None, ..Default::default() }
         );
 
         let engine = Engine::new(None, broadcast::channel(4).0);
