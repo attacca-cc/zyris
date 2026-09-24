@@ -849,7 +849,13 @@ impl Session {
         if self.pending.is_none() {
             self.since = Some(std::time::Instant::now());
             self.publish(VoiceEvent::Thinking);
-            self.pending = Some(self.spawn(audio));
+            // **Behind a look still in flight, never beside it.** The look belongs to a turn that
+            // has ended and `hearing` would drop it anyway, but it is still running on its own
+            // thread, and two whisper passes at once each spin a full thread pool: measured end to
+            // end, a 3.7 s turn took 15 s to transcribe that way against 0.6 s alone. Waiting for
+            // the look costs at most one look.
+            let look = self.partial.take();
+            self.pending = Some(self.spawn_after(look, audio));
         } else if self.queued.is_none() {
             self.publish(VoiceEvent::Thinking);
             self.queued = Some(audio);
@@ -864,6 +870,22 @@ impl Session {
     fn spawn(&self, audio: Vec<f32>) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
         let stt = self.stt.clone();
         tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+    }
+
+    /// [`Session::spawn`], once `before` has finished, if there is one.
+    fn spawn_after(
+        &self,
+        before: Option<tokio::task::JoinHandle<Result<String, stt::Fault>>>,
+        audio: Vec<f32>,
+    ) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
+        let Some(before) = before else { return self.spawn(audio) };
+        let stt = self.stt.clone();
+        tokio::spawn(async move {
+            let _ = before.await;
+            tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+                .await
+                .unwrap_or(Err(stt::Fault::Lost))
+        })
     }
 
     fn transcribed(
@@ -2360,6 +2382,29 @@ mod tests {
             "the model was asked about a turn no window could have shown"
         );
         zyris.release().await;
+        zyris.stops().await;
+    }
+
+    /// **The turn's own transcription waits for a look still in flight**, rather than running
+    /// beside it: two whisper passes at once each spin a whole thread pool, and a 3.7 s turn took
+    /// 15 s to come back that way against 0.6 s alone.
+    #[tokio::test]
+    async fn the_answer_is_not_transcribed_beside_a_look_still_running() {
+        let (scribe, open) = Scribe::gated("the whole sentence");
+        let (mut zyris, _traces) = running_watched(scribe);
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        tokio::time::sleep(QUIET).await;
+        assert_eq!(zyris.scribe.calls(), 1, "only the look may be running while it is");
+
+        open.send(()).expect("the look is waiting on the gate");
+        open.send(()).expect("the transcription is waiting on the gate");
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "the whole sentence".into() });
+        assert_eq!(zyris.scribe.calls(), 2);
         zyris.stops().await;
     }
 
