@@ -407,6 +407,20 @@ impl Stt {
     /// whisper would answer the same thing by a different route — a warning and zero
     /// segments — and a caller cannot tell that apart from a silent room.
     pub fn transcribe(&self, audio: &[f32]) -> Result<String, Fault> {
+        self.transcribe_expecting(audio, None)
+    }
+
+    /// [`Stt::transcribe`], told what it is likely to hear.
+    ///
+    /// **An initial prompt, and what it buys is spelling.** A name whisper has never seen comes
+    /// back different every time — five takes of one phrase came back as five different words in
+    /// each of three languages — and told to expect "Hey Zyris" it wrote all five as exactly that,
+    /// while other speech of the same length ("Hey Siri", "하이 자비스", "Hey, I see") kept its own
+    /// words. The language is still detected.
+    ///
+    /// ponytail: whisper-rs leaks the prompt's CString on every call (`into_raw`, never freed); a
+    /// phrase is a few bytes an utterance, so it is left rather than worked around.
+    pub fn transcribe_expecting(&self, audio: &[f32], prompt: Option<&str>) -> Result<String, Fault> {
         if audio.len() < samples_in(MIN_AUDIO) {
             return Ok(String::new());
         }
@@ -418,8 +432,12 @@ impl Stt {
             None => self.warm_state()?,
         };
 
+        let mut params = settings.params();
+        if let Some(prompt) = prompt {
+            params.set_initial_prompt(prompt);
+        }
         state
-            .full(settings.params(), audio)
+            .full(params, audio)
             .map_err(|e| Fault::Whisper { detail: format!("transcription failed: {e}") })?;
 
         let mut text = String::new();

@@ -100,17 +100,7 @@ pub mod session;
 #[cfg(all(windows, feature = "voice"))]
 pub mod win_aec;
 
-// Recording a wake word, and keeping it. Nothing matches it -- see the module.
-/// What a phrase sounds like, as numbers two recordings of it can be compared on. The wake
-/// word.s front end, and nothing else uses it.
-#[cfg(feature = "voice")]
-pub mod mfcc;
-
-/// Whether what was just said is the phrase somebody enrolled. Dynamic time warping over
-/// [`mfcc`] features, against the takes [`wake`] keeps.
-#[cfg(feature = "voice")]
-pub mod spot;
-
+// Recording a wake word, and what it is matched as.
 #[cfg(feature = "voice")]
 pub mod wake;
 
@@ -208,14 +198,15 @@ pub enum Trace {
     /// the first question this stream is asked.
     #[serde(rename_all = "camelCase")]
     Key { down: bool },
-    /// The enrolled phrase was heard, and a turn was opened because of it.
-    ///
-    /// `distance` and `threshold` travel because the threshold is calibrated from the takes
-    /// rather than chosen, so the pair is the only thing that says how close a call it was.
-    /// A run of matches at 15.9 against a threshold of 16.0 is a phrase about to stop being
-    /// recognised, and nothing else would show that before it happened.
+    /// The phrase was heard, and a turn was opened because of it. `heard` is what whisper made
+    /// of the utterance, so a wake nobody meant shows what it was mistaken for.
     #[serde(rename_all = "camelCase")]
-    Woke { distance: f32, threshold: f32 },
+    Woke { heard: String },
+    /// Something was said while the phrase was being listened for, and it was not the phrase.
+    /// What whisper heard travels, so a phrase that keeps being spelled some other way shows as
+    /// that spelling.
+    #[serde(rename_all = "camelCase")]
+    Unmatched { heard: String },
     /// The key reached a running session, and a turn began or ended because of it.
     ///
     /// Always preceded by a [`Trace::Key`]. One without the other means the key arrived and

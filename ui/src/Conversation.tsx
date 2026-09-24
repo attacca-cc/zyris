@@ -37,7 +37,7 @@ type Sentence = {
 };
 
 type Turn =
-  | { who: "woke"; distance: number; threshold: number }
+  | { who: "woke"; heard: string }
   | {
       who: "you";
       state: "recording" | "thinking" | "said" | "lost";
@@ -88,7 +88,7 @@ function fold(turns: Turn[], step: Trace): Turn[] {
       // The turn itself is opened by the "recording" that follows; this only marks how it was
       // started, because "I said the phrase and it heard me" and "I pressed the key" are
       // different things to be looking at when nothing else happens afterwards.
-      return [...turns, { who: "woke", distance: step.distance, threshold: step.threshold }];
+      return [...turns, { who: "woke", heard: step.heard }];
     case "recording":
       if (step.started) {
         return [...turns, { who: "you", state: "recording", text: "", detail: "", sofar: "" }];
@@ -298,10 +298,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
             turn.who === "woke" ? (
               <li key={at} className="turn turn-woke">
                 <span className="turn-who">Woke</span>
-                <p className="note">
-                  The wake word, at {turn.distance.toFixed(1)} against{" "}
-                  {turn.threshold.toFixed(1)}.
-                </p>
+                <p className="note">The wake word, heard as &ldquo;{turn.heard}&rdquo;.</p>
               </li>
             ) : turn.who === "you" ? (
               <Yours key={at} turn={turn} />

@@ -71,15 +71,10 @@ describe("the Conversation screen", () => {
 
   it("shows a turn the wake word opened as one the wake word opened", async () => {
     // "I said the phrase and it heard me" and "I pressed the key" are different things to be
-    // looking at when nothing happens next, and the distance against the threshold is the
-    // only thing that says how close a call it was.
-    const page = await show([
-      { step: "woke", distance: 12.4, threshold: 16.3 },
-      ...AN_ANSWER.slice(1),
-    ]);
+    // looking at when nothing happens next, and what whisper heard is what says why it woke.
+    const page = await show([{ step: "woke", heard: "Hey, Zyris." }, ...AN_ANSWER.slice(1)]);
     expect(page).toMatch(/woke/i);
-    expect(page).toContain("12.4");
-    expect(page).toContain("16.3");
+    expect(page).toContain("Hey, Zyris.");
     expect(page).toContain("what is the time");
   });
 

@@ -184,11 +184,21 @@ pub enum Stopped {
 pub trait Transcribe: Send + Sync + 'static {
     /// One utterance of 16 kHz mono samples, as text. Blocking.
     fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault>;
+
+    /// The same, told the phrase it is listening for. See [`stt::Stt::transcribe_expecting`].
+    /// A double that has no use for the hint answers as it always does.
+    fn transcribe_expecting(&self, audio: &[f32], _phrase: &str) -> Result<String, stt::Fault> {
+        self.transcribe(audio)
+    }
 }
 
 impl Transcribe for stt::Stt {
     fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault> {
         stt::Stt::transcribe(self, audio)
+    }
+
+    fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, stt::Fault> {
+        stt::Stt::transcribe_expecting(self, audio, Some(phrase))
     }
 }
 
@@ -210,6 +220,8 @@ enum Woke {
     Transcribed(Result<Result<String, stt::Fault>, tokio::task::JoinError>),
     /// A look at the turn so far, for the screen. Never the turn's answer.
     Hearing(Result<Result<String, stt::Fault>, tokio::task::JoinError>, usize),
+    /// What whisper heard in something said while no turn was open: is it the phrase?
+    Checked(Result<Result<String, stt::Fault>, tokio::task::JoinError>),
 }
 
 /// Listening for the enrolled phrase while no turn is open.
@@ -218,8 +230,7 @@ enum Woke {
 /// not advanced while nothing is being recorded — that is what keeps a turn's first frame equal
 /// to its `turn_start` — so a watch that borrowed it would break the turn it exists to start.
 struct Watch {
-    features: crate::mfcc::Features,
-    phrase: crate::spot::Phrase,
+    phrase: crate::wake::Phrase,
     ends: Endpointer,
     /// The audio `ends` is indexing, from its last reset.
     heard: Vec<f32>,
@@ -272,6 +283,9 @@ pub struct Session {
     partial_from: usize,
     /// How long the recording will be before another is worth starting.
     partial_next: usize,
+    /// Whisper reading an utterance heard while no turn was open, to see whether it was the
+    /// phrase. One at a time: an utterance that ends while one is being read is not read.
+    checking: Option<tokio::task::JoinHandle<Result<String, stt::Fault>>>,
 
     /// Whatever length the device chose, re-cut to what the processor accepts. The processor
     /// **panics** rather than erroring on a wrong count, so nothing may reach it unmeasured.
@@ -342,6 +356,7 @@ impl Session {
             partial: None,
             partial_from: 0,
             partial_next: PARTIAL_EVERY,
+            checking: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
             // one, and nothing reads them then.
@@ -373,12 +388,10 @@ impl Session {
 
     /// Listen for the enrolled phrase whenever no turn is open.
     ///
-    /// **A builder, and absent by default**, because a machine with no takes recorded has
-    /// nothing to listen for and must not pay for the attempt. `spot::Phrase` with no usable
-    /// takes answers `Cannot` to everything, so passing one is safe; not passing one is cheaper.
-    pub fn listening_for(mut self, phrase: crate::spot::Phrase) -> Session {
+    /// **A builder, and absent by default**, because a machine with no phrase has nothing to
+    /// listen for and must not pay whisper to read every sentence said in the room.
+    pub fn listening_for(mut self, phrase: crate::wake::Phrase) -> Session {
         self.watch = Some(Watch {
-            features: crate::mfcc::Features::new(),
             phrase,
             ends: Endpointer::new(),
             heard: Vec::new(),
@@ -411,6 +424,7 @@ impl Session {
             let woke = {
                 let pending = &mut self.pending;
                 let partial = &mut self.partial;
+                let checking = &mut self.checking;
                 let from = self.partial_from;
                 tokio::select! {
                     // The key first, deliberately: what audio already in the channel belongs to
@@ -430,6 +444,12 @@ impl Session {
                             None => std::future::pending().await,
                         }
                     } => Woke::Hearing(seen, from),
+                    heard = async {
+                        match checking {
+                            Some(handle) => handle.await,
+                            None => std::future::pending().await,
+                        }
+                    } => Woke::Checked(heard),
                 }
             };
 
@@ -460,6 +480,7 @@ impl Session {
                 Woke::Key(Err(broadcast::error::RecvError::Closed)) => return Stopped::KeyGone,
                 Woke::Transcribed(done) => self.transcribed(done),
                 Woke::Hearing(seen, from) => self.hearing(seen, from),
+                Woke::Checked(heard) => self.checked(heard),
             }
         }
     }
@@ -486,7 +507,7 @@ impl Session {
         if self.traces.receiver_count() == 0 {
             return;
         }
-        if self.partial.is_some() || self.pending.is_some() {
+        if self.partial.is_some() || self.pending.is_some() || self.checking.is_some() {
             return;
         }
         let length = turn.buffer.len();
@@ -614,7 +635,7 @@ impl Session {
                 let to = ((last + 1) * crate::capture::VAD_FRAME).min(watch.heard.len());
                 let said = watch.heard[from.min(to)..to].to_vec();
                 watch.forget();
-                self.judge(&said);
+                self.check(said);
             }
             // Somebody made a noise that was not long enough to be anything. Forgetting is what
             // keeps the next utterance from being scored with this one stuck on the front.
@@ -628,24 +649,66 @@ impl Session {
         }
     }
 
-    /// Was that the phrase? If so, start a turn for whatever comes next.
-    fn judge(&mut self, said: &[f32]) {
+    /// Ask whisper what was just said, to see whether it was the phrase.
+    ///
+    /// **Not while whisper is busy with anything else**: a turn's own transcription still
+    /// running, or another check. Two passes at once each spin a whole thread pool and make the
+    /// one somebody is waiting for several times slower, and an utterance missed here costs
+    /// saying the phrase again.
+    fn check(&mut self, said: Vec<f32>) {
+        if self.checking.is_some() || self.pending.is_some() || self.partial.is_some() {
+            tracing::debug!("whisper is busy, so this utterance was not checked for the wake word");
+            return;
+        }
         let Some(watch) = &self.watch else { return };
-        let verdict = watch.phrase.matches(&watch.features, said);
-        match verdict {
-            crate::spot::Match::Yes { distance, threshold } => {
-                self.trace(crate::Trace::Woke { distance, threshold });
+        let stt = self.stt.clone();
+        let phrase = watch.phrase.said().to_string();
+        self.checking =
+            Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
+    }
+
+    /// What whisper heard. If it was the phrase, start a turn for whatever comes next — or, if
+    /// the request came in the same breath, send it.
+    fn checked(&mut self, heard: Result<Result<String, stt::Fault>, tokio::task::JoinError>) {
+        self.checking = None;
+        // The key went down while whisper was reading; that turn is the one that counts.
+        if self.turn.is_some() {
+            return;
+        }
+        let Some(watch) = &self.watch else { return };
+        let text = match heard {
+            Ok(Ok(text)) => text,
+            Ok(Err(fault)) => {
+                tracing::debug!(%fault, "an utterance could not be read for the wake word");
+                return;
+            }
+            Err(_) => return,
+        };
+        match watch.phrase.in_(&text) {
+            crate::wake::Heard::Phrase => {
+                self.trace(crate::Trace::Woke { heard: text });
                 // **The ordinary rule, not the key.s.** Nothing is going to let go of anything:
                 // a turn opened by the phrase has to end when the person stops talking, and
                 // `push_to_talk_rule` deliberately makes that impossible.
                 self.endpointer.use_rule(Rule::default());
                 self.pressed();
             }
-            crate::spot::Match::No { .. } => {}
-            // Said once per utterance and not per frame, so a machine that can never match —
-            // no usable takes — says so as often as somebody speaks rather than silently.
-            crate::spot::Match::Cannot { reason } => {
-                tracing::debug!(reason, "the wake word could not be compared");
+            // Said in one breath. The request is already transcribed, so it goes as it is,
+            // through the same steps a turn takes, rather than asking the person to repeat it.
+            crate::wake::Heard::PhraseThen(rest) => {
+                self.trace(crate::Trace::Woke { heard: text });
+                self.trace(crate::Trace::Recording { started: true });
+                self.publish(VoiceEvent::Listening);
+                self.trace(crate::Trace::Recording { started: false });
+                self.publish(VoiceEvent::Thinking);
+                self.since = Some(std::time::Instant::now());
+                self.transcribed(Ok(Ok(rest)));
+            }
+            // Said, not dropped: a phrase that never wakes anything is otherwise
+            // indistinguishable from a microphone that never heard it.
+            crate::wake::Heard::Other => {
+                tracing::info!(heard = %text, "heard something that was not the wake word");
+                self.trace(crate::Trace::Unmatched { heard: text });
             }
         }
     }
@@ -854,7 +917,7 @@ impl Session {
             // thread, and two whisper passes at once each spin a full thread pool: measured end to
             // end, a 3.7 s turn took 15 s to transcribe that way against 0.6 s alone. Waiting for
             // the look costs at most one look.
-            let look = self.partial.take();
+            let look = self.partial.take().or_else(|| self.checking.take());
             self.pending = Some(self.spawn_after(look, audio));
         } else if self.queued.is_none() {
             self.publish(VoiceEvent::Thinking);
@@ -1812,98 +1875,10 @@ mod tests {
         }
     }
 
-    /// A phrase made of two tones, and recordings of it that differ the way a person's do.
-    ///
-    /// Synthetic, and the tests below are about the *wiring* rather than about whether the
-    /// matcher works on a voice — that is measured in `spot`, on real takes, and the number
-    /// is in `spot::CEILING`'s documentation. What these decide is that audio reaches the
-    /// watch, that a match opens a turn, that a non-match does not, and that the turn it opens
-    /// ends the way a turn with no key has to.
-    fn two_tones(first: f32, second: f32, seconds: f32) -> Vec<f32> {
-        said(first, second, seconds, 0)
-    }
-
-    /// One saying of the phrase, with `voice` deciding how this one differs from the others.
-    ///
-    /// **Five identical recordings are not five takes.** The threshold is calibrated from how
-    /// much the takes disagree with each other, so pure tones — which disagree by almost
-    /// nothing — produce a threshold of about 1 where five real recordings of a voice produced
-    /// 16.3. A test built on identical takes therefore demands an identical candidate and
-    /// fails on any honest one, which is exactly what happened: 0.26 s of trailing silence,
-    /// which the endpointer's own margin puts there, scored 15.3 against a threshold of 1.06.
-    ///
-    /// So each take carries its own noise and its own small shifts in level and pitch, which
-    /// is what a person saying one phrase five times sounds like to this front end.
-    fn said(first: f32, second: f32, seconds: f32, voice: u32) -> Vec<f32> {
-        // splitmix64, the same thirty lines `tts` uses to be deterministic without `rand`.
-        let mut state = 0x9E3779B97F4A7C15u64.wrapping_mul(voice as u64 + 1);
-        let mut next = move || {
-            state = state.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            ((z ^ (z >> 31)) >> 40) as f32 / 16777216.0 - 0.5
-        };
-        let drift = 1.0 + voice as f32 * 0.01;
-        let level = 0.4 - voice as f32 * 0.02;
-        let tone = |hz: f32, seconds: f32, next: &mut dyn FnMut() -> f32| {
-            let n = (crate::capture::SAMPLE_RATE as f32 * seconds) as usize;
-            (0..n)
-                .map(|at| {
-                    let t = at as f32 / crate::capture::SAMPLE_RATE as f32;
-                    level * (2.0 * std::f32::consts::PI * hz * drift * t).sin()
-                        + 0.02 * next()
-                })
-                .collect::<Vec<f32>>()
-        };
-        let mut samples = tone(first, seconds / 2.0, &mut next);
-        samples.extend(tone(second, seconds / 2.0, &mut next));
-        samples
-    }
-
-    /// A take, conditioned the way the live path conditions what it compares.
-    ///
-    /// **The processor is part of the comparison, not a detail of the capture.** With `aec`
-    /// on, noise suppression and the high-pass filter change the audio before the watch ever
-    /// sees it — so templates built from raw samples and a candidate that went through the
-    /// processor are two different recordings of one phrase, and the distance measures the
-    /// processing. Both of these tests passed under plain `voice` and failed under `aec` for
-    /// exactly that reason, which is the same asymmetry `wake` records `Conditioning` for.
-    fn conditioned(samples: &[f32]) -> Vec<f32> {
-        let apm = Apm::new().expect("a processor this machine can build");
-        let mut out = Vec::with_capacity(samples.len());
-        for frame in samples.chunks(crate::capture::APM_FRAME) {
-            if frame.len() != crate::capture::APM_FRAME {
-                break;
-            }
-            let mut frame = frame.to_vec();
-            apm.process_capture(&mut frame).expect("a frame of the right length");
-            out.extend_from_slice(&frame);
-        }
-        out
-    }
-
-    fn the_phrase() -> crate::spot::Phrase {
-        let features = crate::mfcc::Features::new();
-        // **With the endpointer's margin on each end, because a real take has one.** A take
-        // is recorded by `run::record_one`, which ends it at the endpointer's verdict, and
-        // `enrolled_phrase` trims it to the same verdict — so both carry `vad::MARGIN`. The
-        // candidate the watch hands over carries it too. Templates built without it are the
-        // one side of the comparison that differs from production, and the difference is not
-        // small: measured, 0.26 s of silence on one side only moved the distance from 4.6 to
-        // 12.9 against a threshold of 10.6 — a phrase that would be recognised, refused.
-        let margin = vec![0.0f32; crate::stt::samples_in(crate::vad::MARGIN)];
-        let takes: Vec<Vec<f32>> = [1.0, 1.1, 1.2, 0.95, 1.05]
-            .iter()
-            .enumerate()
-            .map(|(voice, seconds)| {
-                let mut take = margin.clone();
-                take.extend(said(300.0, 900.0, *seconds, voice as u32 + 1));
-                take.extend(margin.iter().copied());
-                conditioned(&take)
-            })
-            .collect();
-        crate::spot::Phrase::from_takes(&features, &takes)
+    /// What the watch listens for. Whether an utterance is it is the scribe's to say, since
+    /// whisper is what reads it in production.
+    fn the_phrase() -> crate::wake::Phrase {
+        crate::wake::Phrase::new("Hey Zyris").expect("letters")
     }
 
     /// A session listening for [`the_phrase`], and watching its own diagnostic stream.
@@ -2448,37 +2423,34 @@ mod tests {
     }
 
     /// **Saying the phrase opens a turn, with no key touched.** The whole of what the wake
-    /// word is for, and until this existed the takes on disk were read by nothing.
+    /// word is for.
     #[tokio::test]
     async fn saying_the_phrase_opens_a_turn() {
-        let (mut zyris, mut traces) = running_and_listening(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) =
+            running_and_listening(Scribe::saying([Ok("Hey, Zyris.".to_string())]));
 
-        // The phrase, then enough silence for the watch to decide the utterance is over.
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        // Something said, then enough silence for the watch to decide the utterance is over.
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
 
         let woke = step_where(&mut traces, |step| matches!(step, crate::Trace::Woke { .. })).await;
-        match woke {
-            crate::Trace::Woke { distance, threshold } => {
-                assert!(distance <= threshold, "{distance} is not under {threshold}");
-            }
-            other => panic!("not a wake: {other:?}"),
-        }
+        assert_eq!(woke, crate::Trace::Woke { heard: "Hey, Zyris.".to_string() });
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
         zyris.stops().await;
     }
 
-    /// Something else said in the room does not open one. The cost of getting this wrong is a
-    /// turn nobody asked for going to an agent that can act on it, which is the asymmetry
-    /// `spot::ROOM` is argued from.
+    /// Something else said in the room does not open one, and says what it was taken for. The
+    /// cost of getting this wrong is a turn nobody asked for going to an agent that can act on it.
     #[tokio::test]
     async fn saying_something_else_does_not() {
-        let (mut zyris, mut traces) = running_and_listening(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) = running_and_listening(Scribe::always("good morning"));
 
-        zyris.feed(&two_tones(1500.0, 400.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
-        settle().await;
 
+        let heard =
+            step_where(&mut traces, |step| matches!(step, crate::Trace::Unmatched { .. })).await;
+        assert_eq!(heard, crate::Trace::Unmatched { heard: "good morning".to_string() });
         let woke = steps(&mut traces)
             .into_iter()
             .any(|step| matches!(step, crate::Trace::Woke { .. }));
@@ -2493,9 +2465,14 @@ mod tests {
     /// every time, which is the shape of failure step 7 already shipped once.
     #[tokio::test]
     async fn a_turn_the_phrase_opened_ends_when_the_talking_stops() {
-        let (mut zyris, _traces) = running_and_listening(Scribe::always("what is the time"));
+        // The phrase, then the request for every reading after it: a look at the turn while it
+        // is open reads the same audio the answer does.
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("hey zyris".to_string()))
+                .chain(std::iter::repeat_n(Ok("what is the time".to_string()), 8)),
+        ));
 
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
 
@@ -2511,20 +2488,37 @@ mod tests {
         zyris.stops().await;
     }
 
+    /// **The phrase and the request in one breath** is one turn, and the request is not asked
+    /// for again: whisper has already written it down.
+    #[tokio::test]
+    async fn the_request_said_with_the_phrase_is_what_is_heard() {
+        let (mut zyris, _traces) =
+            running_and_listening(Scribe::always("Hey Zyris, what is the time?"));
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
+        assert_eq!(zyris.scribe.calls(), 1, "one reading of one utterance");
+        zyris.stops().await;
+    }
+
     /// **The machine does not wake itself up.** A build without the `aec` feature — the Windows
     /// one — has an echo canceller that cancels nothing, so the microphone hears the
-    /// loudspeaker, and the one Linux ships has never been measured in a room. Left listening while an answer is being read aloud, the watch
-    /// would score the machine's own voice against the phrase and open a turn on it, on every
-    /// answer, for as long as it kept talking.
+    /// loudspeaker, and the one Linux ships has never been measured in a room. Left listening
+    /// while an answer is being read aloud, the watch would hear the machine's own voice and
+    /// open a turn on it whenever an answer mentioned its name.
     ///
     /// This is the same reasoning that made barge-in the key rather than the microphone, and
     /// it costs the same thing: the phrase cannot interrupt. The key can.
     #[tokio::test]
     async fn the_phrase_is_not_listened_for_while_the_answer_is_being_read_aloud() {
-        let (mut zyris, mut traces) = running_and_speaking(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) = running_and_speaking(Scribe::always("hey zyris"));
 
         // Exactly the audio that wakes it when nothing is speaking.
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
         settle().await;
 
@@ -2532,6 +2526,7 @@ mod tests {
             .into_iter()
             .any(|step| matches!(step, crate::Trace::Woke { .. }));
         assert!(!woke, "the machine woke itself up on its own voice");
+        assert_eq!(zyris.scribe.calls(), 0, "and nothing was read to find out");
         zyris.says_nothing().await;
         zyris.stops().await;
     }

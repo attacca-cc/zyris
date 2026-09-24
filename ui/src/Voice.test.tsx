@@ -72,7 +72,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
         dir: TAKES,
         wanted: 5,
         seconds: 5,
-        note: "Zyris keeps this recording so a wake word can be added later without asking you to record it again. Nothing listens for it yet, and saving it does not make Zyris respond to it.",
+        note: "Zyris keeps this recording so a wake word can be added later without asking you to record it again. Say this phrase while listening is on.",
       },
     },
     hotkey: over.hotkey ?? { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true },
@@ -617,7 +617,7 @@ describe("Voice", () => {
     expect(page).toMatch(/yours to manage/i);
   });
 
-  it("says nothing reads the wake word, in every state it can be in", async () => {
+  it("says what the wake word does, in every state it can be in", async () => {
     const states: VoiceScreen["voice"]["wake"]["state"][] = [
       { state: "nothing" },
       { state: "partial", recorded: 2 },
@@ -633,13 +633,13 @@ describe("Voice", () => {
             dir: TAKES,
             wanted: 5,
             seconds: 5,
-            note: "Nothing listens for it yet, and saving it does not make Zyris respond to it.",
+            note: "Say this phrase while listening is on.",
           },
         }),
       );
       render(<Voice />);
       await waitFor(() =>
-        expect(readable()).toMatch(/nothing listens for it yet/i),
+        expect(readable()).toMatch(/say this phrase while listening is on/i),
         // The claim that must not drift. A screen that said it only in one of the four states
         // would say it exactly where nobody has recorded anything yet.
       );
@@ -654,7 +654,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );
@@ -675,7 +675,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );
@@ -691,7 +691,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );

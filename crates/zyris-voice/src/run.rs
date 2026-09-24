@@ -78,6 +78,10 @@ pub struct Settings {
     /// somebody adds one. By id or by name, whichever they have to hand.
     #[serde(default)]
     pub agent: Option<String>,
+    /// The wake phrase as words, for somebody who would rather type it than have it worked out
+    /// from the takes. Wins over the takes when both are there.
+    #[serde(default)]
+    pub wake_phrase: Option<String>,
 }
 
 /// What the settings file is called, inside the instance's data directory.
@@ -304,7 +308,7 @@ impl Engine {
         }
         self.halt(&mut live).await;
 
-        live.state = match self.begin(&live.settings.device).await {
+        live.state = match self.begin(&live.settings.device, live.settings.wake_phrase.clone()).await {
             Ok((running, device)) => {
                 live.running = Some(running);
                 ListeningState::On { device }
@@ -326,7 +330,7 @@ impl Engine {
             return;
         }
         self.halt(&mut live).await;
-        live.state = match self.begin(&live.settings.device).await {
+        live.state = match self.begin(&live.settings.device, live.settings.wake_phrase.clone()).await {
             Ok((running, device)) => {
                 live.running = Some(running);
                 ListeningState::On { device }
@@ -481,7 +485,11 @@ impl Engine {
     // ------------------------------------------------------------------------------------
 
     /// Open a microphone and put a session over it.
-    async fn begin(&self, choice: &Choice) -> Result<(Running, String), String> {
+    async fn begin(
+        &self,
+        choice: &Choice,
+        typed_phrase: Option<String>,
+    ) -> Result<(Running, String), String> {
         let path = match stt::state(&stt::BASE) {
             stt::ModelState::Ready { path, .. } => path,
             // Everything else is the screen's business: it renders the same `ModelState` and has
@@ -494,6 +502,15 @@ impl Engine {
             .await
             .map_err(|_| "loading the speech model stopped before it finished".to_string())?
             .map_err(|fault| fault.to_string())?;
+        let stt = Arc::new(stt);
+        // Before the microphone opens, while whisper is doing nothing else: reading the takes is
+        // five short transcriptions.
+        let phrase = {
+            let stt = stt.clone();
+            tokio::task::spawn_blocking(move || enrolled_phrase(&stt, typed_phrase))
+                .await
+                .unwrap_or(None)
+        };
 
         let apm = Arc::new(apm);
         let (device, audio, capture_delay, stop) = open_on_a_thread(choice.clone()).await?;
@@ -518,7 +535,7 @@ impl Engine {
             audio,
             self.keys.subscribe(),
             apm,
-            Arc::new(stt),
+            stt,
             self.events.clone(),
         );
         if let Some(speaking) = speaking {
@@ -531,7 +548,7 @@ impl Engine {
             session = session.conversation(feed.clone());
         }
         session = session.tracing(self.traces.clone());
-        if let Some(phrase) = enrolled_phrase() {
+        if let Some(phrase) = phrase {
             session = session.listening_for(phrase);
         }
         Ok((
@@ -941,78 +958,50 @@ fn voice_model_view(state: crate::tts::VoiceState) -> crate::view::VoiceModelVie
     }
 }
 
-/// The enrolled phrase, ready to be compared against, or `None` if there is nothing to compare.
+/// The wake phrase, or `None` if the wake word is not on.
 ///
-/// **Read once, when listening starts, and not on every utterance.** Building it reads five
-/// WAV files and computes their features and their pairwise distances — tens of milliseconds,
-/// which is nothing once and far too much per utterance. The cost of that choice is that
-/// recording a new take does not take effect until listening is turned off and on again; the
-/// Voice tab is where somebody records one, and they are not talking to the machine while
-/// they do it.
-fn enrolled_phrase() -> Option<crate::spot::Phrase> {
-    let store = wake::Store::on_this_machine().ok()?;
-    let takes = store.takes().ok()?;
-    if takes.is_empty() {
+/// **On when there are takes, or a phrase typed in `voice.json`**, so that a machine nobody has
+/// set up does not pay whisper to read every sentence said in the room. The phrase is the typed
+/// one or [`wake::DEFAULT_PHRASE`]; the takes, each trimmed to where the endpointer found the
+/// speech, are read expecting it and the log says how many it was heard in — which is how
+/// somebody finds out that the phrase they recorded is not the one being listened for.
+///
+/// **Read once, when listening starts.** Five short transcriptions are a second or two, which is
+/// nothing once. The cost is that a new take counts from the next time listening is turned on.
+fn enrolled_phrase(stt: &stt::Stt, typed: Option<String>) -> Option<wake::Phrase> {
+    let takes = wake::Store::on_this_machine().ok().and_then(|store| store.takes().ok()).unwrap_or_default();
+    if typed.is_none() && takes.is_empty() {
         return None;
     }
-    // **Trimmed to what the endpointer thought was speech, because the candidate will be.**
-    // A take is stored whole and untrimmed, deliberately — `wake` argues that a matcher may
-    // want its own boundaries — and the boundaries this matcher wants are the ones the live
-    // side is going to hand it: `Session::watching` slices an utterance to the endpointer's
-    // verdict, margins and all. Comparing a trimmed candidate against untrimmed templates
-    // measures the difference in how much room each recording has on the end, which is not
-    // about the phrase at all. Measured on synthetic takes: 0.26 s of trailing silence on one
-    // side moved the distance from 0 to 15.3.
-    // **A take conditioned by a different build is not the same recording**, and `wake` records
-    // which build made each one for exactly this reason. With `aec` on, the high-pass filter
-    // and noise suppression change the audio before the watch compares anything; a template
-    // that never went through them is a recording of the phrase *plus* the difference between
-    // two builds, and the distance measures both. Both wake tests passed under plain `voice`
-    // and failed under `aec` before the fixture was corrected, which is this, in miniature.
-    //
-    // Said rather than refused: the takes are still the best thing there is to compare against,
-    // a mismatch makes matching worse rather than impossible, and somebody who has just
-    // switched builds would otherwise have a wake word that quietly stopped working with
-    // nothing anywhere saying why.
-    let now = crate::apm::Apm::new().map(|apm| apm.describe()).ok();
-    if let Some(now) = &now {
-        for (nth, take) in takes.iter().enumerate() {
-            if take.conditioning() != now {
-                tracing::warn!(
-                    take = nth + 1,
-                    recorded = ?take.conditioning(),
-                    running = ?now,
-                    "this take was conditioned by a different build than the one comparing it, \
-                     so the wake word will match less well; record it again to be sure"
-                );
-            }
-        }
-    }
-    let samples: Vec<Vec<f32>> = takes
+    let phrase = wake::Phrase::new(typed.as_deref().unwrap_or(wake::DEFAULT_PHRASE))?;
+    let heard: Vec<String> = takes
         .iter()
-        .map(|take| match take.spoken() {
-            Some(spoken) => {
-                let whole = take.samples();
-                let from = spoken.first.min(whole.len());
-                let to = (spoken.last + 1).min(whole.len());
-                whole[from.min(to)..to].to_vec()
-            }
-            // The endpointer found no speech in it. Kept whole rather than dropped: `wake`
-            // keeps such a take on purpose, because the silence rule was argued from one
-            // recorded sentence and not from a two-word phrase.
-            None => take.samples().to_vec(),
+        .filter_map(|take| {
+            let whole = take.samples();
+            let said = match take.spoken() {
+                Some(spoken) => {
+                    let to = (spoken.last + 1).min(whole.len());
+                    &whole[spoken.first.min(to)..to]
+                }
+                None => whole,
+            };
+            stt.transcribe_expecting(said, Some(phrase.said())).ok()
         })
         .collect();
-    let features = crate::mfcc::Features::new();
-    let phrase = crate::spot::Phrase::from_takes(&features, &samples);
-    // A set of takes nothing can be compared against is the same as no takes at all, and
-    // saying so here keeps the session from running a matcher that can only ever refuse.
-    let threshold = phrase.threshold()?;
+    let recognised = heard.iter().filter(|text| phrase.in_(text) != wake::Heard::Other).count();
+    if !takes.is_empty() && recognised == 0 {
+        tracing::warn!(
+            phrase = phrase.said(),
+            takes = ?heard,
+            "none of the recorded takes was heard as the wake phrase; if a different phrase was \
+             recorded, name it as wakePhrase in voice.json"
+        );
+    }
     tracing::info!(
-        takes = takes.len(),
-        threshold,
-        worst = phrase.spread().worst,
-        middle = phrase.spread().middle,
+        phrase = phrase.said(),
+        recognised,
+        takes = heard.len(),
+        heard_as = ?heard,
         "listening for the wake word"
     );
     Some(phrase)
@@ -1116,7 +1105,7 @@ mod tests {
     fn nothing_listens_until_somebody_says_so() {
         assert_eq!(
             Settings::default(),
-            Settings { listen: false, device: Choice::Default, session: None, agent: None }
+            Settings { listen: false, device: Choice::Default, session: None, agent: None, wake_phrase: None }
         );
 
         let engine = Engine::new(None, broadcast::channel(4).0);

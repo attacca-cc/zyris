@@ -362,7 +362,8 @@ const VOICE_EVENT_NAME = "voice-event";
 export type Trace =
   | { step: "key"; down: boolean }
   | { step: "recording"; started: boolean }
-  | { step: "woke"; distance: number; threshold: number }
+  | { step: "woke"; heard: string }
+  | { step: "unmatched"; heard: string }
   | { step: "recorded"; seconds: number; speechSeconds: number; kept: boolean }
   | { step: "transcribing"; seconds: number }
   | { step: "transcribed"; text: string; tookMs: number }

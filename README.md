@@ -286,14 +286,27 @@ owed.
 
 ### The wake word
 
-You can record one on the Voice tab: five takes, kept as 16 kHz WAV files in this computer's data
-directory alongside a manifest that says what was recorded and how. **Saying it starts a turn** as
-the key does, and the turn ends when you stop talking. What you say is compared with the five
-takes (dynamic time warping over MFCCs, with a threshold calibrated from how much the takes differ
-from each other), so it is a close match rather than a certain one: expect it to wake now and then
-on something that sounds like it, and to miss you now and then. It is listened for only while
-listening is on and nothing is being read aloud, and new takes count from the next time listening
-is turned on.
+**The phrase is "Hey Zyris"**, or whatever `"wakePhrase"` says in `voice.json` in this computer's
+data directory — `"wakePhrase": "자이리스"`, say. It is on once you record takes of it on the Voice
+tab (five, kept as 16 kHz WAV files beside a manifest), or once a phrase is typed there. When
+listening starts, whisper reads the takes expecting the phrase, and the log line reading
+`listening for the wake word` says how many of them it heard it in; none means the phrase you
+recorded is not the one being listened for.
+
+**Say the phrase and a turn starts** as the key would, ending when you stop talking. **Or say the
+request straight after it** — "Hey Zyris, 오늘 날씨 알려줘" — and it is sent as it is. Everything said
+while no turn is open is transcribed to find out, expecting the phrase, and it counts only when it
+*starts* with it — allowing a word of lead-in, a letter in four spelled differently, and a Korean
+vocative on the end of it ("자이리스야"). It is listened for only while listening is on and nothing
+is being read aloud, and new takes count from the next time listening is turned on.
+
+**Why words and not sound, and why told what to expect.** Matching the takes as sound (dynamic
+time warping over MFCCs) could not tell the phrase from ordinary talk on a real enrolment: the
+takes sat 17.9 apart from each other at the median, the phrase said live at 20.7 to 24, other
+speech at 26 to 32. Transcribing instead, with no hint, whisper wrote the same five takes of "Hey
+Zyris" as five different words in each of English, Korean and Japanese — it has never seen the
+name. Told to expect it, it wrote all five as exactly "Hey Zyris", while "Hey Siri", "하이 자비스"
+and "Hey, I see" kept their own words; a test holds both halves.
 
 ### The model
 
