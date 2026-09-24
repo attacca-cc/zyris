@@ -2255,7 +2255,7 @@ mod tests {
     /// feature with none of the point of it — and it is what keeps `--headless` free of it.
     #[tokio::test]
     async fn a_turn_nobody_is_watching_is_not_read_back() {
-        let mut zyris = running(Scribe::always("and so my"));
+        let zyris = running(Scribe::always("and so my"));
 
         zyris.press().await;
         zyris.feed(&utterance(3.0)).await;
@@ -2472,7 +2472,7 @@ mod tests {
         // `#[tokio::test]` is a current-thread runtime, so the thread-local the guard sets is
         // the same one every await comes back to.
         let guard = tracing::subscriber::set_default(subscriber);
-        let mut zyris = running(Scribe::always("never mind"));
+        let zyris = running(Scribe::always("never mind"));
         zyris.problem_now(Recovery::Continue, "the default device changed");
         zyris.problem_now(Recovery::Rebuild, "the microphone was unplugged");
         zyris.problem_now(Recovery::Stop, "the microphone is not allowed");
