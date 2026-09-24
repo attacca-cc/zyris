@@ -423,9 +423,9 @@ impl Stt {
         HOOKS.call_once(whisper_rs::install_logging_hooks);
 
         let mut parameters = whisper_rs::WhisperContextParameters::default();
-        // No GPU. The default is already off without a GPU feature; saying so keeps it off
-        // the day somebody turns one on for a different reason.
-        parameters.use_gpu = false;
+        // The GPU only in a build with the `gpu` feature. whisper.cpp falls back to the CPU on
+        // a machine where Vulkan finds no device.
+        parameters.use_gpu = cfg!(feature = "gpu");
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;

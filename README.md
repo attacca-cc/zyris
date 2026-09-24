@@ -601,6 +601,16 @@ the lines beside it put AVX2 back. A release with the voice refuses to build wit
 `whisper-rs-sys` does not rebuild when these change, so after changing one run
 `cargo clean -p whisper-rs-sys` (with `--release` for that profile).
 
+**`gpu` runs transcription on the graphics card through Vulkan**, on any vendor's GPU. It needs
+the Vulkan headers, the loader and `glslc` (shaderc) to build, and the binary then needs a Vulkan
+loader to start. On an RTX 3050, Large v3 Turbo goes from about ten seconds a sentence to a
+quarter of a second. The first load after a build compiles its shaders, which takes about ten
+seconds once; the driver keeps them after that.
+
+```bash
+cargo run --release --features custom-protocol,gpu -p zyris-app
+```
+
 ## Status
 
 Early. The design is settled and the code is being written — see the roadmap below for what

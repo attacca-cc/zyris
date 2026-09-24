@@ -85,3 +85,6 @@ voice = ["zyris-voice/voice"]
 # `voice`. **Linux only** — see `zyris-voice`'s `aec-bundled` for why, and note Windows gets a
 # canceller regardless, from the DSP that ships with the operating system.
 aec = ["voice", "zyris-voice/aec-bundled"]
+
+# Transcription on the GPU through Vulkan. Forwards; see `zyris-voice`'s `gpu`.
+gpu = ["voice", "zyris-voice/gpu"]
