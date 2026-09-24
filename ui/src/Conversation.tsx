@@ -48,7 +48,8 @@ type Turn =
       // and revises, so treating it as a growing string would show words it has since changed.
       sofar: string;
     }
-  | { who: "agent"; text: string; sentences: Sentence[]; interrupted: boolean };
+  | { who: "agent"; text: string; sentences: Sentence[]; interrupted: boolean }
+  | { who: "problem"; reason: string };
 
 // How far through a sentence the speaker is: null when it has not started, 1 when it is done.
 function progress(sentence: Sentence, cursor: number): number | null {
@@ -118,6 +119,18 @@ function fold(turns: Turn[], step: Trace): Turn[] {
         : replaceLast({ ...you, state: "said", text: step.text });
     case "sendFailed":
       return you ? replaceLast({ ...you, state: "lost", detail: step.reason }) : turns;
+    case "failed":
+      // A turn of yours that never got as far as its text is what failed; anything else is said
+      // as a line of its own, rather than left for the screen to go on claiming it is working.
+      return you && you.state !== "said" && you.state !== "lost"
+        ? replaceLast({ ...you, state: "lost", detail: step.reason })
+        : [...turns, { who: "problem", reason: step.reason }];
+    case "answering":
+      // A new answer is a new turn even with nothing said here in between — one typed on
+      // another device, say — rather than more text on the end of the last one.
+      return agent && agent.text === "" && agent.sentences.length === 0
+        ? turns
+        : [...turns, { who: "agent", text: "", sentences: [], interrupted: false }];
     case "delta":
       // Reasoning is the agent working, not its answer. It belongs in Debug, not here.
       if (step.kind !== "Assistant") return turns;
@@ -232,15 +245,18 @@ function Theirs({
 
       {turn.interrupted && (
         <p className="note">
-          You started talking, so the rest was not read aloud. The agent&rsquo;s own record of
-          the answer is whole &mdash; only the speaking was cut short.
+          You started talking, so the rest was not read aloud and the answer was stopped. What
+          you say next tells the agent where it was cut off.
         </p>
       )}
     </li>
   );
 }
 
-export function Conversation() {
+// Mounted for the life of the window and hidden when another tab is showing, because the turns
+// live nowhere else: unmounting it threw the conversation away on every change of tab, and missed
+// whatever was said while another tab was open.
+export function Conversation({ hidden }: { hidden: boolean }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [cursor, setCursor] = useState(0);
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -266,7 +282,7 @@ export function Conversation() {
   }, [turns]);
 
   return (
-    <div className="screen">
+    <div className="screen" hidden={hidden}>
       <h1>Conversation</h1>
 
       {turns.length === 0 ? (
@@ -289,6 +305,10 @@ export function Conversation() {
               </li>
             ) : turn.who === "you" ? (
               <Yours key={at} turn={turn} />
+            ) : turn.who === "problem" ? (
+              <li key={at} className="turn">
+                <p className="note">{turn.reason}</p>
+              </li>
             ) : (
               <Theirs key={at} turn={turn} cursor={cursor} />
             ),

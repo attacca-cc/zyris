@@ -1,29 +1,17 @@
-//! Recording a wake word, and keeping it. **Nothing reads these.**
+//! Recording a wake word, and keeping it.
 //!
 //! # Read this before writing any copy about it
 //!
-//! A wake word recorded here is **never matched against anything**. It is not compared to the
-//! microphone, it does not wake this machine, and turning "keep the microphone on" on — when
-//! there is such a switch — would not make it do so. All this module does is write what
-//! somebody said into files, so that a matcher built later can be built **without asking them
-//! to record it again**.
+//! The takes recorded here are **what the phrase is matched against**: `spot.rs` compares what
+//! the microphone hears with them by dynamic time warping over MFCCs, and a match opens a turn
+//! the way the push-to-talk key does. Only while listening is on, and only while nothing is
+//! being read aloud — see `Session::should_watch`.
 //!
-//! That is a deliberate decision of the user's, taken on 2026-09-15, and it is worth writing
-//! down why so that nobody quietly re-opens it:
-//!
-//! - The spec asks for a wake word "matched acoustically, so it is not tied to a language",
-//!   which is the right shape and turned out to be a research problem. The published recipes
-//!   reach **5.4 % false rejects at 0.1 false accepts an hour with five enrolments**, and
-//!   **nobody has released weights.** What is downloadable is unlicensed, or English-only, or
-//!   needs a gradient fine-tune that ONNX Runtime cannot do.
-//! - The honest thing that could be built today is DTW over MFCC templates, which measures
-//!   around **two false wakes an hour at recall 0.67** — a microphone that interrupts twice an
-//!   hour and misses one attempt in three. That is not a feature, and shipping it with a label
-//!   that says "wake word" would be the sixth time this project has claimed more than the code
-//!   does.
-//!
-//! So [`NOTHING_READS_THESE`] is a sentence for the window and not a comment: whatever screen
-//! offers this has to say it.
+//! It was once left out on purpose, and the measurement that decided that still stands: template
+//! matching of this kind was put at around **two false wakes an hour at a recall of 0.67**. It
+//! was built anyway because five recordings is exactly what it wants and it needs no model, but
+//! it is a matcher that will sometimes wake on something close and sometimes miss a person, and
+//! [`WHAT_THE_TAKES_DO`] is the sentence a window has to render so that nobody is promised more.
 //!
 //! # What is stored, and why that is the shape
 //!
@@ -76,10 +64,13 @@ use crate::vad::{Ended, Endpointer};
 /// The sentence a window has to render beside anything about the wake word.
 ///
 /// Public, and a constant rather than something each screen writes for itself, because this is
-/// the claim that must not drift: there is no matcher, and the recordings do nothing yet.
-pub const NOTHING_READS_THESE: &str =
-    "Zyris keeps this recording so a wake word can be added later without asking you to record \
-     it again. Nothing listens for it yet, and saving it does not make Zyris respond to it.";
+/// the claim that must not drift: what the phrase does, when it is listened for, when new takes
+/// count, and that it is a close match rather than a certain one.
+pub const WHAT_THE_TAKES_DO: &str =
+    "Say this phrase while listening is on and nothing is being read aloud, and Zyris starts a \
+     turn as if you had pressed the key. It is matched against these recordings, so it can \
+     sometimes wake on something that sounds close or miss you. New recordings are used from the \
+     next time listening is turned on.";
 
 /// How many takes are kept. See the module for why the number is five and cannot be raised
 /// after the fact.
@@ -346,7 +337,7 @@ pub enum Enrolment {
         /// [`TAKES`].
         wanted: usize,
     },
-    /// All [`TAKES`] of them. Still matched against nothing — see [`NOTHING_READS_THESE`].
+    /// All [`TAKES`] of them. What the phrase is matched against — see [`WHAT_THE_TAKES_DO`].
     #[serde(rename_all = "camelCase")]
     Complete {
         /// How many are stored.
@@ -718,25 +709,22 @@ mod tests {
     // The claim
     // -----------------------------------------------------------------------------------------
 
-    /// **The one thing in this module that must not drift.** Matching is out of scope by
-    /// decision, so the sentence a window renders has to say both halves: nothing listens for
-    /// it, and saving one does not change that. A screen that said "wake word saved" and no
-    /// more would be this project's sixth piece of copy claiming more than the code does.
+    /// **The one thing in this module that must not drift.** The window renders this sentence
+    /// beside the recordings, and each clause is a fact about the code: what a match does, when
+    /// the phrase is listened for (`Session::should_watch`), that it can be wrong, and that new
+    /// takes are read when listening starts (`run.rs`'s `enrolled_phrase`).
     #[test]
-    fn the_copy_says_plainly_that_nothing_listens_yet() {
-        let said = NOTHING_READS_THESE.to_ascii_lowercase();
-        assert!(
-            said.contains("nothing listens for it yet"),
-            "the copy has to say that nothing listens: {NOTHING_READS_THESE}"
-        );
-        assert!(
-            said.contains("does not make zyris respond"),
-            "and that saving one does not change that: {NOTHING_READS_THESE}"
-        );
-        assert!(
-            said.contains("without asking you to record it again"),
-            "and why it is being kept at all: {NOTHING_READS_THESE}"
-        );
+    fn the_copy_says_what_the_phrase_does_and_what_it_does_not_promise() {
+        let said = WHAT_THE_TAKES_DO.to_ascii_lowercase();
+        for clause in [
+            "starts a turn",
+            "while listening is on",
+            "nothing is being read aloud",
+            "miss you",
+            "next time listening is turned on",
+        ] {
+            assert!(said.contains(clause), "the copy has to say {clause:?}: {WHAT_THE_TAKES_DO}");
+        }
     }
 
     // -----------------------------------------------------------------------------------------

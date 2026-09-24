@@ -375,6 +375,7 @@ export type Trace =
   | { step: "queued"; text: string; atSample: number; samples: number }
   | { step: "playing"; atSample: number }
   | { step: "dropped" }
+  | { step: "answering" }
   | { step: "spoke" }
   | { step: "interrupted"; heard: number; unheard: number }
   | { step: "failed"; reason: string };

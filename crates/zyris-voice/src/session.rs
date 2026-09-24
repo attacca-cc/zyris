@@ -573,15 +573,17 @@ impl Session {
     /// Whether the phrase is worth listening for right now.
     ///
     /// **Not while the speaker is going, and that is not an optimisation.** A build without
-    /// the `aec` feature — which is every build that ships — has an echo canceller that
-    /// cancels nothing, so the microphone hears the loudspeaker. A watch running then would
+    /// the `aec` feature — the Windows build, and any build made without it — has an echo
+    /// canceller that cancels nothing, so the microphone hears the loudspeaker. A watch running then would
     /// match the machine.s own voice reading an answer aloud and open a turn on it, over and
     /// over, on every answer. This is the same reasoning that made barge-in the key rather
     /// than the microphone, and it has the same shape: the detector cannot be trusted over a
     /// speaker until the canceller is real.
     ///
-    /// It costs a little on a build where the canceller *is* real: the phrase cannot be used
-    /// to interrupt. The key can, and it is the thing this whole module already interrupts on.
+    /// The Linux release does carry the canceller, and the rule holds there too: it has been
+    /// measured on a synthetic echo and never in a room, which is not enough to let the
+    /// machine's own voice near a detector that opens turns. What that costs is that the
+    /// phrase cannot be used to interrupt. The key can, and it is the thing this whole module already interrupts on.
     fn should_watch(&self) -> bool {
         if self.watch.is_none() {
             return false;
@@ -897,6 +899,11 @@ impl Session {
     /// `send` fails only when nobody is subscribed, which is the ordinary state of a machine
     /// whose window is closed. Discarded on purpose.
     fn publish(&self, event: VoiceEvent) {
+        // Onto the trace as well: the Conversation screen reads only the trace, and a turn it
+        // last saw being written down would otherwise say so forever.
+        if let VoiceEvent::Failed { reason } = &event {
+            self.trace(crate::Trace::Failed { reason: reason.clone() });
+        }
         let _ = self.events.send(event);
     }
 
@@ -1226,12 +1233,12 @@ impl Interruption {
 /// - The wake word is not listened for while the machine is speaking (see `Session::should_watch`),
 ///   so while an answer is being read the only way into a turn is the key. "Stops the moment you
 ///   speak" and "stops the moment you press" are the same moment.
-/// - A build **without the `aec` feature** — which is every build that ships, see
+/// - A build **without the `aec` feature** — the Windows one, see
 ///   `crates/zyris-voice/Cargo.toml` — has an echo canceller that cancels nothing. A session
 ///   that barged in on detected speech there would hear its own loudspeaker and cut itself off
-///   after its first word, on every answer. The detector cannot be trusted over a speaker until
-///   [`crate::apm::Apm::erle_db`] says the canceller is real, and nothing in CI can compile the
-///   code that would make it real.
+///   after its first word, on every answer. Where the canceller is compiled in it has been
+///   measured on a synthetic echo and never in a room, and the detector cannot be trusted over
+///   a speaker until [`crate::apm::Apm::erle_db`] says it is working there.
 ///
 /// # What stopping does, in order
 ///
@@ -1336,9 +1343,12 @@ impl Speaking {
                 // The end of a turn. Everything sayable has been said; what is left is waiting
                 // for the speaker to get through it.
                 Ok(crate::turn::TurnEvent::Running(true)) => {
-                    let mut state = self.lock();
-                    state.running = true;
-                    state.muted = false;
+                    {
+                        let mut state = self.lock();
+                        state.running = true;
+                        state.muted = false;
+                    }
+                    self.trace(crate::Trace::Answering);
                 }
                 Ok(crate::turn::TurnEvent::Running(false)) => {
                     self.lock().running = false;
@@ -1526,8 +1536,7 @@ impl Speaking {
 
     /// Whether anything is queued or being played.
     ///
-    /// **The wake word may not listen while this is true on a build with no echo canceller**,
-    /// which is every build that ships. See `Session::watching`.
+    /// **The wake word does not listen while this is true.** See `Session::should_watch`.
     pub fn is_speaking(&self) -> bool {
         self.out.pending() > 0
     }
@@ -1559,6 +1568,11 @@ impl Speaking {
     }
 
     fn publish(&self, event: VoiceEvent) {
+        // Onto the trace as well: the Conversation screen reads only the trace, and a turn it
+        // last saw being written down would otherwise say so forever.
+        if let VoiceEvent::Failed { reason } = &event {
+            self.trace(crate::Trace::Failed { reason: reason.clone() });
+        }
         let _ = self.events.send(event);
     }
 }
@@ -2452,9 +2466,9 @@ mod tests {
         zyris.stops().await;
     }
 
-    /// **The machine does not wake itself up.** A build without the `aec` feature — which is
-    /// every build that ships — has an echo canceller that cancels nothing, so the microphone
-    /// hears the loudspeaker. Left listening while an answer is being read aloud, the watch
+    /// **The machine does not wake itself up.** A build without the `aec` feature — the Windows
+    /// one — has an echo canceller that cancels nothing, so the microphone hears the
+    /// loudspeaker, and the one Linux ships has never been measured in a room. Left listening while an answer is being read aloud, the watch
     /// would score the machine's own voice against the phrase and open a turn on it, on every
     /// answer, for as long as it kept talking.
     ///

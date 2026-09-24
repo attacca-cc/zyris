@@ -286,8 +286,11 @@ pub enum Trace {
     #[serde(rename_all = "camelCase")]
     Playing { at_sample: u64 },
     /// A fragment was refused by the speaker, which is what an interruption between synthesis
-    /// and the queue looks like.
+    /// and the queue looks like — or arrived from a turn that had already been interrupted.
     Dropped,
+    /// The agent started a new answer. What follows is a turn of its own, even with nothing said
+    /// on this machine in between — an answer to a message typed somewhere else, say.
+    Answering,
     /// The speaker ran out of things to play.
     Spoke,
     /// Speech was cut off by the key, and how much of the answer had been heard.

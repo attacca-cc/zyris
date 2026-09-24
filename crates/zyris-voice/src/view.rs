@@ -160,7 +160,7 @@ pub struct WakeView {
     pub wanted: usize,
     /// The longest one take may be, in seconds.
     pub seconds: u64,
-    /// **The sentence the screen must render**, taken from `wake::NOTHING_READS_THESE` rather
+    /// **The sentence the screen must render**, taken from `wake::WHAT_THE_TAKES_DO` rather
     /// than written again in TypeScript: that constant has a test on each of its claims, and a
     /// second copy of it in the window is a claim with nothing to keep it true. Empty string in
     /// a build that records nothing, which has no such claim to make.

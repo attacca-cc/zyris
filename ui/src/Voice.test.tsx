@@ -550,7 +550,7 @@ describe("Voice", () => {
     await screen.findByText(/read aloud/i);
     const page = document.body.textContent ?? "";
     expect(page).toMatch(/pauses between sentences/i);
-    expect(page).toMatch(/record of the answer stays whole/i);
+    expect(page).toMatch(/what you say next tells the agent where it was cut off/i);
     expect(page).not.toMatch(/without a pause|seamless|smoothly/i);
   });
 
