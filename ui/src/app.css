@@ -295,6 +295,19 @@ section { margin-bottom: 2rem; }
 .choices label { align-items: baseline; display: flex; gap: 0.5rem; overflow-wrap: anywhere; }
 .choices input { flex: none; }
 
+/* The microphone, speaker and speech model dropdowns. Full width so a long Linux device name
+   is read whole rather than cut at the arrow. */
+.picker {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--fg);
+  font: inherit;
+  max-width: 100%;
+  padding: 0.4rem 0.5rem;
+  width: 100%;
+}
+
 /* The Debug screen's log. A list rather than a table: the lines are different lengths and a
    table would make every one as tall as the longest cell in its row. */
 .trace {

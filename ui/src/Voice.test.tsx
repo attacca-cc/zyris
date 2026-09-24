@@ -122,10 +122,10 @@ function answers(first: Screen, then?: Screen) {
 // Everything a person can actually read, as one string. Deliberately the rendered text and not
 // the DOM: a test on class names passes for a screen that paints two states identically and says
 // the same words about both.
-// The microphone's own choices. The speaker and the model are chosen with radios too, and a
-// count of every radio on the page would be a count of three lists.
-function microphones(): HTMLInputElement[] {
-  return Array.from(document.querySelectorAll<HTMLInputElement>('input[name="microphone"]'));
+// The microphone dropdown's entries, the default among them.
+function microphones(): HTMLOptionElement[] {
+  const picker = screen.queryByRole("combobox", { name: /the microphone/i });
+  return picker ? Array.from(picker.querySelectorAll("option")) : [];
 }
 
 function readable(): string {
@@ -398,9 +398,9 @@ describe("Voice", () => {
     render(<Voice />);
 
     await waitFor(() => expect(microphones().length).toBe(3));
-    expect(screen.getAllByText("Built-in Audio Analog Stereo")).toHaveLength(2);
-    expect(readable()).toMatch(/a microphone/i);
-    expect(readable()).toMatch(/what this computer is playing/i);
+    const labels = microphones().map((o) => o.textContent);
+    expect(labels).toContain("Built-in Audio Analog Stereo — microphone (default)");
+    expect(labels).toContain("Built-in Audio Analog Stereo — loudspeaker and microphone");
   });
 
   it("shows which microphone is chosen, and names the one that was picked", async () => {
@@ -409,14 +409,13 @@ describe("Voice", () => {
     render(<Voice />);
 
     await waitFor(() => expect(microphones()).toHaveLength(3));
-    const [followDefault, builtIn, monitor] = microphones();
+    const picker = screen.getByRole<HTMLSelectElement>("combobox", { name: /the microphone/i });
     // A screen that showed the wrong one as chosen would have somebody recording their
     // loudspeakers and reading that they had picked the microphone.
-    expect(followDefault.checked).toBe(false);
-    expect(builtIn.checked).toBe(false);
-    expect(monitor.checked).toBe(true);
+    expect(picker.value).toBe("device:alsa_output.builtin.monitor");
+    expect(readable()).toMatch(/what this computer is playing/i);
 
-    builtIn.click();
+    fireEvent.change(picker, { target: { value: "device:alsa_input.builtin" } });
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_device", {
         device: { kind: "device", id: "alsa_input.builtin" },
@@ -455,8 +454,8 @@ describe("Voice", () => {
     answers(machine({}));
     render(<Voice />);
 
-    const hdmi = await screen.findByRole("radio", { name: /hdmi audio/i });
-    fireEvent.click(hdmi);
+    const picker = await screen.findByRole("combobox", { name: /the speaker/i });
+    fireEvent.change(picker, { target: { value: "device:alsa_output.hdmi" } });
 
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_speaker", {
@@ -465,13 +464,32 @@ describe("Voice", () => {
     );
   });
 
-  it("chooses and downloads a speech model by its id", async () => {
-    answers(machine({}));
+  it("offers only downloaded models to choose from, and downloads the others by id", async () => {
+    const ready = (file: string, bytes: number) => ({ state: "ready" as const, path: file, bytes });
+    answers(
+      machine({
+        models: [
+          { id: "base", name: "Base", note: "", bytes: 1, state: ready(MODEL, 1), chosen: true },
+          { id: "turbo", name: "Turbo", note: "", bytes: 2, state: ready("/m/turbo.bin", 2), chosen: false },
+          {
+            id: "small",
+            name: "Small",
+            note: "",
+            bytes: 3,
+            state: { state: "absent", path: "/m/small.bin", bytes: 3 },
+            chosen: false,
+          },
+        ],
+      }),
+    );
     render(<Voice />);
 
-    fireEvent.click(await screen.findByRole("radio", { name: /small/i }));
+    const picker = await screen.findByRole<HTMLSelectElement>("combobox", { name: /speech model/i });
+    expect(Array.from(picker.options).map((o) => o.value)).toEqual(["base", "turbo"]);
+    expect(picker.value).toBe("base");
+    fireEvent.change(picker, { target: { value: "turbo" } });
     await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "small" }),
+      expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }),
     );
 
     fireEvent.click(await screen.findByRole("button", { name: /download small/i }));

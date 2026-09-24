@@ -217,19 +217,41 @@ function heardLine(event: VoiceEvent): string {
 // The screen
 // ---------------------------------------------------------------------------------------------
 
+// A short name for an entry's kind, inside the dropdown. Two entries can carry the same name, and
+// this is what tells them apart there; the full sentence from `whatItIs` sits under the dropdown.
+function kindOf(device: InputDevice): string {
+  switch (device.direction) {
+    case "input":
+      return "microphone";
+    case "output":
+      return "loudspeaker monitor";
+    case "duplex":
+      return "loudspeaker and microphone";
+    case "unknown":
+      return "kind unknown";
+  }
+}
+
+// `Choice` as a dropdown value and back. `default:` cannot collide with a device id, which never
+// starts with that prefix on any sound system Zyris reads.
+function choiceValue(choice: Choice): string {
+  return choice.kind === "default" ? "default:" : `device:${choice.id}`;
+}
+function choiceFrom(value: string): Choice {
+  return value === "default:" ? { kind: "default" } : { kind: "device", id: value.slice("device:".length) };
+}
+
 // One list of devices to choose from — the microphone's or the speaker's, which are the same
 // shape and must say the same things about a list that could not be read.
 function DevicePicker({
   list,
   chosen,
-  name,
   noun,
   disabled,
   onChoose,
 }: {
   list: DeviceList;
   chosen: Choice;
-  name: string;
   noun: string;
   disabled: boolean;
   onChoose: (choice: Choice) => void;
@@ -249,49 +271,74 @@ function DevicePicker({
   if (list.devices.length === 0) {
     return <p className="muted">The sound system answered and listed no {noun}s on this computer.</p>;
   }
+  const picked = chosen.kind === "device" ? list.devices.find((d) => d.id === chosen.id) : undefined;
   return (
     <>
-      <ul className="caps choices">
-        <li>
-          <label>
-            <input
-              type="radio"
-              name={name}
-              checked={chosen.kind === "default"}
-              disabled={disabled}
-              onChange={() => onChoose({ kind: "default" })}
-            />{" "}
-            Whichever this computer calls the default
-          </label>
-          <p className="note muted">
-            Zyris follows the default when you change it. A named device below does not move.
-          </p>
-        </li>
+      <select
+        className="picker"
+        aria-label={`The ${noun}`}
+        value={choiceValue(chosen)}
+        disabled={disabled}
+        onChange={(event) => onChoose(choiceFrom(event.target.value))}
+      >
+        <option value="default:">Whichever this computer calls the default</option>
+        {/* A named device that is no longer listed stays visible as the choice, rather than the
+            dropdown silently showing the first entry as if it were chosen. */}
+        {chosen.kind === "device" && picked === undefined && (
+          <option value={choiceValue(chosen)}>{chosen.id} (not connected)</option>
+        )}
         {list.devices.map((device) => (
-          <li key={device.id}>
-            <label>
-              <input
-                type="radio"
-                name={name}
-                checked={chosen.kind === "device" && chosen.id === device.id}
-                disabled={disabled}
-                onChange={() => onChoose({ kind: "device", id: device.id })}
-              />{" "}
-              {device.name}
-            </label>
-            <p className="note muted">
-              {device.isDefault ? "This computer's default, and " : ""}
-              {whatItIs(device)}.
-            </p>
-          </li>
+          <option key={device.id} value={`device:${device.id}`}>
+            {device.name} — {kindOf(device)}
+            {device.isDefault ? " (default)" : ""}
+          </option>
         ))}
-      </ul>
-      <p className="muted note">
-        Two entries can carry exactly the same name — on many computers a loudspeaker's monitor is
-        listed beside the microphone built into the same chip. The line under each one is what
-        tells them apart. Nothing is filtered out of this list: on some sound systems the device
-        that always works is the one that will not say what it is.
+      </select>
+      <p className="note muted">
+        {picked
+          ? `${picked.isDefault ? "This computer's default, and " : "This is "}${whatItIs(picked)}.`
+          : chosen.kind === "default"
+            ? "Zyris follows the default when you change it. A named device does not move."
+            : "That device is not connected now."}
       </p>
+    </>
+  );
+}
+
+// Which downloaded model listening uses. Only models on disk are offered: choosing one that is not
+// there would turn listening off. The chosen one is always shown, downloaded or not, so the
+// dropdown never claims a model is in use that is not.
+function ModelPicker({
+  models,
+  disabled,
+  onChoose,
+}: {
+  models: SpeechModel[];
+  disabled: boolean;
+  onChoose: (id: string) => void;
+}) {
+  const offered = models.filter((m) => m.state.state === "ready" || m.chosen);
+  const chosen = models.find((m) => m.chosen);
+  if (offered.length === 0) return null;
+  return (
+    <>
+      <select
+        className="picker"
+        aria-label="The speech model in use"
+        value={chosen?.id ?? ""}
+        disabled={disabled}
+        onChange={(event) => onChoose(event.target.value)}
+      >
+        {offered.map((m) => (
+          <option key={m.id} value={m.id} disabled={m.state.state !== "ready"}>
+            {m.name}
+            {m.state.state === "ready" ? "" : " (not downloaded)"}
+          </option>
+        ))}
+      </select>
+      {offered.every((m) => m.state.state !== "ready") && (
+        <p className="note problem">No model is downloaded yet. Download one below.</p>
+      )}
     </>
   );
 }
@@ -674,7 +721,6 @@ export function Voice() {
         <DevicePicker
           list={voice.devices}
           chosen={voice.chosen}
-          name="microphone"
           noun="microphone"
           disabled={busy !== null}
           onChoose={(device) => act("device", "set_voice_device", { device })}
@@ -687,7 +733,6 @@ export function Voice() {
         <DevicePicker
           list={voice.speakers}
           chosen={voice.speaker}
-          name="speaker"
           noun="speaker"
           disabled={busy !== null}
           onChoose={(speaker) => act("speaker", "set_voice_speaker", { speaker })}
@@ -728,19 +773,18 @@ export function Voice() {
             setting to choose one of the models Zyris downloads.
           </p>
         ) : (
-          <ul className="caps choices">
+          <>
+            <ModelPicker
+              models={voice.models}
+              disabled={busy !== null}
+              onChoose={(id) => act("model", "set_speech_model", { id })}
+            />
+            <ul className="caps choices">
             {voice.models.map((model) => (
               <li key={model.id}>
-                <label>
-                  <input
-                    type="radio"
-                    name="speech-model"
-                    checked={model.chosen}
-                    disabled={busy !== null}
-                    onChange={() => act("model", "set_speech_model", { id: model.id })}
-                  />{" "}
+                <strong>
                   {model.name} ({megabytes(model.bytes)})
-                </label>
+                </strong>
                 <p className="note muted">{model.note}</p>
                 {refused[`model:${model.id}`] && (
                   <p className="note problem">{refused[`model:${model.id}`]}</p>
@@ -793,7 +837,8 @@ export function Voice() {
                 )}
               </li>
             ))}
-          </ul>
+            </ul>
+          </>
         )}
 
         {busy?.startsWith("model:") && (
