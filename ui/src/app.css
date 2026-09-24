@@ -24,11 +24,17 @@
   }
 }
 
+/* Everything below is sized in rem, so this one line scales the whole window. 16px at the
+   1000px the window opens at, growing with it to 22px: a tiling window manager hands the window
+   the whole screen, and at a fixed size the interface became a narrow column of small type in the
+   middle of it. */
+html { font-size: clamp(16px, 0.6vw + 10px, 22px); }
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 0.875rem/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 .screen {
