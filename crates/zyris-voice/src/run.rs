@@ -116,6 +116,16 @@ pub struct Engine {
     /// connection and the cursor belongs to the feed.
     feed: Option<Arc<Feed>>,
     live: Mutex<Live>,
+    /// The settings as last stored, for [`Engine::look`] to read while `live` is held by a start
+    /// that is loading models. Without it the Voice screen waited seconds for its first answer.
+    shown: std::sync::Mutex<Settings>,
+    /// Whisper models already in memory, by path. Reopening a microphone or a speaker used to
+    /// load and warm them again, which is seconds per model and most of a restart.
+    loaded: std::sync::Mutex<Vec<(PathBuf, Arc<stt::Stt>)>>,
+    /// The voice, loaded once: it is the same directory and the same voice on every start.
+    voice: std::sync::Mutex<Option<Arc<std::sync::Mutex<crate::tts::Tts>>>>,
+    /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
+    takes_checked: std::sync::atomic::AtomicBool,
 }
 
 struct Live {
@@ -163,7 +173,11 @@ impl Engine {
             traces: broadcast::channel(TRACE_CAPACITY).0,
             keys: broadcast::channel(KEY_CAPACITY).0,
             feed: Some(feed),
+            shown: std::sync::Mutex::new(settings.clone()),
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
+            loaded: std::sync::Mutex::new(Vec::new()),
+            voice: std::sync::Mutex::new(None),
+            takes_checked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -197,6 +211,7 @@ impl Engine {
                 return;
             }
             live.settings.session = Some(session.clone());
+            *lock(&self.shown) = live.settings.clone();
         }
         // Written from the settings this engine holds, which are the current ones: the switch
         // and the device may have moved since the file was read, and writing a value captured
@@ -250,28 +265,40 @@ impl Engine {
     /// Reads the disk every time — the model can be deleted and a microphone unplugged while
     /// this window is open, and a remembered answer would be a screen that is confidently wrong
     /// about both.
+    ///
+    /// **Never waits on a start.** Loading a model holds `live` for seconds; while it does, the
+    /// screen gets the stored settings and "starting" rather than nothing at all.
     pub async fn look(&self) -> VoiceView {
-        let mut live = self.live.lock().await;
+        let Ok(mut live) = self.live.try_lock() else {
+            let settings = lock(&self.shown).clone();
+            let starting = ListeningState::Starting {
+                detail: "Loading the speech model and opening the microphone.".into(),
+            };
+            return self.view(&settings, starting);
+        };
         self.settle(&mut live).await;
+        self.view(&live.settings.clone(), live.state.clone())
+    }
 
+    fn view(&self, settings: &Settings, listening: ListeningState) -> VoiceView {
         VoiceView {
             support: crate::capture::support(),
-            listening: live.state.clone(),
+            listening,
             devices: match crate::capture::devices() {
                 Ok(devices) => DeviceList::Listed { devices },
                 // Not an empty list. A sound server that will not answer and a computer with no
                 // microphone are two different sentences, and the screen says both.
                 Err(problem) => DeviceList::Unreadable { reason: problem.reason },
             },
-            chosen: live.settings.device.clone(),
+            chosen: settings.device.clone(),
             speakers: match crate::playback::devices() {
                 Ok(devices) => DeviceList::Listed { devices },
                 Err(problem) => DeviceList::Unreadable { reason: problem.reason },
             },
-            speaker: live.settings.speaker.clone(),
-            model: model_view(stt::state(&stt::choosable(live.settings.speech_model.as_deref()).model)),
+            speaker: settings.speaker.clone(),
+            model: model_view(stt::state(&stt::choosable(settings.speech_model.as_deref()).model)),
             models: {
-                let chosen = stt::choosable(live.settings.speech_model.as_deref()).id;
+                let chosen = stt::choosable(settings.speech_model.as_deref()).id;
                 stt::MODELS
                     .iter()
                     .map(|choosable| SpeechModelView {
@@ -285,7 +312,7 @@ impl Engine {
                     .collect()
             },
             model_env: std::env::var(stt::MODEL_ENV).ok().filter(|named| !named.is_empty()),
-            speaking: match live.settings.session.clone() {
+            speaking: match settings.session.clone() {
                 Some(id) => SpeakingState::Session { id },
                 // Not a failure, and not silence without a reason: the file is named so a
                 // person can put an id in it, and there is no control here that would.
@@ -544,20 +571,19 @@ impl Engine {
         };
 
         let apm = Apm::new().map_err(|fault| fault.to_string())?;
-        let stt = tokio::task::spawn_blocking(move || stt::Stt::load(&path))
-            .await
-            .map_err(|_| "loading the speech model stopped before it finished".to_string())?
-            .map_err(|fault| fault.to_string())?;
-        let stt = Arc::new(stt);
+        let stt = self.stt_at(&path).await?;
         let checker = self.wake_checker(settings, &stt).await;
-        // Before the microphone opens, while whisper is doing nothing else: reading the takes is
-        // five short transcriptions.
-        let phrase = {
-            let checker = checker.clone();
-            tokio::task::spawn_blocking(move || enrolled_phrase(&checker, typed_phrase))
-                .await
-                .unwrap_or(None)
-        };
+        // Only what this start uses stays in memory: a model chosen away from is let go.
+        lock(&self.loaded).retain(|(_, kept)| Arc::ptr_eq(kept, &stt) || Arc::ptr_eq(kept, &checker));
+        let phrase = enrolled_phrase(typed_phrase);
+        if let Some(phrase) = &phrase
+            && !self.takes_checked.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            // In the background: it only logs, and with a large model it took most of a minute
+            // that the Voice screen spent waiting.
+            let (checker, phrase) = (checker.clone(), phrase.clone());
+            tokio::task::spawn_blocking(move || check_the_takes(&checker, &phrase));
+        }
 
         let apm = Arc::new(apm);
         let (device, audio, capture_delay, stop) = open_on_a_thread(choice.clone()).await?;
@@ -620,10 +646,22 @@ impl Engine {
         let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else {
             return chosen.clone();
         };
-        match tokio::task::spawn_blocking(move || stt::Stt::load(&path)).await {
-            Ok(Ok(base)) => Arc::new(base),
-            _ => chosen.clone(),
+        self.stt_at(&path).await.unwrap_or_else(|_| chosen.clone())
+    }
+
+    /// The whisper at `path`, loaded once and kept for the next start.
+    async fn stt_at(&self, path: &Path) -> Result<Arc<stt::Stt>, String> {
+        if let Some((_, stt)) = lock(&self.loaded).iter().find(|(at, _)| at == path) {
+            return Ok(stt.clone());
         }
+        let at = path.to_path_buf();
+        let stt = tokio::task::spawn_blocking(move || stt::Stt::load(&at))
+            .await
+            .map_err(|_| "loading the speech model stopped before it finished".to_string())?
+            .map_err(|fault| fault.to_string())?;
+        let stt = Arc::new(stt);
+        lock(&self.loaded).push((path.to_path_buf(), stt.clone()));
+        Ok(stt)
     }
 
     /// Open the speaker, load the voice, and start the three things that keep it fed.
@@ -651,11 +689,20 @@ impl Engine {
             crate::tts::VoiceState::Unreadable { detail, .. } => return Err(detail),
             crate::tts::VoiceState::Nowhere { reason } => return Err(reason),
         };
-        let voice = crate::tts::DEFAULT_VOICE;
-        let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load(&dir, voice))
-            .await
-            .map_err(|_| "loading the voice stopped before it finished".to_string())?
-            .map_err(|fault| fault.to_string())?;
+        let cached = lock(&self.voice).clone();
+        let tts = match cached {
+            Some(tts) => tts,
+            None => {
+                let voice = crate::tts::DEFAULT_VOICE;
+                let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load(&dir, voice))
+                    .await
+                    .map_err(|_| "loading the voice stopped before it finished".to_string())?
+                    .map_err(|fault| fault.to_string())?;
+                let tts = Arc::new(std::sync::Mutex::new(tts));
+                *lock(&self.voice) = Some(tts.clone());
+                tts
+            }
+        };
 
         let (speaker, tap, rate, stop) = open_speaker_on_a_thread(speaker.clone()).await?;
 
@@ -671,7 +718,7 @@ impl Engine {
         )));
 
         let speaking = Speaking::new(
-            Arc::new(std::sync::Mutex::new(tts)),
+            tts,
             Arc::new(speaker),
             feed.clone(),
             self.events.clone(),
@@ -724,6 +771,7 @@ impl Engine {
     }
 
     fn store(&self, settings: &Settings) {
+        *lock(&self.shown) = settings.clone();
         let Some(path) = &self.settings_path else { return };
         if let Err(error) = write_settings(path, settings) {
             tracing::warn!(%error, path = %path.display(), "could not store the voice settings");
@@ -1032,18 +1080,23 @@ fn voice_model_view(state: crate::tts::VoiceState) -> crate::view::VoiceModelVie
 ///
 /// **On when there are takes, or a phrase typed in `voice.json`**, so that a machine nobody has
 /// set up does not pay whisper to read every sentence said in the room. The phrase is the typed
-/// one or [`wake::DEFAULT_PHRASE`]; the takes, each trimmed to where the endpointer found the
-/// speech, are read expecting it and the log says how many it was heard in — which is how
-/// somebody finds out that the phrase they recorded is not the one being listened for.
-///
-/// **Read once, when listening starts.** Five short transcriptions are a second or two, which is
-/// nothing once. The cost is that a new take counts from the next time listening is turned on.
-fn enrolled_phrase(stt: &stt::Stt, typed: Option<String>) -> Option<wake::Phrase> {
-    let takes = wake::Store::on_this_machine().ok().and_then(|store| store.takes().ok()).unwrap_or_default();
-    if typed.is_none() && takes.is_empty() {
+/// one or [`wake::DEFAULT_PHRASE`].
+fn enrolled_phrase(typed: Option<String>) -> Option<wake::Phrase> {
+    if typed.is_none() && recorded_takes().is_empty() {
         return None;
     }
-    let phrase = wake::Phrase::new(typed.as_deref().unwrap_or(wake::DEFAULT_PHRASE))?;
+    wake::Phrase::new(typed.as_deref().unwrap_or(wake::DEFAULT_PHRASE))
+}
+
+fn recorded_takes() -> Vec<wake::Take> {
+    wake::Store::on_this_machine().ok().and_then(|store| store.takes().ok()).unwrap_or_default()
+}
+
+/// Read the takes, each trimmed to where the endpointer found the speech, expecting the phrase,
+/// and log how many it was heard in — which is how somebody finds out that the phrase they
+/// recorded is not the one being listened for.
+fn check_the_takes(stt: &stt::Stt, phrase: &wake::Phrase) {
+    let takes = recorded_takes();
     let heard: Vec<String> = takes
         .iter()
         .filter_map(|take| {
@@ -1074,7 +1127,11 @@ fn enrolled_phrase(stt: &stt::Stt, typed: Option<String>) -> Option<wake::Phrase
         heard_as = ?heard,
         "listening for the wake word"
     );
-    Some(phrase)
+}
+
+/// A lock that a panic elsewhere does not turn into a second panic here.
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// How far along the wake word is, as the screen renders it.
@@ -1185,6 +1242,18 @@ mod tests {
             .block_on(async { engine.live.lock().await.settings.clone() });
 
         assert!(!live.listen, "a machine nobody has asked opens no microphone");
+    }
+
+    /// A start holds `live` for as long as its models take to load; the screen must not wait on
+    /// it, and must say it is starting rather than off.
+    #[tokio::test]
+    async fn the_screen_is_answered_while_a_start_is_loading() {
+        let engine = Engine::new(None, broadcast::channel(4).0);
+        let _starting = engine.live.lock().await;
+        let view = tokio::time::timeout(std::time::Duration::from_secs(1), engine.look())
+            .await
+            .expect("look waited on the start");
+        assert!(matches!(view.listening, ListeningState::Starting { .. }), "{:?}", view.listening);
     }
 
     /// The answer survives a restart, which is the other half of the decision: asking once means
