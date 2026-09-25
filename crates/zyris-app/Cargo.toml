@@ -86,5 +86,7 @@ voice = ["zyris-voice/voice"]
 # canceller regardless, from the DSP that ships with the operating system.
 aec = ["voice", "zyris-voice/aec-bundled"]
 
-# Transcription on the GPU through Vulkan. Forwards; see `zyris-voice`'s `gpu`.
+# Transcription and synthesis on the GPU, or either half alone. Forward; see `zyris-voice`.
 gpu = ["voice", "zyris-voice/gpu"]
+gpu-stt = ["voice", "zyris-voice/gpu-stt"]
+gpu-tts = ["voice", "zyris-voice/gpu-tts"]

@@ -422,6 +422,9 @@ pub fn run(
             close_hotkey(&exit_hotkey, &exit_runtime);
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
+            // Tauri would call `std::process::exit` next; this does the same, minus the C++
+            // exit handlers that crash a GPU voice build. See `zyris_voice::exit_process`.
+            zyris_voice::exit_process(0);
         }
         _ => {}
     });

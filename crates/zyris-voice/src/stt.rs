@@ -123,7 +123,7 @@ pub const MODELS: [Choosable; 3] = [
 pub fn choosable(id: Option<&str>) -> &'static Choosable {
     match id {
         Some(id) => MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0]),
-        None => unchosen(cfg!(feature = "gpu"), |model| {
+        None => unchosen(cfg!(feature = "gpu-stt"), |model| {
             matches!(cached_state(model), ModelState::Ready { .. })
         }),
     }
@@ -450,12 +450,12 @@ impl Stt {
         let mut parameters = whisper_rs::WhisperContextParameters::default();
         // The GPU only in a build with the `gpu` feature. whisper.cpp falls back to the CPU on
         // a machine where Vulkan finds no device.
-        parameters.use_gpu = cfg!(feature = "gpu");
+        parameters.use_gpu = cfg!(feature = "gpu-stt");
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
         // Base has six encoder layers; Small twelve, Large v3 Turbo thirty-two.
-        let short_window = !cfg!(feature = "gpu") && context.model_n_audio_layer() <= 6;
+        let short_window = !cfg!(feature = "gpu-stt") && context.model_n_audio_layer() <= 6;
         let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()), short_window };
         // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
         let first = stt.warm_state()?;

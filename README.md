@@ -614,14 +614,26 @@ the lines beside it put AVX2 back. A release with the voice refuses to build wit
 `whisper-rs-sys` does not rebuild when these change, so after changing one run
 `cargo clean -p whisper-rs-sys` (with `--release` for that profile).
 
-**`gpu` runs transcription on the graphics card through Vulkan**, on any vendor's GPU. It needs
-the Vulkan headers, the loader and `glslc` (shaderc) to build, and the binary then needs a Vulkan
-loader to start. On an RTX 3050, Large v3 Turbo goes from about ten seconds a sentence to a
-quarter of a second. The first load after a build compiles its shaders, which takes about ten
-seconds once; the driver keeps them after that.
+**`gpu` runs transcription and speech on the graphics card**, on any vendor's GPU; `gpu-stt` and
+`gpu-tts` turn on one half each.
+
+- **`gpu-stt`: whisper.cpp through Vulkan.** It needs the Vulkan headers, the loader and `glslc`
+  (shaderc) to build, and a Vulkan loader to start. On an RTX 3050, Large v3 Turbo takes 0.85 s a
+  sentence against about ten on the processor. The first load after a build compiles shaders for
+  about ten seconds, once; the driver keeps them.
+- **`gpu-tts`: Supertonic through ONNX Runtime's WebGPU provider** (Dawn: Vulkan on Linux,
+  Direct3D 12 on Windows). A sentence takes 0.2-0.3 s against 1-2 s on the processor. This
+  links ONNX Runtime's `wgpu` build instead of the CPU one, and the binary needs
+  `libwebgpu_dawn.so` beside it; `copy-dylibs` puts it in `target/release`, and the installers
+  do not carry it yet. Where `pkg-config` finds a system ONNX Runtime (NixOS, say), set
+  `LIBONNXRUNTIME_NO_PKG_CONFIG=1`, or the build links that CPU-only copy and synthesis quietly
+  stays on the processor. A build with it exits through `zyris_voice::exit_process`, because
+  ONNX Runtime's exit handler aborts on a Dawn instance that is already gone.
+
+Neither half has been tried yet on a machine without a usable GPU.
 
 ```bash
-cargo run --release --features custom-protocol,gpu -p zyris-app
+LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo run --release --features custom-protocol,gpu -p zyris-app
 ```
 
 ## Status

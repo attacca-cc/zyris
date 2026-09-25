@@ -36,6 +36,32 @@
 
 use tokio::sync::broadcast;
 
+/// End the process, the way `std::process::exit` does — except in a build that reads answers
+/// on the GPU, where it skips the C++ exit handlers.
+///
+/// ONNX Runtime's global environment is a C++ static, and with the WebGPU provider its destructor
+/// releases the Dawn instance after Dawn has already torn itself down, which aborts with "pure
+/// virtual method called" and a core dump on every quit (`dawn::native::NativeInstanceRelease`
+/// from `OrtEnv::~OrtEnv`, measured 2026-09-25). Nothing is lost by skipping it: Tauri already
+/// ends with `std::process::exit`, which drops nothing on the Rust side either, so this only
+/// flushes what stdio holds and leaves.
+pub fn exit_process(code: i32) -> ! {
+    #[cfg(feature = "gpu-tts")]
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        unsafe extern "C" {
+            fn _exit(code: i32) -> !;
+        }
+        // SAFETY: `_exit` takes an int and never returns; it is in every C runtime this builds
+        // against.
+        unsafe { _exit(code) }
+    }
+    #[cfg(not(feature = "gpu-tts"))]
+    std::process::exit(code)
+}
+
 // What happens to a frame between the microphone and everything that reads it. Present in
 // both feature states with one set of signatures; only the bodies read `aec`. See the module.
 #[cfg(feature = "voice")]
