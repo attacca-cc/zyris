@@ -967,10 +967,18 @@ fn session(path: &Path) -> Result<ort::session::Session, Fault> {
 /// WebGPU in a `gpu` build — Vulkan underneath on Linux, Direct3D 12 on Windows, so any vendor's
 /// card and no CUDA install. Not an error when there is no adapter: ONNX Runtime then runs every
 /// node on the processor, as a build without the feature always does.
+///
+/// The environment is committed first: registering the provider on the first builder of a
+/// process, before anything else has made one, failed with "Attempt to use DefaultLogger but none
+/// has been registered" and left that graph on the processor.
 #[cfg(feature = "gpu-tts")]
 fn on_the_gpu(
     builder: ort::session::builder::SessionBuilder,
 ) -> ort::Result<ort::session::builder::SessionBuilder> {
+    static ENVIRONMENT: std::sync::Once = std::sync::Once::new();
+    ENVIRONMENT.call_once(|| {
+        let _ = ort::init().commit();
+    });
     builder.with_execution_providers([
         ort::execution_providers::WebGPUExecutionProvider::default().build(),
     ])
