@@ -185,7 +185,8 @@ pub trait Transcribe: Send + Sync + 'static {
     /// One utterance of 16 kHz mono samples, as text. Blocking.
     fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault>;
 
-    /// The same, told the phrase it is listening for. See [`stt::Stt::transcribe_expecting`].
+    /// The same, told what words to expect: the wake phrase, or the names a turn is likely to
+    /// hold. See [`stt::Stt::transcribe_expecting`].
     /// A double that has no use for the hint answers as it always does.
     fn transcribe_expecting(&self, audio: &[f32], _phrase: &str) -> Result<String, stt::Fault> {
         self.transcribe(audio)
@@ -199,6 +200,14 @@ impl Transcribe for stt::Stt {
 
     fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, stt::Fault> {
         stt::Stt::transcribe_expecting(self, audio, Some(phrase))
+    }
+}
+
+/// A turn, read expecting `vocabulary` when there is one.
+fn heard(stt: &dyn Transcribe, audio: &[f32], vocabulary: Option<&str>) -> Result<String, stt::Fault> {
+    match vocabulary {
+        Some(vocabulary) => stt.transcribe_expecting(audio, vocabulary),
+        None => stt.transcribe(audio),
     }
 }
 
@@ -289,6 +298,9 @@ pub struct Session {
     /// The whisper those checks use, when it is not the one turns are transcribed with. See
     /// `run::Engine::wake_checker`.
     checker: Option<Arc<dyn Transcribe>>,
+    /// Names whisper is told to expect in every turn, so it spells them as written rather than as
+    /// it heard them: "깃허브" comes back "기토부" without it (zyris#18). `None` reads plainly.
+    vocabulary: Option<Arc<str>>,
 
     /// Whatever length the device chose, re-cut to what the processor accepts. The processor
     /// **panics** rather than erroring on a wrong count, so nothing may reach it unmeasured.
@@ -361,6 +373,7 @@ impl Session {
             partial_next: PARTIAL_EVERY,
             checking: None,
             checker: None,
+            vocabulary: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
             // one, and nothing reads them then.
@@ -404,8 +417,16 @@ impl Session {
     }
 
     /// Check for the phrase with this whisper rather than the one turns are transcribed with.
+    /// The live preview while somebody is speaking uses it too: it is only shown, never sent,
+    /// and on a processor the chosen model can be many times slower.
     pub fn checking_with(mut self, checker: Arc<dyn Transcribe>) -> Session {
         self.checker = Some(checker);
+        self
+    }
+
+    /// Tell whisper to expect these names in every turn. See [`Session::vocabulary`](Session).
+    pub fn expecting(mut self, vocabulary: &str) -> Session {
+        self.vocabulary = Some(vocabulary.into()).filter(|v: &Arc<str>| !v.trim().is_empty());
         self
     }
 
@@ -528,7 +549,10 @@ impl Session {
         // machine takes fewer looks instead of falling behind and then taking several at once.
         self.partial_next = length + PARTIAL_EVERY;
         self.partial_from = length;
-        self.partial = Some(self.spawn(turn.buffer.clone()));
+        let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
+        let (audio, vocabulary) = (turn.buffer.clone(), self.vocabulary.clone());
+        self.partial =
+            Some(tokio::task::spawn_blocking(move || heard(&*stt, &audio, vocabulary.as_deref())));
     }
 
     /// What whisper made of the turn so far. **Published and otherwise thrown away.**
@@ -941,8 +965,8 @@ impl Session {
     /// able to go on reading the microphone while whisper works and therefore needs a handle to
     /// wait on beside the other two, not a future to await.
     fn spawn(&self, audio: Vec<f32>) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
-        let stt = self.stt.clone();
-        tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+        let (stt, vocabulary) = (self.stt.clone(), self.vocabulary.clone());
+        tokio::task::spawn_blocking(move || heard(&*stt, &audio, vocabulary.as_deref()))
     }
 
     /// [`Session::spawn`], once `before` has finished, if there is one.
@@ -952,10 +976,10 @@ impl Session {
         audio: Vec<f32>,
     ) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
         let Some(before) = before else { return self.spawn(audio) };
-        let stt = self.stt.clone();
+        let (stt, vocabulary) = (self.stt.clone(), self.vocabulary.clone());
         tokio::spawn(async move {
             let _ = before.await;
-            tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+            tokio::task::spawn_blocking(move || heard(&*stt, &audio, vocabulary.as_deref()))
                 .await
                 .unwrap_or(Err(stt::Fault::Lost))
         })
@@ -1817,6 +1841,8 @@ mod tests {
         /// When set, every call blocks until a token is put on it. This is how "a key pressed
         /// again while a transcription is still running" is made a sequence rather than a race.
         gate: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
+        /// What each call was told to expect, `None` for a plain `transcribe`.
+        expected: Mutex<Vec<Option<String>>>,
     }
 
     impl Scribe {
@@ -1827,6 +1853,7 @@ mod tests {
                 heard: Mutex::new(Vec::new()),
                 answers: Mutex::new(answers.into_iter().collect()),
                 gate: None,
+                expected: Mutex::new(Vec::new()),
             })
         }
 
@@ -1840,6 +1867,7 @@ mod tests {
                 heard: Mutex::new(Vec::new()),
                 answers: Mutex::new(std::iter::repeat_n(Ok(text.to_string()), 8).collect()),
                 gate: Some(Mutex::new(gate)),
+                expected: Mutex::new(Vec::new()),
             });
             (scribe, open)
         }
@@ -1854,7 +1882,15 @@ mod tests {
     }
 
     impl Transcribe for Scribe {
+        fn transcribe_expecting(&self, audio: &[f32], words: &str) -> Result<String, stt::Fault> {
+            let answer = self.transcribe(audio);
+            *self.expected.lock().expect("not poisoned").last_mut().expect("just recorded") =
+                Some(words.to_string());
+            answer
+        }
+
         fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault> {
+            self.expected.lock().expect("not poisoned").push(None);
             // Written down before the gate, so a test can see that the call started.
             self.heard.lock().expect("not poisoned").push(audio.to_vec());
             if let Some(gate) = &self.gate {
@@ -2185,6 +2221,37 @@ mod tests {
             0,
             "a turn with no speech in it must never reach the model: whisper answers noise with \
              a fluent sentence, and the sentence goes to an agent that can act on it"
+        );
+        zyris.stops().await;
+    }
+
+    /// A turn is read expecting the vocabulary, so the names in it come back spelled (zyris#18).
+    #[tokio::test]
+    async fn a_turn_is_read_expecting_the_vocabulary() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let scribe = Scribe::always("Attacca한테 물어봐");
+        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+            .expecting("Attacca, Zyris.");
+        let mut zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+
+        zyris.press().await;
+        zyris.feed(&utterance(2.0)).await;
+        zyris.release().await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "Attacca한테 물어봐".into() });
+        assert_eq!(
+            zyris.scribe.expected.lock().expect("not poisoned").clone(),
+            vec![Some("Attacca, Zyris.".to_string())]
         );
         zyris.stops().await;
     }

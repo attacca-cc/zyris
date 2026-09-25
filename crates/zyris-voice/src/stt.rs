@@ -76,7 +76,8 @@ pub struct Choosable {
 /// Measured on an i5-10400F (six cores, AVX2, no GPU) on three- to four-second Korean and English
 /// sentences: `base` 0.4-0.5 s and gets names and loanwords wrong ("기토부" for 깃허브), `small`
 /// 1.6-2.1 s and mostly right, `large-v3-turbo` quantized 9-10 s and right. The notes say this in
-/// words, because the numbers are one machine's.
+/// words, because the numbers are one machine's. With the `gpu` feature on that machine's RTX
+/// 3050 the three take 0.05 s, 0.12 s and 0.23 s.
 pub const MODELS: [Choosable; 3] = [
     Choosable {
         id: "base",
@@ -88,7 +89,7 @@ pub const MODELS: [Choosable; 3] = [
     Choosable {
         id: "small",
         name: "Small",
-        note: "Noticeably more accurate, and about four times slower than Base.",
+        note: "Noticeably more accurate, and about four times slower than Base on a processor.",
         model: Model {
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
                   5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
@@ -100,7 +101,8 @@ pub const MODELS: [Choosable; 3] = [
     Choosable {
         id: "large-v3-turbo",
         name: "Large v3 Turbo",
-        note: "The most accurate, and slow without a fast processor: several seconds a sentence.",
+        note: "The most accurate. Several seconds a sentence on a processor; a fraction of a \
+               second in a build that transcribes on the graphics card.",
         model: Model {
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
                   5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
@@ -113,8 +115,23 @@ pub const MODELS: [Choosable; 3] = [
 
 /// The model `id` names, or [`BASE`]'s entry for an id this build does not offer — a setting
 /// written by a later version, or by hand — so that listening still starts.
+///
+/// **With nothing chosen, a build that transcribes on the GPU takes the most accurate model
+/// already on disk.** There the larger models cost a fraction of a second, and Base's mistakes
+/// arrive at the agent as if they had been typed (zyris#18). A processor-only build keeps Base,
+/// where Large is ten seconds a sentence.
 pub fn choosable(id: Option<&str>) -> &'static Choosable {
-    id.and_then(|id| MODELS.iter().find(|m| m.id == id)).unwrap_or(&MODELS[0])
+    match id {
+        Some(id) => MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0]),
+        None => unchosen(cfg!(feature = "gpu"), |model| {
+            matches!(cached_state(model), ModelState::Ready { .. })
+        }),
+    }
+}
+
+fn unchosen(gpu: bool, on_disk: impl Fn(&Model) -> bool) -> &'static Choosable {
+    let best = gpu.then(|| MODELS.iter().rev().find(|m| on_disk(&m.model))).flatten();
+    best.unwrap_or(&MODELS[0])
 }
 
 /// Names a model file directly, bypassing the cache directory entirely.
@@ -410,6 +427,14 @@ pub struct Stt {
     /// decodes in 0.22 s. A state keeps the context of its last decode, so on a state that has run
     /// once detection costs the short window too — 0.37 s.
     idle: std::sync::Mutex<Vec<whisper_rs::WhisperState>>,
+    /// Whether turns get the shortened encoder window of [`audio_ctx`] or the full thirty
+    /// seconds. **Shortened only for Base on a processor**, the one pairing it was measured
+    /// safe for. Large v3 Turbo given the short window repeats itself — a four-second sentence
+    /// came back twice, and a short one told to expect names looped "폴더 폴더 폴더" until the
+    /// token limit — and with the full window it was right on all fourteen test sentences. On
+    /// the GPU the full window costs 0.85 s a sentence for Large, 0.25 s for Small,
+    /// 0.1 s for Base.
+    short_window: bool,
 }
 
 impl Stt {
@@ -429,7 +454,9 @@ impl Stt {
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
-        let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()) };
+        // Base has six encoder layers; Small twelve, Large v3 Turbo thirty-two.
+        let short_window = !cfg!(feature = "gpu") && context.model_n_audio_layer() <= 6;
+        let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()), short_window };
         // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
         let first = stt.warm_state()?;
         stt.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(first);
@@ -491,7 +518,10 @@ impl Stt {
         if audio.len() < samples_in(MIN_AUDIO) {
             return Ok(String::new());
         }
-        let settings = Settings::for_audio(audio.len());
+        let mut settings = Settings::for_audio(audio.len());
+        if !self.short_window {
+            settings.audio_ctx = FULL_CTX;
+        }
 
         let taken = self.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop();
         let mut state = match taken {
@@ -578,7 +608,10 @@ mod tests {
     fn a_model_id_this_build_does_not_offer_falls_back_to_base() {
         assert_eq!(choosable(Some("small")).id, "small");
         assert_eq!(choosable(Some("large-v9")).model, BASE);
-        assert_eq!(choosable(None).model, BASE);
+        assert_eq!(unchosen(false, |_| true).model, BASE, "a processor keeps Base");
+        assert_eq!(unchosen(true, |_| true).id, "large-v3-turbo");
+        assert_eq!(unchosen(true, |m| m.file == "ggml-small.bin").id, "small");
+        assert_eq!(unchosen(true, |_| false).model, BASE, "nothing on disk still names Base");
     }
 
     /// Each download is the file it says, from the one revision every digest was read at.

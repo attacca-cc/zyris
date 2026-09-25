@@ -314,11 +314,24 @@ and "Hey, I see" kept their own words; a test holds both halves.
 directory (`~/.cache/zyris/models` on Linux, `%LOCALAPPDATA%\attacca\zyris\cache\models` on
 Windows) rather than into the installer:
 
-| Model | Download | On an i5-10400F, a 3-4 s sentence | |
-|---|---|---|---|
-| Base | 141 MB | 0.4-0.5 s | the default; gets names and borrowed words wrong ("기토부" for 깃허브) |
-| Small | 465 MB | 1.6-2.1 s | mostly right |
-| Large v3 Turbo (q5_0) | 547 MB | 9-10 s | right, and slow without a GPU, which this build does not use |
+| Model | Download | i5-10400F, a 3-4 s sentence | RTX 3050 (`gpu` build) | |
+|---|---|---|---|---|
+| Base | 141 MB | 0.4-0.5 s | 0.1 s | gets names and borrowed words wrong ("기토부" for 깃허브) |
+| Small | 465 MB | 1.6-2.1 s | 0.25 s | mostly right |
+| Large v3 Turbo (q5_0) | 547 MB | 9-10 s | 0.85 s | right |
+
+With nothing chosen, a processor-only build uses Base and a `gpu` build the most accurate model
+it has on disk. Base is kept for the wake word either way.
+
+**Every turn is read expecting a few names**, so they come back spelled as written: "Attacca,
+Zyris." unless `"vocabulary"` in `voice.json` says otherwise — `"vocabulary": "Attacca, Zyris,
+GitHub, Tailscale, Tokio."`, say. It replaces the default rather than adding to it, and an empty
+string turns it off. It fixes only the names it lists: told to expect Attacca and Tailscale, Base
+wrote "Attacca한테 Tailscale 설정" for what it had heard as "아타카한테 테일 스케일".
+
+**Only Base on a processor gets the shortened encoder window** that makes it four times faster.
+Larger models given it repeat themselves (a sentence came back twice, and a short one looped on
+one word to the token limit), so they always get the full thirty seconds.
 
 Each is checked against the SHA-256 published for it at one pinned revision before it is put in
 place, so an interrupted or intercepted download leaves nothing behind. Choosing a model takes
