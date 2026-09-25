@@ -86,10 +86,20 @@ pub struct Settings {
     /// Which speaker answers are read through.
     #[serde(default)]
     pub speaker: Choice,
-    /// Which speech model listening uses, by [`stt::Choosable::id`]. `None` is Base.
+    /// Which speech model listening uses, by [`stt::Choosable::id`]. `None` is Base, or on a
+    /// GPU build the most accurate one on disk — see [`stt::choosable`].
     #[serde(default)]
     pub speech_model: Option<String>,
+    /// Names every turn is read expecting, so they come back spelled as written: a sentence or a
+    /// comma-separated list, in any language. Replaces [`DEFAULT_VOCABULARY`] rather than adding
+    /// to it; an empty string turns it off.
+    #[serde(default)]
+    pub vocabulary: Option<String>,
 }
+
+/// What a turn is read expecting when `vocabulary` is not set: the two names every conversation
+/// with this program is likely to hold, and the ones whisper has never seen.
+pub const DEFAULT_VOCABULARY: &str = "Attacca, Zyris.";
 
 /// What the settings file is called, inside the instance's data directory.
 ///
@@ -621,9 +631,12 @@ impl Engine {
             session = session.conversation(feed.clone());
         }
         session = session.tracing(self.traces.clone());
+        session = session.expecting(settings.vocabulary.as_deref().unwrap_or(DEFAULT_VOCABULARY));
         if let Some(phrase) = phrase {
-            session = session.listening_for(phrase).checking_with(checker);
+            session = session.listening_for(phrase);
         }
+        // Also when the wake word is off: the preview while somebody speaks runs on it.
+        session = session.checking_with(checker);
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
