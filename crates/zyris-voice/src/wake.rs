@@ -1,29 +1,17 @@
-//! Recording a wake word, and keeping it. **Nothing reads these.**
+//! Recording a wake word, and keeping it.
 //!
 //! # Read this before writing any copy about it
 //!
-//! A wake word recorded here is **never matched against anything**. It is not compared to the
-//! microphone, it does not wake this machine, and turning "keep the microphone on" on — when
-//! there is such a switch — would not make it do so. All this module does is write what
-//! somebody said into files, so that a matcher built later can be built **without asking them
-//! to record it again**.
+//! The phrase is words ([`Phrase`], [`DEFAULT_PHRASE`]); the takes recorded here **turn it on and
+//! check it**: when listening starts, whisper reads each take expecting the phrase and the log
+//! says how many it heard it in. While no turn is open, each thing said in the room is read the
+//! same way, and one that starts with the phrase opens a turn the way the push-to-talk key does — or, if the request came in
+//! the same breath, sends it. Only while listening is on, and only while nothing is being read
+//! aloud — see `Session::should_watch`.
 //!
-//! That is a deliberate decision of the user's, taken on 2026-09-15, and it is worth writing
-//! down why so that nobody quietly re-opens it:
-//!
-//! - The spec asks for a wake word "matched acoustically, so it is not tied to a language",
-//!   which is the right shape and turned out to be a research problem. The published recipes
-//!   reach **5.4 % false rejects at 0.1 false accepts an hour with five enrolments**, and
-//!   **nobody has released weights.** What is downloadable is unlicensed, or English-only, or
-//!   needs a gradient fine-tune that ONNX Runtime cannot do.
-//! - The honest thing that could be built today is DTW over MFCC templates, which measures
-//!   around **two false wakes an hour at recall 0.67** — a microphone that interrupts twice an
-//!   hour and misses one attempt in three. That is not a feature, and shipping it with a label
-//!   that says "wake word" would be the sixth time this project has claimed more than the code
-//!   does.
-//!
-//! So [`NOTHING_READS_THESE`] is a sentence for the window and not a comment: whatever screen
-//! offers this has to say it.
+//! Template matching over MFCCs came first and was replaced: on a real enrolment it could not
+//! tell the phrase from other speech (see [`Phrase`]). [`WHAT_THE_TAKES_DO`] is the sentence a
+//! window has to render so that nobody is promised more than this does.
 //!
 //! # What is stored, and why that is the shape
 //!
@@ -71,15 +59,151 @@ use std::time::Duration;
 
 use crate::apm::Conditioning;
 use crate::capture::{SAMPLE_RATE, VAD_FRAME};
-use crate::vad::{Ended, Endpointer};
+use crate::vad::{Ended, Endpointer, Listening};
 
 /// The sentence a window has to render beside anything about the wake word.
 ///
 /// Public, and a constant rather than something each screen writes for itself, because this is
-/// the claim that must not drift: there is no matcher, and the recordings do nothing yet.
-pub const NOTHING_READS_THESE: &str =
-    "Zyris keeps this recording so a wake word can be added later without asking you to record \
-     it again. Nothing listens for it yet, and saving it does not make Zyris respond to it.";
+/// the claim that must not drift: what the phrase does, when it is listened for, when new takes
+/// count, and that it is a close match rather than a certain one.
+pub const WHAT_THE_TAKES_DO: &str =
+    "Say \"Hey Zyris\" — or the phrase set as wakePhrase in voice.json — while listening is on \
+     and nothing is being read aloud, and Zyris starts a turn as if you had pressed the key; or \
+     say your request straight after it, in one breath, and it is sent as it is. The phrase has to \
+     start what you say, and speech recognition can mishear it and miss you. These recordings \
+     turn the wake word on and check that it hears you say it, from the next time listening is \
+     turned on.";
+
+/// The phrase, as the words it is.
+///
+/// **Matched as text, by whisper, and not as sound.** Template matching over MFCCs was measured
+/// on a real enrolment and could not separate the phrase from other speech: the five takes sat
+/// 17.9 apart from each other at the median, the phrase said live came in at 20.7 to 24, and
+/// ordinary talk in the room at 26 to 32. Whisper already runs on this machine for every turn,
+/// transcribes a short utterance in a third of a second, and reads Korean and English alike.
+///
+/// **The phrase is words somebody chose, not words worked out from the takes.** Whisper spells a
+/// name it has never seen differently every time: the same five takes came back as five different
+/// words in each of English, Korean and Japanese, so no transcript of them could be the phrase.
+/// Told the phrase as an initial prompt, it wrote all five as exactly the phrase, and other speech
+/// kept its own words — so the phrase is [`DEFAULT_PHRASE`] or what `voice.json` names, every
+/// utterance is read expecting it, and the takes are what says whether that works for this voice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phrase {
+    /// As it was written, for whisper's prompt, a screen and a log.
+    said: String,
+    /// Only its letters and digits, lowercased: what is compared.
+    letters: Vec<char>,
+}
+
+/// The phrase listened for when `voice.json` names none: the name of the thing being addressed.
+pub const DEFAULT_PHRASE: &str = "Hey Zyris";
+
+/// What an utterance was, against the phrase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Heard {
+    /// The phrase and nothing after it: open a turn for what comes next.
+    Phrase,
+    /// The phrase with more said after it in the same breath — "Zyris, what time is it" — and
+    /// this is the rest, which is the request.
+    PhraseThen(String),
+    /// Not the phrase.
+    Other,
+}
+
+impl Phrase {
+    /// A phrase somebody typed. `None` when it has no letters to match.
+    pub fn new(said: &str) -> Option<Phrase> {
+        // Handed to whisper as a C string, which a NUL would end early — or, in whisper-rs,
+        // panic on.
+        let said = said.replace('\0', "");
+        let letters: Vec<char> = letters_of(&said).into_iter().map(|letter| letter.c).collect();
+        (!letters.is_empty()).then(|| Phrase { said: said.trim().to_string(), letters })
+    }
+
+    /// As it was written.
+    pub fn said(&self) -> &str {
+        &self.said
+    }
+
+    /// Whether `heard` — a transcript — starts with the phrase.
+    ///
+    /// **At the start**, allowing a few letters of lead-in ("hey", "야"), and **within a quarter
+    /// of the phrase's length in edits**, because whisper does not spell a name the same way
+    /// twice. Anywhere later in a sentence is not a wake: somebody mentioning the machine by name
+    /// in the middle of talking to someone else has not addressed it.
+    ///
+    /// **And it has to end a word**, or a word that merely starts like the phrase would count.
+    /// One letter more is let through and dropped, because Korean puts the vocative on the name
+    /// itself: "자이리스야" is the phrase, addressed.
+    pub fn in_(&self, heard: &str) -> Heard {
+        let found = letters_of(heard);
+        let chars: Vec<char> = found.iter().map(|letter| letter.c).collect();
+        let length = self.letters.len();
+        let allowed = length / 4;
+        let mut best: Option<(usize, usize)> = None;
+        for start in 0..=LEAD_IN.min(chars.len()) {
+            for taken in length.saturating_sub(allowed).max(1)..=length + allowed {
+                let Some(window) = chars.get(start..start + taken) else { break };
+                let cost = edit_distance(window, &self.letters);
+                let word = found[start + taken - 1].word;
+                let more = found[start + taken..].iter().take_while(|l| l.word == word).count();
+                if cost <= allowed && more <= 1 && best.is_none_or(|(_, was)| cost < was) {
+                    best = Some((start + taken + more, cost));
+                }
+            }
+        }
+        let Some((end, _)) = best else { return Heard::Other };
+        let rest = match found.get(end) {
+            Some(letter) => heard[letter.at..].trim().to_string(),
+            None => String::new(),
+        };
+        if letters_of(&rest).len() < 2 { Heard::Phrase } else { Heard::PhraseThen(rest) }
+    }
+}
+
+/// How many letters may come before the phrase and it still count as the start.
+const LEAD_IN: usize = 3;
+
+/// One letter or digit of a transcript, lowercased.
+struct Letter {
+    c: char,
+    /// The byte offset it starts at, so the rest of the transcript can be cut from there.
+    at: usize,
+    /// Which word it is in, counted from the start.
+    word: usize,
+}
+
+/// The letters and digits of `text`, with where they are.
+fn letters_of(text: &str) -> Vec<Letter> {
+    let mut word = 0;
+    let mut in_word = false;
+    let mut out = Vec::new();
+    for (at, c) in text.char_indices() {
+        if c.is_alphanumeric() {
+            in_word = true;
+            out.extend(c.to_lowercase().map(|c| Letter { c, at, word }));
+        } else if in_word {
+            in_word = false;
+            word += 1;
+        }
+    }
+    out
+}
+
+/// Levenshtein distance, by characters.
+fn edit_distance(a: &[char], b: &[char]) -> usize {
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = previous[j] + usize::from(ca != cb);
+            current[j + 1] = substitute.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
 
 /// How many takes are kept. See the module for why the number is five and cannot be raised
 /// after the fact.
@@ -262,19 +386,30 @@ impl Take {
 /// is one closed recording rather than a stream that goes on.
 fn look_for_speech(samples: &[f32]) -> Option<Spoken> {
     let mut endpointer = Endpointer::new();
+    let mut spoken: Option<Spoken> = None;
+    let mut note = |ended: Ended| {
+        if let Ended::Utterance { first, last, .. } = ended {
+            let last = ((last + 1) * VAD_FRAME - 1).min(samples.len().saturating_sub(1));
+            let first = spoken.map_or(first * VAD_FRAME, |was| was.first);
+            spoken = Some(Spoken { first, last });
+        }
+    };
     for frame in samples.chunks(VAD_FRAME) {
         if frame.len() == VAD_FRAME {
+            // **The verdict a push hands back is kept, not only the one `finish` gives.** A take
+            // ends when the recorder hears the speaker stop, so it always carries more trailing
+            // silence than the hangover: the utterance ends *inside* this loop, and `finish`
+            // then describes the empty turn after it. Every real take came back as no speech at
+            // all that way, and the matcher compared untrimmed takes against trimmed candidates.
+            //
             // The only error is a wrong length, which the guard above rules out.
-            let _ = endpointer.push(frame);
+            if let Ok(Listening::Ended(ended)) = endpointer.push(frame) {
+                note(ended);
+            }
         }
     }
-    match endpointer.finish() {
-        Ended::Utterance { first, last, .. } => Some(Spoken {
-            first: first * VAD_FRAME,
-            last: ((last + 1) * VAD_FRAME - 1).min(samples.len().saturating_sub(1)),
-        }),
-        Ended::TooShort { .. } => None,
-    }
+    note(endpointer.finish());
+    spoken
 }
 
 /// One line of the manifest.
@@ -346,7 +481,7 @@ pub enum Enrolment {
         /// [`TAKES`].
         wanted: usize,
     },
-    /// All [`TAKES`] of them. Still matched against nothing — see [`NOTHING_READS_THESE`].
+    /// All [`TAKES`] of them. What the phrase is matched against — see [`WHAT_THE_TAKES_DO`].
     #[serde(rename_all = "camelCase")]
     Complete {
         /// How many are stored.
@@ -457,6 +592,10 @@ impl Store {
                     ),
                 });
             }
+            // Worked out again where the manifest has none: a recorder before the fix in
+            // `look_for_speech` wrote none for every take that had any trailing silence, and a
+            // take found to hold no speech costs one pass of the endpointer to confirm.
+            let spoken = recorded.spoken.or_else(|| look_for_speech(&samples));
             takes.push(Take {
                 samples,
                 conditioning: if recorded.conditioning == "full" {
@@ -464,7 +603,7 @@ impl Store {
                 } else {
                     Conditioning::Untouched { reason: crate::apm::NO_ECHO_CANCELLER.to_string() }
                 },
-                spoken: recorded.spoken,
+                spoken,
             });
         }
         Ok(takes)
@@ -718,25 +857,24 @@ mod tests {
     // The claim
     // -----------------------------------------------------------------------------------------
 
-    /// **The one thing in this module that must not drift.** Matching is out of scope by
-    /// decision, so the sentence a window renders has to say both halves: nothing listens for
-    /// it, and saving one does not change that. A screen that said "wake word saved" and no
-    /// more would be this project's sixth piece of copy claiming more than the code does.
+    /// **The one thing in this module that must not drift.** The window renders this sentence
+    /// beside the recordings, and each clause is a fact about the code: what a match does, that a
+    /// request in the same breath is sent (`Heard::PhraseThen`), when the phrase is listened for
+    /// (`Session::should_watch`), that it can be wrong, and that new takes are read when
+    /// listening starts (`run.rs`'s `enrolled_phrase`).
     #[test]
-    fn the_copy_says_plainly_that_nothing_listens_yet() {
-        let said = NOTHING_READS_THESE.to_ascii_lowercase();
-        assert!(
-            said.contains("nothing listens for it yet"),
-            "the copy has to say that nothing listens: {NOTHING_READS_THESE}"
-        );
-        assert!(
-            said.contains("does not make zyris respond"),
-            "and that saving one does not change that: {NOTHING_READS_THESE}"
-        );
-        assert!(
-            said.contains("without asking you to record it again"),
-            "and why it is being kept at all: {NOTHING_READS_THESE}"
-        );
+    fn the_copy_says_what_the_phrase_does_and_what_it_does_not_promise() {
+        let said = WHAT_THE_TAKES_DO.to_ascii_lowercase();
+        for clause in [
+            "starts a turn",
+            "in one breath",
+            "while listening is on",
+            "nothing is being read aloud",
+            "miss you",
+            "next time listening is turned on",
+        ] {
+            assert!(said.contains(clause), "the copy has to say {clause:?}: {WHAT_THE_TAKES_DO}");
+        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -787,6 +925,77 @@ mod tests {
             spoken.first > 0 && spoken.last < phrase.len() - 1,
             "and it has to be a description of where the speech was, not the whole file: {spoken:?}"
         );
+    }
+
+    #[test]
+    fn the_phrase_alone_opens_a_turn() {
+        let phrase = Phrase::new("Hey Zyris").unwrap();
+        assert_eq!(phrase.in_("Hey, Zyris."), Heard::Phrase);
+        assert_eq!(phrase.in_("hey zyris"), Heard::Phrase);
+    }
+
+    #[test]
+    fn whisper_spelling_a_name_differently_is_still_the_phrase() {
+        let phrase = Phrase::new("자이리스").unwrap();
+        assert_eq!(phrase.in_("자이리쓰"), Heard::Phrase, "one letter in four");
+        assert_eq!(phrase.in_("야 자이리스!"), Heard::Phrase, "a word of lead-in");
+        assert_eq!(phrase.in_("자이리스야"), Heard::Phrase, "the vocative on the name itself");
+        assert_eq!(phrase.in_("자이로스코프"), Heard::Other, "a different word that starts the same");
+    }
+
+    #[test]
+    fn what_is_said_after_the_phrase_is_the_request() {
+        let phrase = Phrase::new("자이리스").unwrap();
+        assert_eq!(
+            phrase.in_("자이리스, 오늘 날씨 알려줘."),
+            Heard::PhraseThen("오늘 날씨 알려줘.".to_string())
+        );
+        let english = Phrase::new("Hey Zyris").unwrap();
+        assert_eq!(
+            english.in_("Hey Zyris what time is it?"),
+            Heard::PhraseThen("what time is it?".to_string())
+        );
+    }
+
+    /// Somebody naming the machine in the middle of talking to someone else has not addressed it.
+    #[test]
+    fn the_phrase_later_in_a_sentence_is_not_a_wake() {
+        let phrase = Phrase::new("자이리스").unwrap();
+        assert_eq!(phrase.in_("내가 어제 자이리스한테 물어봤는데"), Heard::Other);
+        assert_eq!(phrase.in_("좋은 아침"), Heard::Other);
+        assert_eq!(phrase.in_(""), Heard::Other);
+    }
+
+    /// **A take ends after the speaker has been quiet for a while**, because that is how the
+    /// recorder knows to stop, so the endpointer ends the utterance before the recording does.
+    /// Its verdict from that moment has to be the one kept.
+    #[test]
+    fn a_phrase_with_silence_after_it_is_still_found() {
+        let mut take = spoken_phrase();
+        take.extend(silence(2.0));
+
+        let spoken = look_for_speech(&take).expect("the phrase is in there");
+
+        assert!(spoken.first > 0, "{spoken:?}");
+        assert!(spoken.last < spoken_phrase().len(), "the silence after it is not speech: {spoken:?}");
+    }
+
+    /// A manifest written before that fix says there is no speech in any take, and the takes are
+    /// read as they were said rather than as that manifest described them.
+    #[test]
+    fn a_manifest_that_found_no_speech_is_looked_at_again() {
+        let scratch = Scratch::new();
+        let store = scratch.store();
+        let mut phrase = spoken_phrase();
+        phrase.extend(silence(2.0));
+        store.add(&take(phrase)).expect("stored");
+        let manifest_path = store.dir().join(MANIFEST);
+        let written = std::fs::read_to_string(&manifest_path).expect("a manifest");
+        let mut manifest: Manifest = serde_json::from_str(&written).expect("it parses");
+        manifest.takes[0].spoken = None;
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        assert!(store.takes().expect("read back")[0].spoken().is_some());
     }
 
     /// A phrase today's rule hears nothing in is still kept. The rule was argued from one

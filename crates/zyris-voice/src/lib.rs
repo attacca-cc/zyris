@@ -100,17 +100,7 @@ pub mod session;
 #[cfg(all(windows, feature = "voice"))]
 pub mod win_aec;
 
-// Recording a wake word, and keeping it. Nothing matches it -- see the module.
-/// What a phrase sounds like, as numbers two recordings of it can be compared on. The wake
-/// word.s front end, and nothing else uses it.
-#[cfg(feature = "voice")]
-pub mod mfcc;
-
-/// Whether what was just said is the phrase somebody enrolled. Dynamic time warping over
-/// [`mfcc`] features, against the takes [`wake`] keeps.
-#[cfg(feature = "voice")]
-pub mod spot;
-
+// Recording a wake word, and what it is matched as.
 #[cfg(feature = "voice")]
 pub mod wake;
 
@@ -208,14 +198,15 @@ pub enum Trace {
     /// the first question this stream is asked.
     #[serde(rename_all = "camelCase")]
     Key { down: bool },
-    /// The enrolled phrase was heard, and a turn was opened because of it.
-    ///
-    /// `distance` and `threshold` travel because the threshold is calibrated from the takes
-    /// rather than chosen, so the pair is the only thing that says how close a call it was.
-    /// A run of matches at 15.9 against a threshold of 16.0 is a phrase about to stop being
-    /// recognised, and nothing else would show that before it happened.
+    /// The phrase was heard, and a turn was opened because of it. `heard` is what whisper made
+    /// of the utterance, so a wake nobody meant shows what it was mistaken for.
     #[serde(rename_all = "camelCase")]
-    Woke { distance: f32, threshold: f32 },
+    Woke { heard: String },
+    /// Something was said while the phrase was being listened for, and it was not the phrase.
+    /// What whisper heard travels, so a phrase that keeps being spelled some other way shows as
+    /// that spelling.
+    #[serde(rename_all = "camelCase")]
+    Unmatched { heard: String },
     /// The key reached a running session, and a turn began or ended because of it.
     ///
     /// Always preceded by a [`Trace::Key`]. One without the other means the key arrived and
@@ -286,8 +277,11 @@ pub enum Trace {
     #[serde(rename_all = "camelCase")]
     Playing { at_sample: u64 },
     /// A fragment was refused by the speaker, which is what an interruption between synthesis
-    /// and the queue looks like.
+    /// and the queue looks like — or arrived from a turn that had already been interrupted.
     Dropped,
+    /// The agent started a new answer. What follows is a turn of its own, even with nothing said
+    /// on this machine in between — an answer to a message typed somewhere else, say.
+    Answering,
     /// The speaker ran out of things to play.
     Spoke,
     /// Speech was cut off by the key, and how much of the answer had been heard.
@@ -504,13 +498,34 @@ impl Voice {
         self.look().await
     }
 
-    /// Download the speech model. Answers `Err` with a sentence when it could not be had.
-    pub async fn fetch_model(&self) -> Result<view::VoiceView, String> {
+    /// Choose which speaker answers are read through, now and at the next launch.
+    pub async fn choose_speaker(&self, speaker: view::Choice) -> view::VoiceView {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
-            engine.fetch_model().await?;
+            engine.choose_speaker(speaker.clone()).await;
+        }
+        let _ = speaker;
+        self.look().await
+    }
+
+    /// Choose which speech model listening uses, by id, now and at the next launch.
+    pub async fn choose_model(&self, id: String) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_model(id.clone()).await;
+        }
+        let _ = id;
+        self.look().await
+    }
+
+    /// Download a speech model, by id. Answers `Err` with a sentence when it could not be had.
+    pub async fn fetch_model(&self, id: String) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_model(id).await?;
             return Ok(self.look().await);
         }
+        let _ = id;
         Err(NOT_COMPILED_IN.to_string())
     }
 
@@ -529,12 +544,13 @@ impl Voice {
     ///
     /// Turns listening off first: the running session holds the model, and a switch left on
     /// over a model that is gone is a screen claiming something it cannot do.
-    pub async fn forget_model(&self) -> Result<view::VoiceView, String> {
+    pub async fn forget_model(&self, id: String) -> Result<view::VoiceView, String> {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
-            engine.forget_model().await?;
+            engine.forget_model(id).await?;
             return Ok(self.look().await);
         }
+        let _ = id;
         Err(NOT_COMPILED_IN.to_string())
     }
 

@@ -25,7 +25,25 @@ const EVENT_CAPACITY: usize = 64;
 /// The record of what an agent asked of this machine, inside the instance's data directory.
 const AUDIT_FILE: &str = "audit.jsonl";
 
+/// WebKitGTK's DMABUF renderer can take the whole process down on a Wayland session: on Hyprland
+/// with an NVIDIA GPU the window died the instant it opened, with `Gdk-Message: Error 71
+/// (Protocol error) dispatching to Wayland display` and nothing else. What this window draws is
+/// a settings page and a transcript, which the non-DMABUF path renders without a difference
+/// anybody can see. A value somebody set themselves is left alone.
+#[cfg(target_os = "linux")]
+fn keep_webkit_off_dmabuf() {
+    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
+    if std::env::var_os(VAR).is_none() {
+        // SAFETY: called first thing in `main`, before any thread exists to read the environment.
+        unsafe { std::env::set_var(VAR, "1") };
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    // First, while this is the only thread there is: see its documentation.
+    #[cfg(target_os = "linux")]
+    keep_webkit_off_dmabuf();
+
     // Parsed before anything else touches the system. `clap` prints help or version text and
     // exits the process by itself on `--help`/`--version`, and that has to work even while
     // another instance holds the lock (parsing after it meant a running instance made `--help`

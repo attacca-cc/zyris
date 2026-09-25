@@ -184,11 +184,21 @@ pub enum Stopped {
 pub trait Transcribe: Send + Sync + 'static {
     /// One utterance of 16 kHz mono samples, as text. Blocking.
     fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault>;
+
+    /// The same, told the phrase it is listening for. See [`stt::Stt::transcribe_expecting`].
+    /// A double that has no use for the hint answers as it always does.
+    fn transcribe_expecting(&self, audio: &[f32], _phrase: &str) -> Result<String, stt::Fault> {
+        self.transcribe(audio)
+    }
 }
 
 impl Transcribe for stt::Stt {
     fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault> {
         stt::Stt::transcribe(self, audio)
+    }
+
+    fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, stt::Fault> {
+        stt::Stt::transcribe_expecting(self, audio, Some(phrase))
     }
 }
 
@@ -210,6 +220,8 @@ enum Woke {
     Transcribed(Result<Result<String, stt::Fault>, tokio::task::JoinError>),
     /// A look at the turn so far, for the screen. Never the turn's answer.
     Hearing(Result<Result<String, stt::Fault>, tokio::task::JoinError>, usize),
+    /// What whisper heard in something said while no turn was open: is it the phrase?
+    Checked(Result<Result<String, stt::Fault>, tokio::task::JoinError>),
 }
 
 /// Listening for the enrolled phrase while no turn is open.
@@ -218,8 +230,7 @@ enum Woke {
 /// not advanced while nothing is being recorded — that is what keeps a turn's first frame equal
 /// to its `turn_start` — so a watch that borrowed it would break the turn it exists to start.
 struct Watch {
-    features: crate::mfcc::Features,
-    phrase: crate::spot::Phrase,
+    phrase: crate::wake::Phrase,
     ends: Endpointer,
     /// The audio `ends` is indexing, from its last reset.
     heard: Vec<f32>,
@@ -272,6 +283,12 @@ pub struct Session {
     partial_from: usize,
     /// How long the recording will be before another is worth starting.
     partial_next: usize,
+    /// Whisper reading an utterance heard while no turn was open, to see whether it was the
+    /// phrase. One at a time: an utterance that ends while one is being read is not read.
+    checking: Option<tokio::task::JoinHandle<Result<String, stt::Fault>>>,
+    /// The whisper those checks use, when it is not the one turns are transcribed with. See
+    /// `run::Engine::wake_checker`.
+    checker: Option<Arc<dyn Transcribe>>,
 
     /// Whatever length the device chose, re-cut to what the processor accepts. The processor
     /// **panics** rather than erroring on a wrong count, so nothing may reach it unmeasured.
@@ -342,6 +359,8 @@ impl Session {
             partial: None,
             partial_from: 0,
             partial_next: PARTIAL_EVERY,
+            checking: None,
+            checker: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
             // one, and nothing reads them then.
@@ -373,16 +392,20 @@ impl Session {
 
     /// Listen for the enrolled phrase whenever no turn is open.
     ///
-    /// **A builder, and absent by default**, because a machine with no takes recorded has
-    /// nothing to listen for and must not pay for the attempt. `spot::Phrase` with no usable
-    /// takes answers `Cannot` to everything, so passing one is safe; not passing one is cheaper.
-    pub fn listening_for(mut self, phrase: crate::spot::Phrase) -> Session {
+    /// **A builder, and absent by default**, because a machine with no phrase has nothing to
+    /// listen for and must not pay whisper to read every sentence said in the room.
+    pub fn listening_for(mut self, phrase: crate::wake::Phrase) -> Session {
         self.watch = Some(Watch {
-            features: crate::mfcc::Features::new(),
             phrase,
             ends: Endpointer::new(),
             heard: Vec::new(),
         });
+        self
+    }
+
+    /// Check for the phrase with this whisper rather than the one turns are transcribed with.
+    pub fn checking_with(mut self, checker: Arc<dyn Transcribe>) -> Session {
+        self.checker = Some(checker);
         self
     }
 
@@ -411,6 +434,7 @@ impl Session {
             let woke = {
                 let pending = &mut self.pending;
                 let partial = &mut self.partial;
+                let checking = &mut self.checking;
                 let from = self.partial_from;
                 tokio::select! {
                     // The key first, deliberately: what audio already in the channel belongs to
@@ -430,6 +454,12 @@ impl Session {
                             None => std::future::pending().await,
                         }
                     } => Woke::Hearing(seen, from),
+                    heard = async {
+                        match checking {
+                            Some(handle) => handle.await,
+                            None => std::future::pending().await,
+                        }
+                    } => Woke::Checked(heard),
                 }
             };
 
@@ -460,6 +490,7 @@ impl Session {
                 Woke::Key(Err(broadcast::error::RecvError::Closed)) => return Stopped::KeyGone,
                 Woke::Transcribed(done) => self.transcribed(done),
                 Woke::Hearing(seen, from) => self.hearing(seen, from),
+                Woke::Checked(heard) => self.checked(heard),
             }
         }
     }
@@ -486,7 +517,7 @@ impl Session {
         if self.traces.receiver_count() == 0 {
             return;
         }
-        if self.partial.is_some() || self.pending.is_some() {
+        if self.partial.is_some() || self.pending.is_some() || self.checking.is_some() {
             return;
         }
         let length = turn.buffer.len();
@@ -573,15 +604,17 @@ impl Session {
     /// Whether the phrase is worth listening for right now.
     ///
     /// **Not while the speaker is going, and that is not an optimisation.** A build without
-    /// the `aec` feature — which is every build that ships — has an echo canceller that
-    /// cancels nothing, so the microphone hears the loudspeaker. A watch running then would
+    /// the `aec` feature — the Windows build, and any build made without it — has an echo
+    /// canceller that cancels nothing, so the microphone hears the loudspeaker. A watch running then would
     /// match the machine.s own voice reading an answer aloud and open a turn on it, over and
     /// over, on every answer. This is the same reasoning that made barge-in the key rather
     /// than the microphone, and it has the same shape: the detector cannot be trusted over a
     /// speaker until the canceller is real.
     ///
-    /// It costs a little on a build where the canceller *is* real: the phrase cannot be used
-    /// to interrupt. The key can, and it is the thing this whole module already interrupts on.
+    /// The Linux release does carry the canceller, and the rule holds there too: it has been
+    /// measured on a synthetic echo and never in a room, which is not enough to let the
+    /// machine's own voice near a detector that opens turns. What that costs is that the
+    /// phrase cannot be used to interrupt. The key can, and it is the thing this whole module already interrupts on.
     fn should_watch(&self) -> bool {
         if self.watch.is_none() {
             return false;
@@ -612,7 +645,7 @@ impl Session {
                 let to = ((last + 1) * crate::capture::VAD_FRAME).min(watch.heard.len());
                 let said = watch.heard[from.min(to)..to].to_vec();
                 watch.forget();
-                self.judge(&said);
+                self.check(said);
             }
             // Somebody made a noise that was not long enough to be anything. Forgetting is what
             // keeps the next utterance from being scored with this one stuck on the front.
@@ -626,24 +659,66 @@ impl Session {
         }
     }
 
-    /// Was that the phrase? If so, start a turn for whatever comes next.
-    fn judge(&mut self, said: &[f32]) {
+    /// Ask whisper what was just said, to see whether it was the phrase.
+    ///
+    /// **Not while whisper is busy with anything else**: a turn's own transcription still
+    /// running, or another check. Two passes at once each spin a whole thread pool and make the
+    /// one somebody is waiting for several times slower, and an utterance missed here costs
+    /// saying the phrase again.
+    fn check(&mut self, said: Vec<f32>) {
+        if self.checking.is_some() || self.pending.is_some() || self.partial.is_some() {
+            tracing::debug!("whisper is busy, so this utterance was not checked for the wake word");
+            return;
+        }
         let Some(watch) = &self.watch else { return };
-        let verdict = watch.phrase.matches(&watch.features, said);
-        match verdict {
-            crate::spot::Match::Yes { distance, threshold } => {
-                self.trace(crate::Trace::Woke { distance, threshold });
+        let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
+        let phrase = watch.phrase.said().to_string();
+        self.checking =
+            Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
+    }
+
+    /// What whisper heard. If it was the phrase, start a turn for whatever comes next — or, if
+    /// the request came in the same breath, send it.
+    fn checked(&mut self, heard: Result<Result<String, stt::Fault>, tokio::task::JoinError>) {
+        self.checking = None;
+        // The key went down while whisper was reading; that turn is the one that counts.
+        if self.turn.is_some() {
+            return;
+        }
+        let Some(watch) = &self.watch else { return };
+        let text = match heard {
+            Ok(Ok(text)) => text,
+            Ok(Err(fault)) => {
+                tracing::debug!(%fault, "an utterance could not be read for the wake word");
+                return;
+            }
+            Err(_) => return,
+        };
+        match watch.phrase.in_(&text) {
+            crate::wake::Heard::Phrase => {
+                self.trace(crate::Trace::Woke { heard: text });
                 // **The ordinary rule, not the key.s.** Nothing is going to let go of anything:
                 // a turn opened by the phrase has to end when the person stops talking, and
                 // `push_to_talk_rule` deliberately makes that impossible.
                 self.endpointer.use_rule(Rule::default());
                 self.pressed();
             }
-            crate::spot::Match::No { .. } => {}
-            // Said once per utterance and not per frame, so a machine that can never match —
-            // no usable takes — says so as often as somebody speaks rather than silently.
-            crate::spot::Match::Cannot { reason } => {
-                tracing::debug!(reason, "the wake word could not be compared");
+            // Said in one breath. The request is already transcribed, so it goes as it is,
+            // through the same steps a turn takes, rather than asking the person to repeat it.
+            crate::wake::Heard::PhraseThen(rest) => {
+                self.trace(crate::Trace::Woke { heard: text });
+                self.trace(crate::Trace::Recording { started: true });
+                self.publish(VoiceEvent::Listening);
+                self.trace(crate::Trace::Recording { started: false });
+                self.publish(VoiceEvent::Thinking);
+                self.since = Some(std::time::Instant::now());
+                self.transcribed(Ok(Ok(rest)));
+            }
+            // Said, not dropped: a phrase that never wakes anything is otherwise
+            // indistinguishable from a microphone that never heard it.
+            crate::wake::Heard::Other => {
+                tracing::info!(heard = %text, "heard something that was not the wake word");
+                self.trace(crate::Trace::Unmatched { heard: text });
             }
         }
     }
@@ -847,7 +922,13 @@ impl Session {
         if self.pending.is_none() {
             self.since = Some(std::time::Instant::now());
             self.publish(VoiceEvent::Thinking);
-            self.pending = Some(self.spawn(audio));
+            // **Behind a look still in flight, never beside it.** The look belongs to a turn that
+            // has ended and `hearing` would drop it anyway, but it is still running on its own
+            // thread, and two whisper passes at once each spin a full thread pool: measured end to
+            // end, a 3.7 s turn took 15 s to transcribe that way against 0.6 s alone. Waiting for
+            // the look costs at most one look.
+            let look = self.partial.take().or_else(|| self.checking.take());
+            self.pending = Some(self.spawn_after(look, audio));
         } else if self.queued.is_none() {
             self.publish(VoiceEvent::Thinking);
             self.queued = Some(audio);
@@ -862,6 +943,22 @@ impl Session {
     fn spawn(&self, audio: Vec<f32>) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
         let stt = self.stt.clone();
         tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+    }
+
+    /// [`Session::spawn`], once `before` has finished, if there is one.
+    fn spawn_after(
+        &self,
+        before: Option<tokio::task::JoinHandle<Result<String, stt::Fault>>>,
+        audio: Vec<f32>,
+    ) -> tokio::task::JoinHandle<Result<String, stt::Fault>> {
+        let Some(before) = before else { return self.spawn(audio) };
+        let stt = self.stt.clone();
+        tokio::spawn(async move {
+            let _ = before.await;
+            tokio::task::spawn_blocking(move || stt.transcribe(&audio))
+                .await
+                .unwrap_or(Err(stt::Fault::Lost))
+        })
     }
 
     fn transcribed(
@@ -897,6 +994,11 @@ impl Session {
     /// `send` fails only when nobody is subscribed, which is the ordinary state of a machine
     /// whose window is closed. Discarded on purpose.
     fn publish(&self, event: VoiceEvent) {
+        // Onto the trace as well: the Conversation screen reads only the trace, and a turn it
+        // last saw being written down would otherwise say so forever.
+        if let VoiceEvent::Failed { reason } = &event {
+            self.trace(crate::Trace::Failed { reason: reason.clone() });
+        }
         let _ = self.events.send(event);
     }
 
@@ -915,8 +1017,14 @@ impl Session {
         let Some(conversation) = self.conversation.clone() else { return };
         let events = self.events.clone();
         let traces = self.traces.clone();
+        // Taken here, synchronously, so two utterances cannot both carry it.
+        let note = self.speaking.as_ref().and_then(|speaking| speaking.take_note());
         tokio::spawn(async move {
             let sent = text.clone();
+            let text = match note {
+                Some(note) => format!("{note}\n\n{text}"),
+                None => text,
+            };
             if let Err(reason) = conversation.say(text).await {
                 let _ = traces.send(crate::Trace::SendFailed { reason: reason.clone() });
                 // Not swallowed. A transcript that did not reach the agent looks exactly like
@@ -1164,18 +1272,23 @@ impl Interruption {
         self.cut.is_some() || !self.unheard.is_empty()
     }
 
-    /// The message posted into the session, written for the agent reading it.
+    /// The note put in front of what the person says next, written for the agent reading it.
     ///
-    /// Bracketed and named, because it is a message this node wrote and not something the person
+    /// Bracketed and named, because it is text this node wrote and not something the person
     /// said — an agent that could not tell the two apart would answer it as if it had been asked
     /// something.
+    ///
+    /// **In front of the person's next message rather than a message of its own.** Attacca queues
+    /// a message that arrives while a turn is running and answers it as a turn of its own, so a
+    /// note posted by itself was answered — and the answer to it read aloud — before the person's
+    /// actual words were even looked at.
     pub fn message(&self) -> String {
         let quoted = |texts: &[String]| {
             texts.iter().map(|text| format!("\u{201c}{text}\u{201d}")).collect::<Vec<_>>().join(" ")
         };
         let mut lines = vec![
-            "[Zyris: the person started speaking, so reading this answer aloud was stopped part \
-             way through and the turn was cancelled.]"
+            "[Zyris: the person started speaking, so reading your last answer aloud was stopped \
+             part way through and the turn was cancelled. What they said follows this note.]"
                 .to_string(),
         ];
         if !self.heard.is_empty() {
@@ -1212,23 +1325,27 @@ impl Interruption {
 /// It is the push-to-talk key going down, and **not** the microphone hearing a voice. That is a
 /// decision with a reason on each side:
 ///
-/// - Wake-word matching is deferred to its own spike, so there is no other way into a turn: the
-///   only way a person speaks to this machine is by reaching for the key. "Stops the moment you
+/// - The wake word is not listened for while the machine is speaking (see `Session::should_watch`),
+///   so while an answer is being read the only way into a turn is the key. "Stops the moment you
 ///   speak" and "stops the moment you press" are the same moment.
-/// - A build **without the `aec` feature** — which is every build that ships, see
+/// - A build **without the `aec` feature** — the Windows one, see
 ///   `crates/zyris-voice/Cargo.toml` — has an echo canceller that cancels nothing. A session
 ///   that barged in on detected speech there would hear its own loudspeaker and cut itself off
-///   after its first word, on every answer. The detector cannot be trusted over a speaker until
-///   [`crate::apm::Apm::erle_db`] says the canceller is real, and nothing in CI can compile the
-///   code that would make it real.
+///   after its first word, on every answer. Where the canceller is compiled in it has been
+///   measured on a synthetic echo and never in a room, and the detector cannot be trusted over
+///   a speaker until [`crate::apm::Apm::erle_db`] says it is working there.
 ///
 /// # What stopping does, in order
 ///
-/// Throw the queue away, read how far the speaker got, cancel the turn, and post a message
-/// saying where it was cut off. The order matters twice: the queue is discarded **before**
-/// `played` is read, or the answer would include audio that never reached the device; and the
-/// turn is cancelled **before** the message is posted, or the message would arrive into a turn
-/// that is still generating.
+/// Throw the queue away, read how far the speaker got, stop reading anything more of that turn,
+/// cancel it, and keep a note saying where it was cut off for the front of whatever the person
+/// says next. The queue is discarded **before** `played` is read, or the answer would include
+/// audio that never reached the device.
+///
+/// **A turn still being written is interrupted even when none of it has been heard yet** — the
+/// agent thinking, or the first sentence still being synthesised. That is the moment a person is
+/// most likely to reach for the key, and leaving the turn running would read its answer over
+/// whatever they said instead.
 pub struct Speaking {
     tts: Arc<dyn Synthesise>,
     out: Arc<dyn Play>,
@@ -1249,6 +1366,16 @@ struct SpeakingState {
     /// carries the number it started with and is thrown away rather than queued behind the
     /// person who just interrupted.
     generation: u64,
+    /// Whether the session's turn is being written, as the feed last said.
+    running: bool,
+    /// Set by an interruption and cleared by the next turn starting. **A cancel is not instant**:
+    /// deltas already on their way, and the last sentence the splitter releases when the
+    /// cancelled turn ends, still arrive afterwards, and each would be read over the person who
+    /// just cut it off. The generation cannot catch them — they start after the key went down.
+    muted: bool,
+    /// Where the last answer was cut off, waiting to go in front of what the person says next.
+    /// See [`Interruption::message`].
+    note: Option<String>,
 }
 
 impl Speaking {
@@ -1295,6 +1422,10 @@ impl Speaking {
             match turns.recv().await {
                 Ok(crate::turn::TurnEvent::Say(fragment)) => {
                     self.trace(crate::Trace::Fragment { text: fragment.text().to_string() });
+                    if self.lock().muted {
+                        self.trace(crate::Trace::Dropped);
+                        continue;
+                    }
                     self.synthesise(fragment.text()).await;
                 }
                 // Carried to the trace and nowhere else. This is what the agent wrote, before
@@ -1306,7 +1437,18 @@ impl Speaking {
                 }
                 // The end of a turn. Everything sayable has been said; what is left is waiting
                 // for the speaker to get through it.
-                Ok(crate::turn::TurnEvent::Running(false)) => self.drained().await,
+                Ok(crate::turn::TurnEvent::Running(true)) => {
+                    {
+                        let mut state = self.lock();
+                        state.running = true;
+                        state.muted = false;
+                    }
+                    self.trace(crate::Trace::Answering);
+                }
+                Ok(crate::turn::TurnEvent::Running(false)) => {
+                    self.lock().running = false;
+                    self.drained().await
+                }
                 Ok(_) => {}
                 // A fragment was dropped before it was read, which is a sentence that will never
                 // be spoken. Nothing can recover it — a `Delta` is not durable and nothing
@@ -1446,47 +1588,56 @@ impl Speaking {
 
     /// The person started a turn. Stop speaking, and answer with what they did not hear.
     ///
-    /// `None` is a speaker that had already finished — every queued fragment written to the
-    /// device — which is the ordinary case for a key pressed between answers. **Derived from the
-    /// ledger and the device's own counter rather than from a flag**: a flag saying "still
-    /// speaking" is a second copy of that fact, and the copy is what goes stale.
+    /// `None` is nothing to interrupt: the speaker had finished every queued fragment and the
+    /// turn was over, which is the ordinary case for a key pressed between answers. The speaker
+    /// half is **derived from the ledger and the device's own counter rather than from a flag**:
+    /// a flag saying "still speaking" is a second copy of that fact, and the copy is what goes
+    /// stale.
+    ///
+    /// `Some` also mutes the rest of the turn and keeps the note for [`Speaking::take_note`],
+    /// both here under the lock, so that nothing the person says can be sent before the note
+    /// exists.
     pub fn stop(&self) -> Option<Interruption> {
-        let mut state = self.state.lock().expect("the speaking state is not poisoned");
+        let mut state = self.lock();
         state.generation += 1;
         // Discard first: `played` must not include audio that was still on the queue.
         self.out.silence();
         let interruption = state.ledger.at(self.out.played());
         state.ledger.clear();
-        interruption.anything_missed().then_some(interruption)
+        if !state.running && !interruption.anything_missed() {
+            return None;
+        }
+        state.muted = true;
+        state.note = Some(interruption.message());
+        Some(interruption)
     }
 
-    /// Cancel the turn and record where the speech stopped, in that order.
+    /// Cancel the turn that was interrupted.
     ///
     /// Separate from [`Speaking::stop`] because the two halves belong to different places: the
     /// stopping is synchronous and has to happen inside the key press, and this talks to a server
     /// and may take as long as a round trip.
-    pub async fn record(&self, interruption: Interruption) {
+    pub async fn cancel(&self) {
         if let Err(error) = self.turn.cancel().await {
             tracing::warn!(%error, "the turn could not be cancelled after speech was interrupted");
         }
-        if let Err(error) = self.turn.say(interruption.message()).await {
-            tracing::warn!(
-                %error,
-                "the session was not told where the spoken answer was cut off, so its record of \
-                 the answer does not say that only part of it was heard"
-            );
-        }
+    }
+
+    /// The note an interruption left, once: whoever sends the person's next words puts it in
+    /// front of them. See [`Interruption::message`].
+    pub fn take_note(&self) -> Option<String> {
+        self.lock().note.take()
     }
 
     /// Whether anything is queued or being played.
     ///
-    /// **The wake word may not listen while this is true on a build with no echo canceller**,
-    /// which is every build that ships. See `Session::watching`.
+    /// **The wake word does not listen while this is true.** See `Session::should_watch`.
     pub fn is_speaking(&self) -> bool {
         self.out.pending() > 0
     }
 
-    /// Both halves, as one call for a caller that is not async. Nothing if nothing was missed.
+    /// Both halves, as one call for a caller that is not async. Nothing if there was nothing to
+    /// interrupt.
     pub fn interrupt(self: &Arc<Self>) {
         let Some(interruption) = self.stop() else { return };
         self.trace(crate::Trace::Interrupted {
@@ -1495,11 +1646,15 @@ impl Speaking {
         });
         self.publish(VoiceEvent::Interrupted);
         let speaking = self.clone();
-        tokio::spawn(async move { speaking.record(interruption).await });
+        tokio::spawn(async move { speaking.cancel().await });
     }
 
     fn generation(&self) -> u64 {
-        self.state.lock().expect("the speaking state is not poisoned").generation
+        self.lock().generation
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SpeakingState> {
+        self.state.lock().expect("the speaking state is not poisoned")
     }
 
     /// One step onto the diagnostic stream.
@@ -1508,6 +1663,11 @@ impl Speaking {
     }
 
     fn publish(&self, event: VoiceEvent) {
+        // Onto the trace as well: the Conversation screen reads only the trace, and a turn it
+        // last saw being written down would otherwise say so forever.
+        if let VoiceEvent::Failed { reason } = &event {
+            self.trace(crate::Trace::Failed { reason: reason.clone() });
+        }
         let _ = self.events.send(event);
     }
 }
@@ -1515,8 +1675,8 @@ impl Speaking {
 /// What reached Attacca, in order.
 ///
 /// **Shared by both test modules rather than written twice.** The listening half asserts that a
-/// transcript arrives at all and the speaking half asserts the order of a cancel against the
-/// message after it; two doubles for one trait is the duplication this file keeps arguing
+/// transcript arrives at all and the speaking half asserts that a cancel is all an interruption
+/// posts by itself; two doubles for one trait is the duplication this file keeps arguing
 /// against everywhere else.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1540,16 +1700,6 @@ impl Conversation {
         self.told.lock().expect("not poisoned").clone()
     }
 
-    /// The one message posted, or a panic naming what was posted instead.
-    fn message(&self) -> String {
-        match self.told().into_iter().find_map(|told| match told {
-            Told::Said(message) => Some(message),
-            Told::Cancel => None,
-        }) {
-            Some(message) => message,
-            None => panic!("nothing was posted into the session: {:?}", self.told()),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1735,98 +1885,10 @@ mod tests {
         }
     }
 
-    /// A phrase made of two tones, and recordings of it that differ the way a person's do.
-    ///
-    /// Synthetic, and the tests below are about the *wiring* rather than about whether the
-    /// matcher works on a voice — that is measured in `spot`, on real takes, and the number
-    /// is in `spot::CEILING`'s documentation. What these decide is that audio reaches the
-    /// watch, that a match opens a turn, that a non-match does not, and that the turn it opens
-    /// ends the way a turn with no key has to.
-    fn two_tones(first: f32, second: f32, seconds: f32) -> Vec<f32> {
-        said(first, second, seconds, 0)
-    }
-
-    /// One saying of the phrase, with `voice` deciding how this one differs from the others.
-    ///
-    /// **Five identical recordings are not five takes.** The threshold is calibrated from how
-    /// much the takes disagree with each other, so pure tones — which disagree by almost
-    /// nothing — produce a threshold of about 1 where five real recordings of a voice produced
-    /// 16.3. A test built on identical takes therefore demands an identical candidate and
-    /// fails on any honest one, which is exactly what happened: 0.26 s of trailing silence,
-    /// which the endpointer's own margin puts there, scored 15.3 against a threshold of 1.06.
-    ///
-    /// So each take carries its own noise and its own small shifts in level and pitch, which
-    /// is what a person saying one phrase five times sounds like to this front end.
-    fn said(first: f32, second: f32, seconds: f32, voice: u32) -> Vec<f32> {
-        // splitmix64, the same thirty lines `tts` uses to be deterministic without `rand`.
-        let mut state = 0x9E3779B97F4A7C15u64.wrapping_mul(voice as u64 + 1);
-        let mut next = move || {
-            state = state.wrapping_add(0x9E3779B97F4A7C15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-            ((z ^ (z >> 31)) >> 40) as f32 / 16777216.0 - 0.5
-        };
-        let drift = 1.0 + voice as f32 * 0.01;
-        let level = 0.4 - voice as f32 * 0.02;
-        let tone = |hz: f32, seconds: f32, next: &mut dyn FnMut() -> f32| {
-            let n = (crate::capture::SAMPLE_RATE as f32 * seconds) as usize;
-            (0..n)
-                .map(|at| {
-                    let t = at as f32 / crate::capture::SAMPLE_RATE as f32;
-                    level * (2.0 * std::f32::consts::PI * hz * drift * t).sin()
-                        + 0.02 * next()
-                })
-                .collect::<Vec<f32>>()
-        };
-        let mut samples = tone(first, seconds / 2.0, &mut next);
-        samples.extend(tone(second, seconds / 2.0, &mut next));
-        samples
-    }
-
-    /// A take, conditioned the way the live path conditions what it compares.
-    ///
-    /// **The processor is part of the comparison, not a detail of the capture.** With `aec`
-    /// on, noise suppression and the high-pass filter change the audio before the watch ever
-    /// sees it — so templates built from raw samples and a candidate that went through the
-    /// processor are two different recordings of one phrase, and the distance measures the
-    /// processing. Both of these tests passed under plain `voice` and failed under `aec` for
-    /// exactly that reason, which is the same asymmetry `wake` records `Conditioning` for.
-    fn conditioned(samples: &[f32]) -> Vec<f32> {
-        let apm = Apm::new().expect("a processor this machine can build");
-        let mut out = Vec::with_capacity(samples.len());
-        for frame in samples.chunks(crate::capture::APM_FRAME) {
-            if frame.len() != crate::capture::APM_FRAME {
-                break;
-            }
-            let mut frame = frame.to_vec();
-            apm.process_capture(&mut frame).expect("a frame of the right length");
-            out.extend_from_slice(&frame);
-        }
-        out
-    }
-
-    fn the_phrase() -> crate::spot::Phrase {
-        let features = crate::mfcc::Features::new();
-        // **With the endpointer's margin on each end, because a real take has one.** A take
-        // is recorded by `run::record_one`, which ends it at the endpointer's verdict, and
-        // `enrolled_phrase` trims it to the same verdict — so both carry `vad::MARGIN`. The
-        // candidate the watch hands over carries it too. Templates built without it are the
-        // one side of the comparison that differs from production, and the difference is not
-        // small: measured, 0.26 s of silence on one side only moved the distance from 4.6 to
-        // 12.9 against a threshold of 10.6 — a phrase that would be recognised, refused.
-        let margin = vec![0.0f32; crate::stt::samples_in(crate::vad::MARGIN)];
-        let takes: Vec<Vec<f32>> = [1.0, 1.1, 1.2, 0.95, 1.05]
-            .iter()
-            .enumerate()
-            .map(|(voice, seconds)| {
-                let mut take = margin.clone();
-                take.extend(said(300.0, 900.0, *seconds, voice as u32 + 1));
-                take.extend(margin.iter().copied());
-                conditioned(&take)
-            })
-            .collect();
-        crate::spot::Phrase::from_takes(&features, &takes)
+    /// What the watch listens for. Whether an utterance is it is the scribe's to say, since
+    /// whisper is what reads it in production.
+    fn the_phrase() -> crate::wake::Phrase {
+        crate::wake::Phrase::new("Hey Zyris").expect("letters")
     }
 
     /// A session listening for [`the_phrase`], and watching its own diagnostic stream.
@@ -2157,6 +2219,44 @@ mod tests {
         zyris.stops().await;
     }
 
+    /// **The note an interruption leaves goes in front of the person's next words**, in one
+    /// message, after the cancel.
+    #[tokio::test]
+    async fn what_is_said_after_an_interruption_carries_where_the_answer_was_cut_off() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let attacca = Arc::new(Conversation::default());
+        let speaking = Speaking::new(Arc::new(Mute), Arc::new(Busy), attacca.clone(), events.clone());
+        speaking.lock().running = true;
+        let scribe = Scribe::always("wait, stop");
+        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+            .speaking(speaking)
+            .conversation(attacca.clone());
+        let mut zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+        while zyris.next().await != (VoiceEvent::Heard { text: "wait, stop".into() }) {}
+        settle().await;
+
+        let told = attacca.told();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(told[0], Told::Cancel);
+        let Told::Said(message) = &told[1] else { panic!("{told:?}") };
+        assert!(message.starts_with("[Zyris:"), "{message}");
+        assert!(message.ends_with("\n\nwait, stop"), "{message}");
+        zyris.stops().await;
+    }
+
     /// A turn with nothing in it is not a message. An agent asked an empty question answers
     /// something, and the whole of what `min_speech` and `stt::clean` are for is that a tapped
     /// key and a quiet room do not become a sentence somebody has to undo.
@@ -2255,7 +2355,7 @@ mod tests {
     /// feature with none of the point of it — and it is what keeps `--headless` free of it.
     #[tokio::test]
     async fn a_turn_nobody_is_watching_is_not_read_back() {
-        let mut zyris = running(Scribe::always("and so my"));
+        let zyris = running(Scribe::always("and so my"));
 
         zyris.press().await;
         zyris.feed(&utterance(3.0)).await;
@@ -2267,6 +2367,29 @@ mod tests {
             "the model was asked about a turn no window could have shown"
         );
         zyris.release().await;
+        zyris.stops().await;
+    }
+
+    /// **The turn's own transcription waits for a look still in flight**, rather than running
+    /// beside it: two whisper passes at once each spin a whole thread pool, and a 3.7 s turn took
+    /// 15 s to come back that way against 0.6 s alone.
+    #[tokio::test]
+    async fn the_answer_is_not_transcribed_beside_a_look_still_running() {
+        let (scribe, open) = Scribe::gated("the whole sentence");
+        let (mut zyris, _traces) = running_watched(scribe);
+
+        zyris.press().await;
+        zyris.feed(&utterance(3.0)).await;
+        zyris.release().await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        tokio::time::sleep(QUIET).await;
+        assert_eq!(zyris.scribe.calls(), 1, "only the look may be running while it is");
+
+        open.send(()).expect("the look is waiting on the gate");
+        open.send(()).expect("the transcription is waiting on the gate");
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "the whole sentence".into() });
+        assert_eq!(zyris.scribe.calls(), 2);
         zyris.stops().await;
     }
 
@@ -2310,37 +2433,34 @@ mod tests {
     }
 
     /// **Saying the phrase opens a turn, with no key touched.** The whole of what the wake
-    /// word is for, and until this existed the takes on disk were read by nothing.
+    /// word is for.
     #[tokio::test]
     async fn saying_the_phrase_opens_a_turn() {
-        let (mut zyris, mut traces) = running_and_listening(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) =
+            running_and_listening(Scribe::saying([Ok("Hey, Zyris.".to_string())]));
 
-        // The phrase, then enough silence for the watch to decide the utterance is over.
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        // Something said, then enough silence for the watch to decide the utterance is over.
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
 
         let woke = step_where(&mut traces, |step| matches!(step, crate::Trace::Woke { .. })).await;
-        match woke {
-            crate::Trace::Woke { distance, threshold } => {
-                assert!(distance <= threshold, "{distance} is not under {threshold}");
-            }
-            other => panic!("not a wake: {other:?}"),
-        }
+        assert_eq!(woke, crate::Trace::Woke { heard: "Hey, Zyris.".to_string() });
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
         zyris.stops().await;
     }
 
-    /// Something else said in the room does not open one. The cost of getting this wrong is a
-    /// turn nobody asked for going to an agent that can act on it, which is the asymmetry
-    /// `spot::ROOM` is argued from.
+    /// Something else said in the room does not open one, and says what it was taken for. The
+    /// cost of getting this wrong is a turn nobody asked for going to an agent that can act on it.
     #[tokio::test]
     async fn saying_something_else_does_not() {
-        let (mut zyris, mut traces) = running_and_listening(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) = running_and_listening(Scribe::always("good morning"));
 
-        zyris.feed(&two_tones(1500.0, 400.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
-        settle().await;
 
+        let heard =
+            step_where(&mut traces, |step| matches!(step, crate::Trace::Unmatched { .. })).await;
+        assert_eq!(heard, crate::Trace::Unmatched { heard: "good morning".to_string() });
         let woke = steps(&mut traces)
             .into_iter()
             .any(|step| matches!(step, crate::Trace::Woke { .. }));
@@ -2355,9 +2475,14 @@ mod tests {
     /// every time, which is the shape of failure step 7 already shipped once.
     #[tokio::test]
     async fn a_turn_the_phrase_opened_ends_when_the_talking_stops() {
-        let (mut zyris, _traces) = running_and_listening(Scribe::always("what is the time"));
+        // The phrase, then the request for every reading after it: a look at the turn while it
+        // is open reads the same audio the answer does.
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("hey zyris".to_string()))
+                .chain(std::iter::repeat_n(Ok("what is the time".to_string()), 8)),
+        ));
 
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
 
@@ -2373,20 +2498,72 @@ mod tests {
         zyris.stops().await;
     }
 
-    /// **The machine does not wake itself up.** A build without the `aec` feature — which is
-    /// every build that ships — has an echo canceller that cancels nothing, so the microphone
-    /// hears the loudspeaker. Left listening while an answer is being read aloud, the watch
-    /// would score the machine's own voice against the phrase and open a turn on it, on every
-    /// answer, for as long as it kept talking.
+    /// **The phrase and the request in one breath** is one turn, and the request is not asked
+    /// for again: whisper has already written it down.
+    #[tokio::test]
+    async fn the_request_said_with_the_phrase_is_what_is_heard() {
+        let (mut zyris, _traces) =
+            running_and_listening(Scribe::always("Hey Zyris, what is the time?"));
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
+        assert_eq!(zyris.scribe.calls(), 1, "one reading of one utterance");
+        zyris.stops().await;
+    }
+
+    /// **The phrase is checked with the checker, and the turn with the chosen model.** A large
+    /// model reading every sentence said in the room would hold every core for seconds at a
+    /// time; Base already hears the phrase exactly.
+    #[tokio::test]
+    async fn the_phrase_is_checked_with_the_checker_and_the_turn_with_the_chosen_model() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let chosen = Scribe::always("what is the time");
+        let checker = Scribe::always("hey zyris");
+        let session = Session::new(audio_rx, keys_rx, apm, chosen.clone(), events)
+            .listening_for(the_phrase())
+            .checking_with(checker.clone());
+        let mut zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe: chosen,
+            session: tokio::spawn(session.run()),
+        };
+
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(checker.calls(), 1, "the checker read the phrase");
+        assert_eq!(zyris.scribe.calls(), 0, "and the chosen model was not asked");
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
+        zyris.stops().await;
+    }
+
+    /// **The machine does not wake itself up.** A build without the `aec` feature — the Windows
+    /// one — has an echo canceller that cancels nothing, so the microphone hears the
+    /// loudspeaker, and the one Linux ships has never been measured in a room. Left listening
+    /// while an answer is being read aloud, the watch would hear the machine's own voice and
+    /// open a turn on it whenever an answer mentioned its name.
     ///
     /// This is the same reasoning that made barge-in the key rather than the microphone, and
     /// it costs the same thing: the phrase cannot interrupt. The key can.
     #[tokio::test]
     async fn the_phrase_is_not_listened_for_while_the_answer_is_being_read_aloud() {
-        let (mut zyris, mut traces) = running_and_speaking(Scribe::always("what is the time"));
+        let (mut zyris, mut traces) = running_and_speaking(Scribe::always("hey zyris"));
 
         // Exactly the audio that wakes it when nothing is speaking.
-        zyris.feed(&two_tones(300.0, 900.0, 1.1)).await;
+        zyris.feed(&utterance(1.1)).await;
         zyris.feed(&quiet(1.6)).await;
         settle().await;
 
@@ -2394,6 +2571,7 @@ mod tests {
             .into_iter()
             .any(|step| matches!(step, crate::Trace::Woke { .. }));
         assert!(!woke, "the machine woke itself up on its own voice");
+        assert_eq!(zyris.scribe.calls(), 0, "and nothing was read to find out");
         zyris.says_nothing().await;
         zyris.stops().await;
     }
@@ -2472,7 +2650,7 @@ mod tests {
         // `#[tokio::test]` is a current-thread runtime, so the thread-local the guard sets is
         // the same one every await comes back to.
         let guard = tracing::subscriber::set_default(subscriber);
-        let mut zyris = running(Scribe::always("never mind"));
+        let zyris = running(Scribe::always("never mind"));
         zyris.problem_now(Recovery::Continue, "the default device changed");
         zyris.problem_now(Recovery::Rebuild, "the microphone was unplugged");
         zyris.problem_now(Recovery::Stop, "the microphone is not allowed");
@@ -3345,26 +3523,66 @@ mod barge_in {
         assert_eq!(rig.conversation.told(), Vec::new(), "nothing was said to Attacca");
     }
 
-    /// **The turn is cancelled before the message is posted.** The other order posts a message
-    /// into a turn that is still generating, and the server may interleave the two.
+    /// **One message, not two.** Attacca answers a message that arrives while a turn is running
+    /// as a turn of its own, so a note posted by itself was answered — and the answer read aloud —
+    /// ahead of whatever the person said. The note now waits for the person's words.
     #[tokio::test]
-    async fn the_turn_is_cancelled_before_the_interruption_is_recorded() {
+    async fn an_interruption_cancels_the_turn_and_posts_nothing_by_itself() {
         let mut rig = rig(Voicebox::plain());
         rig.say("Yes.").await;
         rig.play(1000);
 
-        let interruption = rig.speaking.stop().expect("the speaker had not finished");
-        rig.speaking.record(interruption).await;
+        rig.speaking.interrupt();
+        settle().await;
 
-        let told = rig.conversation.told();
-        assert_eq!(told.len(), 2);
-        assert_eq!(told[0], Told::Cancel);
-        assert!(matches!(told[1], Told::Said(_)));
-        assert!(
-            rig.conversation.message().contains("\u{201c}Yes.\u{201d}"),
-            "and the message that was posted is the one the interruption describes: {:?}",
-            rig.conversation.message()
-        );
+        assert_eq!(rig.conversation.told(), vec![Told::Cancel]);
+        let note = rig.speaking.take_note().expect("the interruption left a note");
+        assert!(note.contains("\u{201c}Yes.\u{201d}"), "the note is the one it describes: {note}");
+        assert_eq!(rig.speaking.take_note(), None, "and it goes in front of one message, not two");
+    }
+
+    /// **The hole this closes**: the key going down while the agent is still thinking, or while
+    /// the first sentence is still being synthesised. Nothing has reached the speaker, so the
+    /// ledger has nothing missed — and the turn used to go on running and be read out over
+    /// whatever the person said instead.
+    #[tokio::test]
+    async fn a_key_pressed_while_the_answer_is_still_being_written_cancels_it() {
+        let rig = rig(Voicebox::plain());
+        rig.speaking.lock().running = true;
+
+        rig.speaking.interrupt();
+        settle().await;
+
+        assert_eq!(rig.conversation.told(), vec![Told::Cancel]);
+        let note = rig.speaking.take_note().expect("an interrupted turn leaves a note");
+        assert!(note.contains("None of it was heard."), "{note}");
+    }
+
+    /// A cancel is not instant. What the cancelled turn had already sent — and the last sentence
+    /// the splitter lets go of when that turn ends — arrives after the key went down, and must not
+    /// be read over the person. The next turn is read as usual.
+    #[tokio::test]
+    async fn what_the_cancelled_turn_still_sends_is_not_read_until_the_next_turn() {
+        use crate::split::Fragment;
+        use crate::turn::TurnEvent;
+        let mut rig = rig(Voicebox::plain());
+        let (turns, subscription) = broadcast::channel(16);
+        let worker = tokio::spawn(rig.speaking.clone().run(subscription));
+
+        turns.send(TurnEvent::Running(true)).expect("the worker is reading");
+        settle().await;
+        rig.speaking.interrupt();
+        turns.send(TurnEvent::Say(Fragment::spoken("Too late."))).expect("the worker is reading");
+        turns.send(TurnEvent::Running(false)).expect("the worker is reading");
+        turns.send(TurnEvent::Running(true)).expect("the worker is reading");
+        turns.send(TurnEvent::Say(Fragment::spoken("New answer."))).expect("the worker is reading");
+
+        assert_eq!(rig.next_event().await, VoiceEvent::Interrupted);
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+        assert_eq!(rig.voice.spoken(), vec!["New answer."]);
+
+        drop(turns);
+        tokio::time::timeout(PATIENCE, worker).await.expect("the worker ends").expect("no panic");
     }
 
     /// **A fragment that finished being synthesised after the key went down is thrown away.**

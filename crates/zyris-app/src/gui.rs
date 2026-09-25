@@ -241,6 +241,8 @@ pub fn run(
             bridge::voice_state,
             bridge::set_voice_listening,
             bridge::set_voice_device,
+            bridge::set_voice_speaker,
+            bridge::set_speech_model,
             bridge::fetch_speech_model,
             bridge::fetch_voice_model,
             bridge::forget_speech_model,

@@ -26,8 +26,12 @@ env:
   # **It reaches the bundles now** — they are built with `--features voice` since 2026-09-19, so
   # this is load-bearing rather than waiting. Quoted because YAML
   # 1.1 reads a bare `OFF` as the boolean false — which CMake happens to accept, which is
-  # exactly why an unquoted one would never be noticed. AVX2 is still required either way, and
-  # the README says so.
+  # exactly why an unquoted one would never be noticed.
+  #
+  # **Not the whole rule on its own**: with `GGML_NATIVE` OFF, ggml compiles no instruction set
+  # it is not named, and the bundles shipped a scalar whisper about ten times slower than it
+  # should be. `.cargo/config.toml` names the AVX2 set for every build in this workspace, this
+  # one included, and `crates/zyris-voice/build.rs` refuses a release without it.
   GGML_NATIVE: "OFF"
 
 permissions:

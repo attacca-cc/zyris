@@ -50,9 +50,7 @@ pub use crate::model::{
     model_path_given,
 };
 
-/// The model the product ships against: whisper `base`, multilingual, 141 MB.
-///
-/// A different size is a code change, deliberately — see the plan's "Deliberately not here".
+/// Whisper `base`, multilingual, 141 MB: the model used when nothing else was chosen.
 pub const BASE: Model = Model {
     url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
           5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin",
@@ -60,6 +58,64 @@ pub const BASE: Model = Model {
     bytes: 147_951_465,
     sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
 };
+
+/// A speech model a person can choose, and what choosing it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choosable {
+    /// What `voice.json` stores.
+    pub id: &'static str,
+    pub name: &'static str,
+    /// One line for the screen: what it is better at, and what it costs.
+    pub note: &'static str,
+    pub model: Model,
+}
+
+/// The models on offer, smallest first. **All pinned to one revision of the whisper.cpp
+/// repository**, each checked against the SHA-256 its LFS pointer publishes there.
+///
+/// Measured on an i5-10400F (six cores, AVX2, no GPU) on three- to four-second Korean and English
+/// sentences: `base` 0.4-0.5 s and gets names and loanwords wrong ("기토부" for 깃허브), `small`
+/// 1.6-2.1 s and mostly right, `large-v3-turbo` quantized 9-10 s and right. The notes say this in
+/// words, because the numbers are one machine's.
+pub const MODELS: [Choosable; 3] = [
+    Choosable {
+        id: "base",
+        name: "Base",
+        note: "Fastest, and the least accurate: names and borrowed words often come out wrong. \
+               Kept on disk, it also listens for the wake word when a larger model is chosen.",
+        model: BASE,
+    },
+    Choosable {
+        id: "small",
+        name: "Small",
+        note: "Noticeably more accurate, and about four times slower than Base.",
+        model: Model {
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
+                  5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin",
+            file: "ggml-small.bin",
+            bytes: 487_601_967,
+            sha256: "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        },
+    },
+    Choosable {
+        id: "large-v3-turbo",
+        name: "Large v3 Turbo",
+        note: "The most accurate, and slow without a fast processor: several seconds a sentence.",
+        model: Model {
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/\
+                  5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo-q5_0.bin",
+            file: "ggml-large-v3-turbo-q5_0.bin",
+            bytes: 574_041_195,
+            sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        },
+    },
+];
+
+/// The model `id` names, or [`BASE`]'s entry for an id this build does not offer — a setting
+/// written by a later version, or by hand — so that listening still starts.
+pub fn choosable(id: Option<&str>) -> &'static Choosable {
+    id.and_then(|id| MODELS.iter().find(|m| m.id == id)).unwrap_or(&MODELS[0])
+}
 
 /// Names a model file directly, bypassing the cache directory entirely.
 ///
@@ -126,6 +182,17 @@ pub fn state(model: &Model) -> ModelState {
         Some(model.bytes)
     };
     inspect(&path, expected)
+}
+
+/// Whether `model` is in the cache Zyris downloads into, **ignoring [`MODEL_ENV`]**: what the
+/// list of models on the screen shows, where each row is about that model's own file.
+pub fn cached_state(model: &Model) -> ModelState {
+    match model_path_given(model, None) {
+        Some(path) => inspect(&path, Some(model.bytes)),
+        None => ModelState::Nowhere {
+            reason: "this system does not name a cache directory for downloaded files".into(),
+        },
+    }
 }
 
 /// Download the speech model into `dir`. See [`crate::model::fetch`] for what it guarantees.
@@ -249,12 +316,18 @@ pub fn exact_cut(samples: usize) -> u16 {
     samples.div_ceil(SAMPLES_PER_CTX).min(FULL_CTX as usize) as u16
 }
 
-/// The language whisper is told it is hearing.
+/// The language a warm-up decode is told it is hearing — and only a warm-up's. A turn is decoded
+/// with the language **detected**, since the same person says one thing in Korean and the next in
+/// English.
 ///
-/// **Told, not asked.** `set_language(None)` turns on detection, and detection cost 10.79 s
-/// against 3.44 s on the same 3 s clip here — over three times slower, for a question this
-/// product already knows the answer to. Korean is unmeasured and is step 8's problem.
-pub const LANGUAGE: &str = "en";
+/// Told for the warm-up because detection is exactly what the warm-up exists to make cheap: see
+/// [`Stt::warm_state`].
+///
+/// Measured on an i5-10400F with ggml-base, TTS-generated clips of three to four seconds: telling
+/// whisper `en` for a Korean sentence does not produce Korean with an accent, it produces **a
+/// different English sentence** ("내일 아침 서울 날씨가 어떨지 알려줘" came back as "Tomorrow
+/// morning, what day of the day is the Seoul weather?"). Detection read both languages right.
+pub const WARM_LANGUAGE: &str = "en";
 
 /// How many threads whisper gets.
 ///
@@ -272,7 +345,7 @@ pub fn threads() -> usize {
 /// otherwise only assert on them by reading this file as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// `Some(LANGUAGE)`. `None` would mean detection; see [`LANGUAGE`].
+    /// `None`, which is whisper detecting it; see [`WARM_LANGUAGE`] for why a turn is not told.
     pub language: Option<&'static str>,
     /// See [`threads`].
     pub threads: usize,
@@ -290,10 +363,29 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// Whisper's parameters for these settings.
+    fn params(&self) -> whisper_rs::FullParams<'static, 'static> {
+        let mut params =
+            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(self.language);
+        params.set_n_threads(self.threads as std::ffi::c_int);
+        params.set_audio_ctx(self.audio_ctx as std::ffi::c_int);
+        params.set_translate(self.translate);
+        params.set_no_context(!self.carry_previous_turn);
+        // Nothing of whisper's own goes to stdout: this process has a window and a log, and
+        // neither of them is a terminal it may print to.
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_no_timestamps(true);
+        params
+    }
+
     /// The settings for one utterance of `samples` 16 kHz mono samples.
     pub fn for_audio(samples: usize) -> Settings {
         Settings {
-            language: Some(LANGUAGE),
+            language: None,
             threads: threads(),
             audio_ctx: audio_ctx(samples),
             translate: false,
@@ -308,6 +400,16 @@ impl Settings {
 /// handed to [`transcribe`]'s blocking task over and over rather than reloaded per turn.
 pub struct Stt {
     context: whisper_rs::WhisperContext,
+    /// Decoder states that have each run once, waiting for the next turn. One is taken per
+    /// transcription and put back after, so the final transcript and a partial one running beside
+    /// it each have their own.
+    ///
+    /// **Kept rather than made per turn because of where whisper.cpp detects the language.**
+    /// `whisper_full_with_state` runs detection *before* it applies `audio_ctx`, so detection on a
+    /// fresh state encodes the full thirty-second window: 0.98 s for a clip a fixed language
+    /// decodes in 0.22 s. A state keeps the context of its last decode, so on a state that has run
+    /// once detection costs the short window too — 0.37 s.
+    idle: std::sync::Mutex<Vec<whisper_rs::WhisperState>>,
 }
 
 impl Stt {
@@ -321,13 +423,37 @@ impl Stt {
         HOOKS.call_once(whisper_rs::install_logging_hooks);
 
         let mut parameters = whisper_rs::WhisperContextParameters::default();
-        // No GPU. The default is already off without a GPU feature; saying so keeps it off
-        // the day somebody turns one on for a different reason.
-        parameters.use_gpu = false;
+        // The GPU only in a build with the `gpu` feature. whisper.cpp falls back to the CPU on
+        // a machine where Vulkan finds no device.
+        parameters.use_gpu = cfg!(feature = "gpu");
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
-        Ok(Stt { context })
+        let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()) };
+        // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
+        let first = stt.warm_state()?;
+        stt.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(first);
+        Ok(stt)
+    }
+
+    /// A decoder state that has run once, so its encoder context is short rather than whisper's
+    /// thirty-second default. See [`Stt::idle`](Stt) for why that matters.
+    ///
+    /// One second of silence in a told language: long enough to get past whisper's
+    /// too-short-input return, which comes before the line that records the context, and told so
+    /// that the warm-up itself does not pay for the detection it is there to make cheap.
+    fn warm_state(&self) -> Result<whisper_rs::WhisperState, Fault> {
+        let mut state = self
+            .context
+            .create_state()
+            .map_err(|e| Fault::Whisper { detail: format!("no decoder state: {e}") })?;
+        let silence = vec![0.0f32; SAMPLE_RATE as usize];
+        let mut settings = Settings::for_audio(silence.len());
+        settings.language = Some(WARM_LANGUAGE);
+        state
+            .full(settings.params(), &silence)
+            .map_err(|e| Fault::Whisper { detail: format!("the warm-up decode failed: {e}") })?;
+        Ok(state)
     }
 
     /// Transcribe one utterance. **Blocks** — see [`transcribe`] for the callable-from-async
@@ -348,31 +474,35 @@ impl Stt {
     /// whisper would answer the same thing by a different route — a warning and zero
     /// segments — and a caller cannot tell that apart from a silent room.
     pub fn transcribe(&self, audio: &[f32]) -> Result<String, Fault> {
+        self.transcribe_expecting(audio, None)
+    }
+
+    /// [`Stt::transcribe`], told what it is likely to hear.
+    ///
+    /// **An initial prompt, and what it buys is spelling.** A name whisper has never seen comes
+    /// back different every time — five takes of one phrase came back as five different words in
+    /// each of three languages — and told to expect "Hey Zyris" it wrote all five as exactly that,
+    /// while other speech of the same length ("Hey Siri", "하이 자비스", "Hey, I see") kept its own
+    /// words. The language is still detected.
+    ///
+    /// ponytail: whisper-rs leaks the prompt's CString on every call (`into_raw`, never freed); a
+    /// phrase is a few bytes an utterance, so it is left rather than worked around.
+    pub fn transcribe_expecting(&self, audio: &[f32], prompt: Option<&str>) -> Result<String, Fault> {
         if audio.len() < samples_in(MIN_AUDIO) {
             return Ok(String::new());
         }
         let settings = Settings::for_audio(audio.len());
 
-        let mut state = self
-            .context
-            .create_state()
-            .map_err(|e| Fault::Whisper { detail: format!("no decoder state: {e}") })?;
+        let taken = self.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop();
+        let mut state = match taken {
+            Some(state) => state,
+            None => self.warm_state()?,
+        };
 
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(settings.language);
-        params.set_n_threads(settings.threads as std::ffi::c_int);
-        params.set_audio_ctx(settings.audio_ctx as std::ffi::c_int);
-        params.set_translate(settings.translate);
-        params.set_no_context(!settings.carry_previous_turn);
-        // Nothing of whisper's own goes to stdout: this process has a window and a log, and
-        // neither of them is a terminal it may print to.
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_no_timestamps(true);
-
+        let mut params = settings.params();
+        if let Some(prompt) = prompt {
+            params.set_initial_prompt(prompt);
+        }
         state
             .full(params, audio)
             .map_err(|e| Fault::Whisper { detail: format!("transcription failed: {e}") })?;
@@ -385,6 +515,9 @@ impl Stt {
                 detail: format!("a transcribed segment could not be read: {e}"),
             })?.as_ref());
         }
+        // Back only after a decode that worked: a state whisper failed in is not one to trust
+        // with the next turn, and a fresh one is a second of work away.
+        self.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(state);
         Ok(clean(&text))
     }
 }
@@ -439,6 +572,29 @@ pub fn clean(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A setting written by a later version, or by hand, must not stop listening from starting.
+    #[test]
+    fn a_model_id_this_build_does_not_offer_falls_back_to_base() {
+        assert_eq!(choosable(Some("small")).id, "small");
+        assert_eq!(choosable(Some("large-v9")).model, BASE);
+        assert_eq!(choosable(None).model, BASE);
+    }
+
+    /// Each download is the file it says, from the one revision every digest was read at.
+    #[test]
+    fn every_model_on_offer_is_its_own_file_at_the_pinned_revision() {
+        for (at, one) in MODELS.iter().enumerate() {
+            assert!(one.model.url.contains("5359861c739e955e79d9a303bcbc70fb988958b1"), "{}", one.id);
+            assert!(one.model.url.ends_with(one.model.file), "{}", one.id);
+            assert_eq!(one.model.sha256.len(), 64, "{}", one.id);
+            for other in &MODELS[at + 1..] {
+                assert_ne!(one.id, other.id);
+                assert_ne!(one.model.file, other.model.file);
+            }
+        }
+        assert_eq!(MODELS[0].model, BASE, "Base is first, and it is what nothing chosen means");
+    }
 
     fn seconds(s: f64) -> usize {
         (s * SAMPLE_RATE as f64) as usize
@@ -568,14 +724,13 @@ mod tests {
         );
     }
 
-    /// Whisper is *told* the language. Detecting it cost 10.79 s against 3.44 s on the same
-    /// clip, and this program already knows the answer.
+    /// A turn's language is detected, not told: told `en`, whisper answers a Korean sentence
+    /// with a different English one. See [`WARM_LANGUAGE`].
     #[test]
-    fn the_language_is_configured_and_not_detected() {
+    fn the_language_is_detected_rather_than_told() {
         let settings = Settings::for_audio(seconds(3.0));
 
-        assert_eq!(settings.language, Some(LANGUAGE));
-        assert!(settings.language.is_some(), "None here is `detect the language`, three times slower");
+        assert_eq!(settings.language, None);
     }
 
     /// The two that are quietly dangerous rather than slow.
@@ -773,7 +928,7 @@ mod tests {
         let mut state = stt.context.create_state().expect("state");
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some(LANGUAGE));
+        params.set_language(Some(WARM_LANGUAGE));
         params.set_n_threads(threads() as std::ffi::c_int);
         params.set_audio_ctx(ctx as std::ffi::c_int);
         params.set_no_context(true);

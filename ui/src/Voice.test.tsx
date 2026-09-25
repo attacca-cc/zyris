@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The whole of what this screen can do to the machine, mocked at the module boundary. Through
@@ -62,7 +62,39 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
         ],
       },
       chosen: over.chosen ?? { kind: "default" },
+      speakers: over.speakers ?? {
+        state: "listed",
+        devices: [
+          {
+            id: "alsa_output.hdmi",
+            name: "HDMI Audio",
+            isDefault: true,
+            direction: "output",
+          },
+        ],
+      },
+      speaker: over.speaker ?? { kind: "default" },
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
+      // The chosen row carries whatever `model` says, so a test that breaks the model in use
+      // sees it in the list too.
+      models: over.models ?? [
+        {
+          id: "base",
+          name: "Base",
+          note: "Fastest, and the least accurate.",
+          bytes: 147951465,
+          state: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
+          chosen: true,
+        },
+        {
+          id: "small",
+          name: "Small",
+          note: "Noticeably more accurate.",
+          bytes: 487601967,
+          state: { state: "absent", path: "/home/ada/.cache/zyris/models/ggml-small.bin", bytes: 487601967 },
+          chosen: false,
+        },
+      ],
       modelEnv: over.modelEnv ?? null,
       speaking: over.speaking ?? { state: "session", id: "s-1" },
       voiceModel: over.voiceModel ?? { state: "ready", dir: VOICE },
@@ -72,7 +104,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
         dir: TAKES,
         wanted: 5,
         seconds: 5,
-        note: "Zyris keeps this recording so a wake word can be added later without asking you to record it again. Nothing listens for it yet, and saving it does not make Zyris respond to it.",
+        note: "Zyris keeps this recording so a wake word can be added later without asking you to record it again. Say this phrase while listening is on.",
       },
     },
     hotkey: over.hotkey ?? { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true },
@@ -90,6 +122,12 @@ function answers(first: Screen, then?: Screen) {
 // Everything a person can actually read, as one string. Deliberately the rendered text and not
 // the DOM: a test on class names passes for a screen that paints two states identically and says
 // the same words about both.
+// The microphone dropdown's entries, the default among them.
+function microphones(): HTMLOptionElement[] {
+  const picker = screen.queryByRole("combobox", { name: /the microphone/i });
+  return picker ? Array.from(picker.querySelectorAll("option")) : [];
+}
+
 function readable(): string {
   return document.body.textContent ?? "";
 }
@@ -343,7 +381,7 @@ describe("Voice", () => {
 
     await screen.findByText(/the sound server is not running/i);
     expect(readable()).not.toMatch(/listed no microphones/i);
-    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+    expect(microphones()).toHaveLength(0);
   });
 
   it("says there are none only when the list was read and is empty", async () => {
@@ -359,10 +397,10 @@ describe("Voice", () => {
     // records the loudspeakers. A screen showing only names cannot be used at all.
     render(<Voice />);
 
-    await waitFor(() => expect(screen.getAllByRole("radio").length).toBe(3));
-    expect(screen.getAllByText("Built-in Audio Analog Stereo")).toHaveLength(2);
-    expect(readable()).toMatch(/a microphone/i);
-    expect(readable()).toMatch(/what this computer is playing/i);
+    await waitFor(() => expect(microphones().length).toBe(3));
+    const labels = microphones().map((o) => o.textContent);
+    expect(labels).toContain("Built-in Audio Analog Stereo — microphone (default)");
+    expect(labels).toContain("Built-in Audio Analog Stereo — loudspeaker and microphone");
   });
 
   it("shows which microphone is chosen, and names the one that was picked", async () => {
@@ -370,15 +408,14 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await waitFor(() => expect(screen.getAllByRole("radio")).toHaveLength(3));
-    const [followDefault, builtIn, monitor] = screen.getAllByRole<HTMLInputElement>("radio");
+    await waitFor(() => expect(microphones()).toHaveLength(3));
+    const picker = screen.getByRole<HTMLSelectElement>("combobox", { name: /the microphone/i });
     // A screen that showed the wrong one as chosen would have somebody recording their
     // loudspeakers and reading that they had picked the microphone.
-    expect(followDefault.checked).toBe(false);
-    expect(builtIn.checked).toBe(false);
-    expect(monitor.checked).toBe(true);
+    expect(picker.value).toBe("device:alsa_output.builtin.monitor");
+    expect(readable()).toMatch(/what this computer is playing/i);
 
-    builtIn.click();
+    fireEvent.change(picker, { target: { value: "device:alsa_input.builtin" } });
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_device", {
         device: { kind: "device", id: "alsa_input.builtin" },
@@ -397,7 +434,7 @@ describe("Voice", () => {
 
     render(<Voice />);
     const download = await screen.findByRole<HTMLButtonElement>("button", {
-      name: /download the speech model/i,
+      name: /download base/i,
     });
     download.click();
 
@@ -413,12 +450,60 @@ describe("Voice", () => {
   // The model
   // ------------------------------------------------------------------------------------------
 
+  it("chooses the speaker answers are read through", async () => {
+    answers(machine({}));
+    render(<Voice />);
+
+    const picker = await screen.findByRole("combobox", { name: /the speaker/i });
+    fireEvent.change(picker, { target: { value: "device:alsa_output.hdmi" } });
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_voice_speaker", {
+        speaker: { kind: "device", id: "alsa_output.hdmi" },
+      }),
+    );
+  });
+
+  it("offers only downloaded models to choose from, and downloads the others by id", async () => {
+    const ready = (file: string, bytes: number) => ({ state: "ready" as const, path: file, bytes });
+    answers(
+      machine({
+        models: [
+          { id: "base", name: "Base", note: "", bytes: 1, state: ready(MODEL, 1), chosen: true },
+          { id: "turbo", name: "Turbo", note: "", bytes: 2, state: ready("/m/turbo.bin", 2), chosen: false },
+          {
+            id: "small",
+            name: "Small",
+            note: "",
+            bytes: 3,
+            state: { state: "absent", path: "/m/small.bin", bytes: 3 },
+            chosen: false,
+          },
+        ],
+      }),
+    );
+    render(<Voice />);
+
+    const picker = await screen.findByRole<HTMLSelectElement>("combobox", { name: /speech model/i });
+    expect(Array.from(picker.options).map((o) => o.value)).toEqual(["base", "turbo"]);
+    expect(picker.value).toBe("base");
+    fireEvent.change(picker, { target: { value: "turbo" } });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }),
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /download small/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
+    );
+  });
+
   it("says how big the download is before anybody agrees to it", async () => {
     answers(machine({ model: { state: "absent", path: MODEL, bytes: 147951465 } }));
 
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /download the speech model/i });
+    await screen.findByRole("button", { name: /download base/i });
     expect(readable()).toContain("141 MB");
     expect(readable()).toContain(MODEL);
   });
@@ -439,7 +524,7 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/could not read/i);
-    expect(screen.queryByRole("button", { name: /download/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /download base/i })).toBeNull();
     expect(readable()).not.toMatch(/has not been downloaded/i);
   });
 
@@ -450,7 +535,7 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /download the speech model/i });
+    await screen.findByRole("button", { name: /download base/i });
     expect(readable()).toContain("1 MB");
     expect(readable()).toContain("141 MB");
   });
@@ -466,15 +551,15 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/takes that file as given/i);
-    expect(screen.queryByRole("button", { name: /download/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /download base/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /delete/i })).toBeNull();
   });
 
   it("offers to delete a model it downloaded, and says what that costs", async () => {
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /delete it/i });
-    expect(readable()).toMatch(/deleting the model turns listening off/i);
+    await screen.findByRole("button", { name: /delete base/i });
+    expect(readable()).toMatch(/deleting the one in use turns listening off/i);
   });
 
   // ------------------------------------------------------------------------------------------
@@ -550,7 +635,7 @@ describe("Voice", () => {
     await screen.findByText(/read aloud/i);
     const page = document.body.textContent ?? "";
     expect(page).toMatch(/pauses between sentences/i);
-    expect(page).toMatch(/record of the answer stays whole/i);
+    expect(page).toMatch(/what you say next tells the agent where it was cut off/i);
     expect(page).not.toMatch(/without a pause|seamless|smoothly/i);
   });
 
@@ -617,7 +702,7 @@ describe("Voice", () => {
     expect(page).toMatch(/yours to manage/i);
   });
 
-  it("says nothing reads the wake word, in every state it can be in", async () => {
+  it("says what the wake word does, in every state it can be in", async () => {
     const states: VoiceScreen["voice"]["wake"]["state"][] = [
       { state: "nothing" },
       { state: "partial", recorded: 2 },
@@ -633,13 +718,13 @@ describe("Voice", () => {
             dir: TAKES,
             wanted: 5,
             seconds: 5,
-            note: "Nothing listens for it yet, and saving it does not make Zyris respond to it.",
+            note: "Say this phrase while listening is on.",
           },
         }),
       );
       render(<Voice />);
       await waitFor(() =>
-        expect(readable()).toMatch(/nothing listens for it yet/i),
+        expect(readable()).toMatch(/say this phrase while listening is on/i),
         // The claim that must not drift. A screen that said it only in one of the four states
         // would say it exactly where nobody has recorded anything yet.
       );
@@ -654,7 +739,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );
@@ -675,7 +760,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );
@@ -691,7 +776,7 @@ describe("Voice", () => {
           dir: TAKES,
           wanted: 5,
           seconds: 5,
-          note: "Nothing listens for it yet.",
+          note: "Say this phrase while listening is on.",
         },
       }),
     );

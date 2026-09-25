@@ -97,8 +97,8 @@ pub trait TurnApi: Send + Sync + 'static {
     ///
     /// **It takes a session and nothing else.** There is no way to tell the server *where* the
     /// answer stopped being useful, and no `Cancelled` frame comes back — from the stream alone
-    /// a cancel and an ordinary finish are the same thing. That is why barge-in posts a message
-    /// saying where speech was cut off rather than the transcript recording it: see
+    /// a cancel and an ordinary finish are the same thing. That is why barge-in puts a note saying
+    /// where speech was cut off in front of the person's next message: see
     /// [`crate::session::Interruption`]. An upstream issue asks for a delivery point.
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()>;
 
@@ -227,6 +227,28 @@ struct State {
     cursor: Option<i64>,
 }
 
+/// How opening a subscription went.
+enum Opened {
+    Items(zyris::ItemStream<ZTurnFrame>),
+    /// Give up on this generation; already logged and published.
+    Failed,
+    /// The session does not exist for this account any more. See [`session_is_gone`].
+    Gone,
+}
+
+/// Whether `turn_events` refused because the session is not there — deleted in the web app, or
+/// never this account's.
+///
+/// ponytail: matches Attacca's message text. Its gateway sends a missing or foreign session from
+/// `turn_events` as `Internal` with the error's text, so there is no code to read; switch to
+/// `ErrorCode::Other("not_found")` alone once it maps that lookup through `wire_repo`, as it
+/// already does elsewhere.
+fn session_is_gone(error: &WireError) -> bool {
+    matches!(&error.code, ErrorCode::Other(code) if code == "not_found")
+        || error.message.contains("session not found")
+        || error.message.contains("owned by a different user")
+}
+
 impl Feed {
     /// A feed for one session, with nothing attached to it yet.
     pub fn new(session_id: impl Into<String>) -> Arc<Feed> {
@@ -244,6 +266,12 @@ impl Feed {
     /// the moment it can have changed.
     pub fn making_one(agent: Option<String>) -> Arc<Feed> {
         Feed::build(None, agent)
+    }
+
+    /// A feed for a session written down earlier, which makes a new one against `agent` if that
+    /// session turns out to be gone. See [`session_is_gone`].
+    pub fn continuing(session_id: impl Into<String>, agent: Option<String>) -> Arc<Feed> {
+        Feed::build(Some(session_id.into()), agent)
     }
 
     fn build(session_id: Option<String>, agent: Option<String>) -> Arc<Feed> {
@@ -339,7 +367,26 @@ impl Feed {
         if self.session_id().is_none() && !self.make_a_session(api.as_ref()).await {
             return;
         }
-        let Some(items) = self.open(api.as_ref(), generation).await else { return };
+        let items = match self.open(api.as_ref(), generation).await {
+            Opened::Items(items) => items,
+            Opened::Failed => return,
+            // **Once per connection.** The session this machine wrote down was deleted, or was
+            // never this account's; retrying it on every reconnect would be a voice that never
+            // comes back, with nothing on any screen to clear it. A new one is written down by
+            // `Engine::remember_the_session` like the first.
+            Opened::Gone => {
+                tracing::warn!("the voice's session is gone from Attacca; making a new one");
+                *self.session_id.lock().expect("the session id is not poisoned") = None;
+                self.state.lock().expect("the feed state is not poisoned").cursor = None;
+                if !self.make_a_session(api.as_ref()).await {
+                    return;
+                }
+                match self.open(api.as_ref(), generation).await {
+                    Opened::Items(items) => items,
+                    Opened::Failed | Opened::Gone => return,
+                }
+            }
+        };
         let feed = self.clone();
         tokio::spawn(async move { feed.run(api, generation, items).await });
     }
@@ -469,26 +516,23 @@ impl Feed {
         }
     }
 
-    /// Open one subscription, and hand back its items. `None` means give up on this generation.
-    async fn open(
-        &self,
-        api: &dyn TurnApi,
-        generation: u64,
-    ) -> Option<zyris::ItemStream<ZTurnFrame>> {
+    /// Open one subscription, and hand back its items.
+    async fn open(&self, api: &dyn TurnApi, generation: u64) -> Opened {
         let after = self.state.lock().expect("the feed state is not poisoned").cursor;
         let Some(session) = self.session_id() else {
             // `attach` makes one before it gets here, so this is the case where it could not.
-            return None;
+            return Opened::Failed;
         };
         let streaming = match api.turn_events(session, after).await {
             Ok(streaming) => streaming,
+            Err(error) if session_is_gone(&error) => return Opened::Gone,
             Err(error) => {
                 tracing::warn!(%error, "could not subscribe to this session's turns");
                 self.publish(
                     TurnEvent::Lost { reason: error.to_string(), resubscribing: false },
                     generation,
                 );
-                return None;
+                return Opened::Failed;
             }
         };
 
@@ -497,7 +541,7 @@ impl Feed {
             if state.generation != generation {
                 // A newer connection came up while this subscription was being opened. Its
                 // stream is the one anything reads; this one is dropped here.
-                return None;
+                return Opened::Failed;
             }
             if state.cursor.is_none() {
                 // See the module documentation: only ever on the first subscription.
@@ -507,7 +551,7 @@ impl Feed {
         }
 
         self.publish(TurnEvent::Running(streaming.head.running), generation);
-        Some(streaming.items)
+        Opened::Items(streaming.items)
     }
 
     /// Read one subscription after another for as long as this generation is the current one.
@@ -523,9 +567,11 @@ impl Feed {
         loop {
             match self.pump(&mut items, generation).await {
                 Next::Stop => return,
+                // A session gone in the middle of a connection is left for the next one's
+                // `attach`, which is where one is made.
                 Next::Resubscribe => match self.open(api.as_ref(), generation).await {
-                    Some(next) => items = next,
-                    None => return,
+                    Opened::Items(next) => items = next,
+                    Opened::Failed | Opened::Gone => return,
                 },
             }
         }
@@ -737,6 +783,8 @@ mod tests {
         senders: Vec<Option<mpsc::UnboundedSender<zyris::Result<ZTurnFrame>>>>,
         /// Refuse the next `turn_events` outright.
         refuse_subscribe: bool,
+        /// Answer the next `turn_events` the way Attacca answers for a deleted session.
+        session_gone: bool,
         /// What `list_agents` answers. Empty by default, which is an account with none.
         agents: Vec<(String, String)>,
         /// What `create_session` answers with.
@@ -780,8 +828,13 @@ mod tests {
             self.clone()
         }
 
-        fn refuse_next_subscribe(self: &Arc<Self>) -> Arc<Self> {
+        pub(super) fn refuse_next_subscribe(self: &Arc<Self>) -> Arc<Self> {
             self.script.lock().unwrap().refuse_subscribe = true;
+            self.clone()
+        }
+
+        pub(super) fn lose_the_session(self: &Arc<Self>) -> Arc<Self> {
+            self.script.lock().unwrap().session_gone = true;
             self.clone()
         }
 
@@ -828,6 +881,13 @@ mod tests {
                 script.calls.push(Call::Subscribe { after });
                 if std::mem::take(&mut script.refuse_subscribe) {
                     return Err(WireError::new(ErrorCode::Internal, "refused"));
+                }
+                if std::mem::take(&mut script.session_gone) {
+                    // Attacca's own words: `wire()` on a `RepoError::NotFound`.
+                    return Err(WireError::new(
+                        ErrorCode::Internal,
+                        "session not found: 0b7e6a52-7c5e-4d8e-9d2b-2f0f7d1b3a11",
+                    ));
                 }
                 script.senders.push(Some(tx));
                 script.heads.pop_front().unwrap_or(ZTurnStatus {
@@ -1309,6 +1369,41 @@ mod stopping_a_turn {
     async fn a_session_that_was_given_is_not_replaced() {
         let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
         let feed = Feed::new("session-1");
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(api.calls(), vec![Call::Subscribe { after: None }]);
+        assert_eq!(feed.session_id(), Some("session-1".to_string()));
+    }
+
+    /// **A session deleted in the web app is replaced, once.** Retrying the dead id on every
+    /// reconnect was a voice that never came back, with nothing on any screen to clear it.
+    #[tokio::test]
+    async fn a_session_that_is_gone_is_replaced_with_a_new_one() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]).lose_the_session();
+        let feed = Feed::continuing("deleted", None);
+
+        feed.attach(api.clone()).await;
+
+        assert_eq!(
+            api.calls(),
+            vec![
+                Call::Subscribe { after: None },
+                Call::Agents,
+                Call::Create { agent: "agent-1".to_string() },
+                Call::Subscribe { after: None },
+            ]
+        );
+        assert_eq!(feed.session_id(), Some("made-1".to_string()));
+        assert!(feed.is_live());
+    }
+
+    /// Anything else that refuses a subscription is not a reason to throw the session away: a
+    /// server having a bad minute must not cost somebody their conversation.
+    #[tokio::test]
+    async fn a_refused_subscription_keeps_the_session() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]).refuse_next_subscribe();
+        let feed = Feed::continuing("session-1", None);
 
         feed.attach(api.clone()).await;
 

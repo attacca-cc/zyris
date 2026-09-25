@@ -25,6 +25,7 @@ function half(step: Trace): "in" | "out" | "bad" {
   switch (step.step) {
     case "key":
     case "woke":
+    case "unmatched":
     case "recording":
     case "recorded":
     case "hearing":
@@ -56,10 +57,11 @@ function describe(step: Trace): string {
     case "recording":
       return step.started ? "recording started" : "recording stopped";
     case "woke":
-      // Both numbers, because the threshold is calibrated from the takes rather than chosen:
-      // a run of matches just under it is a phrase about to stop being recognised, and
-      // nothing else would show that before it happened.
-      return `the wake word, at ${step.distance.toFixed(1)} against ${step.threshold.toFixed(1)}`;
+      // What whisper heard, because that is what the phrase was found in: a wake nobody meant
+      // shows what it was mistaken for.
+      return `the wake word, in "${step.heard}"`;
+    case "unmatched":
+      return `not the wake word: "${step.heard}"`;
     case "recorded":
       return step.kept
         ? `recorded ${seconds(step.seconds)}, ${seconds(step.speechSeconds)} of it speech`
@@ -88,7 +90,9 @@ function describe(step: Trace): string {
     case "playing":
       return `played as far as sample ${step.atSample}`;
     case "dropped":
-      return "a fragment was finished after the key went down, so nobody heard it";
+      return "a fragment arrived or was finished after the key went down, so nobody heard it";
+    case "answering":
+      return "the agent started a new answer";
     case "spoke":
       return "the speaker ran out — the room is quiet";
     case "interrupted":

@@ -97,6 +97,22 @@ pub enum DeviceList {
     NotHere { reason: String },
 }
 
+/// One speech model on offer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechModelView {
+    /// What choosing it stores.
+    pub id: String,
+    pub name: String,
+    pub note: String,
+    /// How big the download is.
+    pub bytes: u64,
+    /// What is in the cache for it.
+    pub state: ModelView,
+    /// Whether it is the one listening uses.
+    pub chosen: bool,
+}
+
 /// What is on disk where the speech model should be.
 ///
 /// [`crate::stt::ModelState`] with the paths rendered as strings and one extra arm for the build
@@ -160,7 +176,7 @@ pub struct WakeView {
     pub wanted: usize,
     /// The longest one take may be, in seconds.
     pub seconds: u64,
-    /// **The sentence the screen must render**, taken from `wake::NOTHING_READS_THESE` rather
+    /// **The sentence the screen must render**, taken from `wake::WHAT_THE_TAKES_DO` rather
     /// than written again in TypeScript: that constant has a test on each of its claims, and a
     /// second copy of it in the window is a claim with nothing to keep it true. Empty string in
     /// a build that records nothing, which has no such claim to make.
@@ -269,7 +285,16 @@ pub struct VoiceView {
     /// Which microphone is stored as the one to open. Not "which one is open" — see
     /// [`ListeningState::On`] for that.
     pub chosen: Choice,
+    /// What this machine could speak through. The same shape as [`VoiceView::devices`], and the
+    /// same three answers.
+    pub speakers: DeviceList,
+    /// Which speaker is stored as the one to open.
+    pub speaker: Choice,
+    /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
+    /// `ZYRIS_WHISPER_MODEL` names.
     pub model: ModelView,
+    /// Every speech model on offer, each with what is on disk for it.
+    pub models: Vec<SpeechModelView>,
     /// The value of `ZYRIS_WHISPER_MODEL`, when it is set to something.
     ///
     /// On the screen it is the difference between a file Zyris downloaded and one an operator
@@ -302,7 +327,10 @@ impl VoiceView {
             listening: ListeningState::Off,
             devices: DeviceList::NotHere { reason: reason.clone() },
             chosen: Choice::Default,
+            speakers: DeviceList::NotHere { reason: reason.clone() },
+            speaker: Choice::Default,
             model: ModelView::NotHere { reason: reason.clone() },
+            models: Vec::new(),
             model_env: None,
             speaking: SpeakingState::NotHere { reason: reason.clone() },
             voice_model: VoiceModelView::NotHere { reason: reason.clone() },

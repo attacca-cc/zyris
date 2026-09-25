@@ -361,6 +361,40 @@ impl Speaker {
     }
 }
 
+/// Everything this machine could speak through, default and true outputs first.
+///
+/// [`crate::capture::devices`]'s opposite number, with the same rule: an error is the host being
+/// unreachable, not an empty list.
+pub fn devices() -> Result<Vec<crate::view::InputDevice>, DeviceProblem> {
+    use crate::view::Direction;
+    let host = cpal::default_host();
+    let default = host.default_output_device().and_then(|device| device.id().ok());
+
+    let mut devices: Vec<crate::view::InputDevice> = host
+        .output_devices()
+        .map_err(|error| classify(&error))?
+        .filter_map(|device| {
+            let id = device.id().ok()?;
+            let description = device.description().ok();
+            Some(crate::view::InputDevice {
+                is_default: Some(&id) == default.as_ref(),
+                id: id.to_string(),
+                name: device.to_string(),
+                direction: description.map_or(Direction::Unknown, |d| d.direction().into()),
+            })
+        })
+        .collect();
+
+    devices.sort_by_key(|device| match (device.is_default, device.direction) {
+        (true, _) => 0,
+        (_, Direction::Output) => 1,
+        (_, Direction::Unknown) => 2,
+        (_, Direction::Duplex) => 3,
+        (_, Direction::Input) => 4,
+    });
+    Ok(devices)
+}
+
 /// An open speaker.
 ///
 /// **Dropping this stops playback**, exactly as dropping a [`crate::capture::Capture`] stops the

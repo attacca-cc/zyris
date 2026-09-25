@@ -38,11 +38,6 @@ optional = true
 workspace = true
 optional = true
 
-# The wake word's feature front end. See the root manifest: this is already compiled.
-[dependencies.realfft]
-workspace = true
-optional = true
-
 [dependencies.whisper-rs]
 workspace = true
 optional = true
@@ -173,7 +168,6 @@ voice = [
     "dep:cpal",
     "dep:rubato",
     "dep:earshot",
-    "dep:realfft",
     "dep:whisper-rs",
     "dep:ort",
     "dep:unicode-normalization",
@@ -213,6 +207,12 @@ voice = [
 #
 # Implies `voice`: cancelling the echo out of a microphone nobody opened is not a thing.
 aec = ["voice", "dep:webrtc-audio-processing"]
+
+# Transcription on the graphics card, through Vulkan: any vendor's GPU, one backend. Opt-in
+# because the binary then links `libvulkan`, which a machine without a Vulkan loader cannot start
+# without. On the development machine (RTX 3050) it takes Large v3 Turbo from about ten seconds a
+# sentence on the CPU to well under one. Building needs the Vulkan headers and `glslc`.
+gpu = ["voice", "whisper-rs/vulkan"]
 
 # The same canceller, built from source rather than linked against a system copy — and this is
 # the one a release uses, because there is no system copy to link against: **no Debian or Ubuntu

@@ -302,17 +302,38 @@ pub async fn set_voice_device(
     Ok(voice_screen(voice.choose(device).await, &hotkey))
 }
 
-/// Download the speech model.
+/// Choose which speaker answers are read through, now and at the next launch.
+#[tauri::command]
+pub async fn set_voice_speaker(
+    speaker: zyris_voice::view::Choice,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_speaker(speaker).await, &hotkey))
+}
+
+/// Choose which speech model listening uses, by id.
+#[tauri::command]
+pub async fn set_speech_model(
+    id: String,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_model(id).await, &hotkey))
+}
+
+/// Download a speech model, by id.
 ///
 /// `Err` is a download that did not produce the model — no network, a proxy's error page, a disk
 /// with no room — carrying the sentence `zyris_voice::stt::Fault` gives. It can take minutes, so
 /// the screen says what it is doing rather than showing a button that appears to do nothing.
 #[tauri::command]
 pub async fn fetch_speech_model(
+    id: String,
     voice: State<'_, Arc<zyris_voice::Voice>>,
     hotkey: State<'_, Arc<dyn Hotkey>>,
 ) -> Result<VoiceScreen, String> {
-    Ok(voice_screen(voice.fetch_model().await?, &hotkey))
+    Ok(voice_screen(voice.fetch_model(id).await?, &hotkey))
 }
 
 /// Download the voice that reads answers aloud.
@@ -328,23 +349,24 @@ pub async fn fetch_voice_model(
     Ok(voice_screen(voice.fetch_voice().await?, &hotkey))
 }
 
-/// Delete the downloaded speech model.
+/// Delete a downloaded speech model, by id.
 ///
 /// Turns listening off on the way, because the running session holds the model open. It refuses
 /// to delete a file `ZYRIS_WHISPER_MODEL` names — that one is an operator's own, and the window
 /// does not offer the button for it.
 #[tauri::command]
 pub async fn forget_speech_model(
+    id: String,
     voice: State<'_, Arc<zyris_voice::Voice>>,
     hotkey: State<'_, Arc<dyn Hotkey>>,
 ) -> Result<VoiceScreen, String> {
-    Ok(voice_screen(voice.forget_model().await?, &hotkey))
+    Ok(voice_screen(voice.forget_model(id).await?, &hotkey))
 }
 
 /// Record one take of the wake word, from the chosen microphone.
 ///
-/// **Nothing matches what this records**, and the window says so: `zyris_voice::wake`'s
-/// `NOTHING_READS_THESE` is carried in the answer rather than written again here, because that
+/// What the recording is for is said by `zyris_voice::wake`'s `WHAT_THE_TAKES_DO`, carried in
+/// the answer rather than written again here, because that
 /// constant has a test on each of its claims and a second copy of the sentence would have none.
 #[tauri::command]
 pub async fn record_wake_take(
