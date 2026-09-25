@@ -524,6 +524,16 @@ impl Voice {
         self.look().await
     }
 
+    /// Choose how fast answers are read, now and at the next launch.
+    pub async fn choose_speaking_rate(&self, rate: f32) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_speaking_rate(rate).await;
+        }
+        let _ = rate;
+        self.look().await
+    }
+
     /// Choose which speaker answers are read through, now and at the next launch.
     pub async fn choose_speaker(&self, speaker: view::Choice) -> view::VoiceView {
         #[cfg(feature = "voice")]

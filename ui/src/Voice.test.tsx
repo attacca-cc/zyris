@@ -74,6 +74,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
         ],
       },
       speaker: over.speaker ?? { kind: "default" },
+      speakingRate: over.speakingRate ?? 1.25,
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
       // The chosen row carries whatever `model` says, so a test that breaks the model in use
       // sees it in the list too.
@@ -496,6 +497,15 @@ describe("Voice", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
     );
+  });
+
+  it("sets how fast answers are read", async () => {
+    render(<Voice />);
+
+    const picker = await screen.findByRole<HTMLSelectElement>("combobox", { name: /how fast/i });
+    expect(picker.value).toBe("1.25");
+    fireEvent.change(picker, { target: { value: "1.4" } });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speaking_rate", { rate: 1.4 }));
   });
 
   it("says how big the download is before anybody agrees to it", async () => {

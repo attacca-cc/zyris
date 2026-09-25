@@ -274,7 +274,7 @@ pub enum VoiceModelView {
 /// answers have to agree with each other. "Listening, on the built-in microphone" and a device
 /// list fetched a round trip later can describe two different moments, and this is exactly the
 /// screen where that would show.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceView {
     /// Whether speech can work here at all. The first thing the screen reads: everything below
@@ -290,6 +290,9 @@ pub struct VoiceView {
     pub speakers: DeviceList,
     /// Which speaker is stored as the one to open.
     pub speaker: Choice,
+    /// How fast answers are read, as a multiple of the voice's own pace. See
+    /// `run::DEFAULT_SPEAKING_RATE`.
+    pub speaking_rate: f32,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
     /// `ZYRIS_WHISPER_MODEL` names.
     pub model: ModelView,
@@ -329,6 +332,7 @@ impl VoiceView {
             chosen: Choice::Default,
             speakers: DeviceList::NotHere { reason: reason.clone() },
             speaker: Choice::Default,
+            speaking_rate: 1.0,
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),
             model_env: None,

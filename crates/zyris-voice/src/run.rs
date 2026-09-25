@@ -56,7 +56,7 @@ use crate::{Push, VoiceEvent, VoiceSupport, stt, wake};
 /// Two fields, both of them answers a person gave: whether to listen, and what to listen with.
 /// Nothing measured lives here — the model, the devices and the wake word are all read off the
 /// machine on every look, because every one of them can change while this program is not running.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     /// Whether a microphone should be open. Defaults to **off**: see the module.
@@ -95,6 +95,21 @@ pub struct Settings {
     /// to it; an empty string turns it off.
     #[serde(default)]
     pub vocabulary: Option<String>,
+    /// How fast answers are read, as a multiple of the voice's own pace; `None` is
+    /// [`DEFAULT_SPEAKING_RATE`]. Clamped to the range [`crate::tts::Tts::set_speed`] allows.
+    #[serde(default)]
+    pub speaking_rate: Option<f32>,
+}
+
+/// How fast answers are read when nobody has said. Faster than Supertonic's own 1.05, which is
+/// slow enough to sound like reading aloud. Measured 2026-09-25 by reading three sentences at each
+/// rate and transcribing them back with Large v3 Turbo: 1.25 came back word for word; 1.4 lost a
+/// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
+pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
+
+/// The rate `settings` asks for, clamped the way the voice will clamp it.
+fn speaking_rate(settings: &Settings) -> f32 {
+    settings.speaking_rate.filter(|r| r.is_finite()).unwrap_or(DEFAULT_SPEAKING_RATE).clamp(0.5, 2.0)
 }
 
 /// What a turn is read expecting when `vocabulary` is not set: the two names every conversation
@@ -306,6 +321,7 @@ impl Engine {
                 Err(problem) => DeviceList::Unreadable { reason: problem.reason },
             },
             speaker: settings.speaker.clone(),
+            speaking_rate: speaking_rate(settings),
             model: model_view(stt::state(&stt::choosable(settings.speech_model.as_deref()).model)),
             models: {
                 let chosen = stt::choosable(settings.speech_model.as_deref()).id;
@@ -398,6 +414,19 @@ impl Engine {
         live.settings.speaker = speaker;
         self.store(&live.settings);
         self.restart_if_running(&mut live).await;
+    }
+
+    /// Choose how fast answers are read. Takes effect from the next sentence: the voice is
+    /// shared, so nothing has to be reopened.
+    pub async fn choose_speaking_rate(&self, rate: f32) {
+        let mut live = self.live.lock().await;
+        live.settings.speaking_rate = Some(rate);
+        let rate = speaking_rate(&live.settings);
+        live.settings.speaking_rate = Some(rate);
+        self.store(&live.settings);
+        if let Some(tts) = lock(&self.voice).as_ref() {
+            lock(tts).set_speed(rate);
+        }
     }
 
     /// Choose the speech model, and start listening again on it if listening is on.
@@ -603,7 +632,7 @@ impl Engine {
         // each of them is a run that listens, transcribes and publishes exactly as before, and
         // says why it is not talking in the log rather than by failing to start.
         let mut tasks = Vec::new();
-        let (speaking, speaker_stop) = match self.open_speaker(apm.clone(), &capture_delay, &settings.speaker).await {
+        let (speaking, speaker_stop) = match self.open_speaker(apm.clone(), &capture_delay, settings).await {
             Ok((speaking, stop, started)) => {
                 tasks = started;
                 (Some(speaking), Some(stop))
@@ -685,7 +714,7 @@ impl Engine {
         &self,
         apm: Arc<Apm>,
         capture_delay: &Arc<AtomicU64>,
-        speaker: &Choice,
+        settings: &Settings,
     ) -> Result<
         (Arc<Speaking>, std::sync::mpsc::Sender<()>, Vec<tokio::task::JoinHandle<()>>),
         String,
@@ -716,8 +745,9 @@ impl Engine {
                 tts
             }
         };
+        lock(&tts).set_speed(speaking_rate(settings));
 
-        let (speaker, tap, rate, stop) = open_speaker_on_a_thread(speaker.clone()).await?;
+        let (speaker, tap, rate, stop) = open_speaker_on_a_thread(settings.speaker.clone()).await?;
 
         let mut tasks = Vec::new();
         // The render side of the echo canceller. Started before anything can be queued, so that

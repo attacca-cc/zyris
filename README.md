@@ -350,6 +350,11 @@ files — four ONNX graphs, two small configuration files and ten voice styles �
 published revision and each checked against its own SHA-256 before it is put in place. Set
 `ZYRIS_TTS_MODELS` to a directory you have already unpacked it into and nothing is downloaded.
 
+**Answers are read at 1.25 times the voice's own pace** unless the Voice tab says otherwise
+(`"speakingRate"` in `voice.json`). At 1.25 three test sentences read aloud still came back from
+whisper word for word; at 1.4 Korean lost a syllable or two, and at 1.6 whole phrases, so the tab
+offers up to 1.4.
+
 **The voice weights are not Apache-2.0.** Supertonic's example code is MIT and its **weights are
 licensed BigScience OpenRAIL-M**: free to use and to redistribute, including commercially, with
 use-based restrictions that must be passed on with any copy. Zyris does not ship them — they are
