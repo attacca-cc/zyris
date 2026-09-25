@@ -242,6 +242,7 @@ pub fn run(
             bridge::set_voice_listening,
             bridge::set_voice_device,
             bridge::set_voice_speaker,
+            bridge::set_speaking_rate,
             bridge::set_speech_model,
             bridge::fetch_speech_model,
             bridge::fetch_voice_model,
@@ -422,6 +423,9 @@ pub fn run(
             close_hotkey(&exit_hotkey, &exit_runtime);
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
+            // Tauri would call `std::process::exit` next; this does the same, minus the C++
+            // exit handlers that crash a GPU voice build. See `zyris_voice::exit_process`.
+            zyris_voice::exit_process(0);
         }
         _ => {}
     });

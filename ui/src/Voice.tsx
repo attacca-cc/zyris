@@ -128,6 +128,8 @@ export type VoiceScreen = {
     chosen: Choice;
     speakers: DeviceList;
     speaker: Choice;
+    // A multiple of the voice's own pace, already clamped by the Rust side.
+    speakingRate: number;
     model: ModelView;
     models: SpeechModel[];
     modelEnv: string | null;
@@ -211,6 +213,13 @@ function heardLine(event: VoiceEvent): string {
     case "interrupted":
       return "Stopped reading the answer out loud, because you started speaking.";
   }
+}
+
+// The rates offered, plus whatever is stored if somebody wrote another one into voice.json, so
+// the dropdown never shows a rate that is not the one in use.
+function rateChoices(current: number): number[] {
+  const offered = [1, 1.1, 1.25, 1.4];
+  return offered.includes(current) ? offered : [...offered, current].sort((a, b) => a - b);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -656,6 +665,27 @@ export function Voice() {
                 the agent where it was cut off.
               </p>
             )}
+            {voice.voiceModel.state === "ready" && (
+              <label className="note">
+                How fast answers are read{" "}
+                <select
+                  className="picker"
+                  aria-label="How fast answers are read"
+                  value={String(voice.speakingRate)}
+                  disabled={busy !== null}
+                  onChange={(event) =>
+                    act("rate", "set_speaking_rate", { rate: Number(event.target.value) })
+                  }
+                >
+                  {rateChoices(voice.speakingRate).map((rate) => (
+                    <option key={rate} value={String(rate)}>
+                      {rate === 1 ? "1× — the voice's own pace" : `${rate}×`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {refused.rate && <p className="note problem">{refused.rate}</p>}
           </>
         )}
       </section>

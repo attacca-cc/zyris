@@ -312,6 +312,16 @@ pub async fn set_voice_speaker(
     Ok(voice_screen(voice.choose_speaker(speaker).await, &hotkey))
 }
 
+/// Choose how fast answers are read, now and at the next launch.
+#[tauri::command]
+pub async fn set_speaking_rate(
+    rate: f32,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_speaking_rate(rate).await, &hotkey))
+}
+
 /// Choose which speech model listening uses, by id.
 #[tauri::command]
 pub async fn set_speech_model(
