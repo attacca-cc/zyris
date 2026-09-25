@@ -1449,6 +1449,18 @@ impl Speaking {
                     self.lock().running = false;
                     self.drained().await
                 }
+                // The server writes a failed agent run into the timeline as an `error` event
+                // and says nothing else: no delta, often not even a status. Without this a
+                // person who asked something heard silence and saw nothing.
+                Ok(crate::turn::TurnEvent::Event { event, .. }) if event.kind == "error" => {
+                    let said = event.payload.get("message").and_then(|m| m.as_str());
+                    self.publish(VoiceEvent::Failed {
+                        reason: match said {
+                            Some(message) => format!("The agent did not answer: {message}"),
+                            None => "The agent did not answer.".to_string(),
+                        },
+                    });
+                }
                 Ok(_) => {}
                 // A fragment was dropped before it was read, which is a sentence that will never
                 // be spoken. Nothing can recover it — a `Delta` is not durable and nothing
@@ -3807,6 +3819,29 @@ mod barge_in {
             .await
             .expect("the worker ends when the feed does, or a stopped session leaks a task")
             .expect("it does not panic");
+    }
+
+    /// A failed agent run arrives only as an `error` event in the timeline, and it has to be
+    /// said as a failure — this is what production sent on 2026-09-25 while nothing was heard.
+    #[tokio::test]
+    async fn an_agent_run_that_failed_is_a_failure_and_not_silence() {
+        let mut rig = rig(Voicebox::plain());
+        let (turns, subscription) = broadcast::channel(16);
+        let worker = tokio::spawn(rig.speaking.clone().run(subscription));
+
+        let event: zyris_attacca::ZSessionEvent = serde_json::from_value(serde_json::json!({
+            "seq": 2, "cursor": 2, "kind": "error",
+            "payload": { "kind": "error", "message": "The agent run failed. Please try again. (ref c3cd2811)" },
+        }))
+        .expect("the wire shape");
+        turns.send(crate::turn::TurnEvent::Event { cursor: 2, event }).expect("the worker is reading");
+
+        match rig.next_event().await {
+            VoiceEvent::Failed { reason } => assert!(reason.contains("ref c3cd2811"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        drop(turns);
+        let _ = tokio::time::timeout(PATIENCE, worker).await;
     }
 
     /// The double `session::tests` already has, reached through its module so that there is one
