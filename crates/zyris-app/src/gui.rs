@@ -250,6 +250,9 @@ pub fn run(
             bridge::forget_speech_model,
             bridge::record_wake_take,
             bridge::clear_wake_word,
+            bridge::conversation_sessions,
+            bridge::choose_conversation_session,
+            bridge::new_conversation_session,
         ])
         .setup(move |app| {
             // Taken here, after the single-instance plugin above has already had first refusal:

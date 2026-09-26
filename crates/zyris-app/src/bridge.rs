@@ -406,6 +406,37 @@ pub async fn clear_wake_word(
     Ok(voice_screen(voice.clear_wake_word().await?, &hotkey))
 }
 
+/// The account's projects, sessions and agents, and which session this machine talks to.
+///
+/// `Err` is a sentence the Conversation screen shows as it stands: most often that this machine
+/// has not connected yet, so there is no account to read.
+#[tauri::command]
+pub async fn conversation_sessions(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<zyris_voice::view::SessionsView, String> {
+    voice.sessions().await
+}
+
+/// Talk to another session from now on, and at the next launch.
+#[tauri::command]
+pub async fn choose_conversation_session(
+    session: String,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<zyris_voice::view::SessionsView, String> {
+    voice.choose_session(session).await
+}
+
+/// Start a session in a project against an agent, and talk to it from now on. Either may be
+/// left out: the default project, and the account's only agent.
+#[tauri::command]
+pub async fn new_conversation_session(
+    project: Option<String>,
+    agent: Option<String>,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<zyris_voice::view::SessionsView, String> {
+    voice.new_session(project, agent).await
+}
+
 /// What the core last published, for a window whose listener came up too late to see it live.
 /// Meant to be called exactly once, right after `listen()` resolves — see the module doc comment.
 #[tauri::command]

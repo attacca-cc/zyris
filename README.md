@@ -246,6 +246,12 @@ agent on your account, or, if there are several, the one named under `agent` in 
 this computer's data directory — and keeps using it. If that chat is deleted on Attacca, the next
 connection makes a new one. The Conversation tab shows both sides as they happen.
 
+**Which session it talks to is chosen at the top of the Conversation tab**: a project, then a
+session in it, or **New session** to start one there (with a choice of agent when the account has
+more than one). The choice is kept in `voice.json` like the first. Switching does not bring the
+old conversation along — the tab starts empty on the new session — because Zyris only hears a
+session's turns live, from the moment it starts listening to it.
+
 **Korean and English are both understood and both spoken.** Whisper works out which language each
 turn is in, and the voice reads each sentence in the language its script says: Hangul as Korean,
 kana as Japanese, anything else as English. A test reads a Korean and an English sentence aloud,
@@ -632,12 +638,25 @@ the lines beside it put AVX2 back. A release with the voice refuses to build wit
   about ten seconds, once; the driver keeps them.
 - **`gpu-tts`: Supertonic through ONNX Runtime's WebGPU provider** (Dawn: Vulkan on Linux,
   Direct3D 12 on Windows). A sentence takes 0.2-0.3 s against 1-2 s on the processor. This
-  links ONNX Runtime's `wgpu` build instead of the CPU one, and the binary needs
-  `libwebgpu_dawn.so` beside it; `copy-dylibs` puts it in `target/release`, and the installers
-  do not carry it yet. Where `pkg-config` finds a system ONNX Runtime (NixOS, say), set
+  links ONNX Runtime's `wgpu` build instead of the CPU one, and the binary needs Dawn beside it —
+  `libwebgpu_dawn.so` on Linux; `webgpu_dawn.dll`, `dxcompiler.dll` and `dxil.dll` on Windows.
+  `copy-dylibs` puts them in `target/release`. **The Windows installer is built with `gpu` and
+  carries the three DLLs** (`crates/zyris-app/tauri.windows-gpu.conf.json`); the `.deb` is not
+  and does not carry the `.so` yet. DirectML, which the plain Windows ONNX Runtime already has,
+  was measured and not taken: 1.26 s a sentence on an RTX 3050 against 0.37 s through WebGPU. Where `pkg-config` finds a system ONNX Runtime (NixOS, say), set
   `LIBONNXRUNTIME_NO_PKG_CONFIG=1`, or the build links that CPU-only copy and synthesis quietly
   stays on the processor. A build with it exits through `zyris_voice::exit_process`, because
   ONNX Runtime's exit handler aborts on a Dawn instance that is already gone.
+
+**Building `gpu-stt` on Windows** needs the [Vulkan SDK](https://vulkan.lunarg.com/) with
+`VULKAN_SDK` set (its installer sets it), and **a short path to the target directory**:
+whisper.cpp builds its shader generator as a nested CMake project, and MSVC's `cl.exe` cannot open
+a file past 260 characters whatever the registry says. From
+`C:\Users\<name>\Desktop\coding project\zyris` the deepest path is 279 characters and the build
+fails with `error C1083: Cannot open compiler generated file: '': Invalid argument`;
+`CARGO_TARGET_DIR=C:\zt` fixes it. A `gpu` build of `zyris.exe` imports the Vulkan loader
+(`vulkan-1.dll`), which every current GPU driver installs; a machine with no GPU driver at all
+cannot start it.
 
 Neither half has been tried yet on a machine without a usable GPU.
 

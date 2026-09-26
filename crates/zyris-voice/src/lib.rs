@@ -478,6 +478,43 @@ impl Voice {
         let _ = connection;
     }
 
+    /// The account's projects, sessions and agents, and which session this machine talks to.
+    /// `Err` is a sentence: not connected yet, or a build with no voice.
+    pub async fn sessions(&self) -> Result<view::SessionsView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.sessions().await;
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Talk to another session from now on, and at the next launch.
+    pub async fn choose_session(&self, session: String) -> Result<view::SessionsView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_session(session).await?;
+            return engine.sessions().await;
+        }
+        let _ = session;
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Start a session in `project` (the default one when `None`) against `agent` (the only
+    /// one when `None` and there is only one), and talk to it from now on.
+    pub async fn new_session(
+        &self,
+        project: Option<String>,
+        agent: Option<String>,
+    ) -> Result<view::SessionsView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.new_session(project, agent).await?;
+            return engine.sessions().await;
+        }
+        let _ = (project, agent);
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
     /// Start listening if a person has already said to, on some earlier run.
     ///
     /// Called by the windowed branch and **not** by `--headless`, which has no push-to-talk key

@@ -640,9 +640,9 @@ export function Voice() {
                     taking the first would change which agent this machine talks to the day
                     somebody adds one. */}
                 <p className="note">
-                  Put one of those names in{" "}
-                  <span className="mono">{voice.speaking.settings}</span> under{" "}
-                  <span className="mono">agent</span> and restart Zyris.
+                  Start a session with one of them from the top of the Conversation tab, or put
+                  one of those names in <span className="mono">{voice.speaking.settings}</span>{" "}
+                  under <span className="mono">agent</span> and restart Zyris.
                 </p>
               </>
             )}

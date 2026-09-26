@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SessionPicker } from "./SessionPicker";
 import { subscribeTrace, type Trace } from "./state";
 
 // The conversation as it happens, with the speaking half shown sentence by sentence.
@@ -284,6 +285,14 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   return (
     <div className="screen" hidden={hidden}>
       <h1>Conversation</h1>
+
+      <SessionPicker
+        hidden={hidden}
+        onSwitched={() => {
+          setTurns([]);
+          setCursor(0);
+        }}
+      />
 
       {turns.length === 0 ? (
         <p className="note">

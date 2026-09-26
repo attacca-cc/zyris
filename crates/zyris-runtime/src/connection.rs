@@ -22,8 +22,27 @@ use crate::identity::Identity;
 ///
 /// `sessions:*` and `events:read` are the voice conversation, `agents:read` is how it picks the
 /// agent to talk to, and `peers:write` is file transfer publishing where this machine is reached.
-pub const SCOPES: &[&str] =
-    &["agents:read", "sessions:read", "sessions:write", "events:read", "peers:write"];
+///
+/// `projects:read` is the Conversation tab choosing which project a session lives in. It was
+/// missing until 2026-09-27, so every machine enrolled before then lacks it; see
+/// [`missing_scopes`] for how such a machine is brought up to date.
+pub const SCOPES: &[&str] = &[
+    "agents:read",
+    "projects:read",
+    "sessions:read",
+    "sessions:write",
+    "events:read",
+    "peers:write",
+];
+
+/// What this build asks for that a stored credential was not granted.
+///
+/// A credential never widens, so a scope added to [`SCOPES`] reaches a machine only through a
+/// fresh enrolment. Without this check it never would: the stored credential keeps dialling, and
+/// the feature needing the new scope fails with `ForbiddenScope` for as long as the machine lives.
+pub fn missing_scopes(credential: &Credential) -> Vec<&'static str> {
+    SCOPES.iter().copied().filter(|scope| !credential.scopes.iter().any(|s| s == scope)).collect()
+}
 
 /// The program the credential is issued to. Fixed on the credential, and the middle segment of
 /// every path this machine's node gets: `<system>/zyris/desktop`.
@@ -419,10 +438,22 @@ impl Connector {
             return None;
         }
 
+        let mut outdated = None;
         match self.identity.load() {
             Ok(Some(credential)) => {
-                tracing::info!(program = %credential.program.name, system = %credential.system.name, "reusing this machine's credential");
-                return Some(credential);
+                let missing = missing_scopes(&credential);
+                if missing.is_empty() {
+                    tracing::info!(program = %credential.program.name, system = %credential.system.name, "reusing this machine's credential");
+                    return Some(credential);
+                }
+                // **Kept until the new one is granted.** It is overwritten by `save` below and
+                // nowhere else, and an enrolment that cannot even start hands it back, so a
+                // machine that cannot reach the approval page still connects with what it has.
+                tracing::warn!(
+                    missing = %missing.join(", "),
+                    "this machine's credential predates scopes this build uses; enrolling again to be granted them"
+                );
+                outdated = Some(credential);
             }
             Ok(None) => {}
             Err(error) => {
@@ -445,6 +476,10 @@ impl Connector {
         };
         let mut enrollment = match zyris::enroll(&self.server, request).await {
             Ok(enrollment) => enrollment,
+            Err(error) if outdated.is_some() => {
+                tracing::warn!(%error, "could not start the enrolment; carrying on with the old credential");
+                return outdated;
+            }
             Err(error) => {
                 self.bus.publish(CoreEvent::EnrolmentFailed { reason: error.to_string() });
                 return None;
@@ -708,6 +743,37 @@ mod tests {
         assert_eq!(first, CoreEvent::NeedsEnrolment);
     }
 
+    /// A stored credential missing a scope this build asks for is enrolled again, and when the
+    /// enrolment cannot even start — this server is unreachable — the old one is dialled rather
+    /// than the machine being left with nothing.
+    #[tokio::test]
+    async fn an_outdated_credential_is_enrolled_again_and_kept_until_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::identity::Identity::new(
+            crate::secret::SecretStore::with_file_dir("zyris-test", dir.path().to_path_buf()),
+        );
+        let old = crate::identity::tests::a_credential();
+        assert!(!missing_scopes(&old).is_empty(), "the fixture has to be outdated for this test");
+        identity.save(&old).unwrap();
+        let bus = EventBus::new(16);
+        let mut events = bus.subscribe();
+
+        let connector =
+            Connector::new(identity.clone(), bus).with_server("wss://127.0.0.1:1/ws".into());
+        tokio::spawn(connector.run());
+
+        let wait = std::time::Duration::from_secs(5);
+        let first = tokio::time::timeout(wait, events.recv()).await.expect("an event").unwrap();
+        assert_eq!(first, CoreEvent::NeedsEnrolment);
+        let second = tokio::time::timeout(wait, events.recv()).await.expect("an event").unwrap();
+        assert_eq!(second, CoreEvent::Connecting, "the old credential is dialled after all");
+        assert_eq!(
+            identity.load().unwrap().map(|c| c.secret),
+            Some(old.secret),
+            "nothing was granted, so nothing may have replaced the stored credential"
+        );
+    }
+
     /// A credential on disk is dialled with directly. Enrolling again would send someone to a
     /// browser for a machine that could connect right now.
     #[tokio::test]
@@ -739,6 +805,37 @@ mod tests {
     /// `nodes:write` was the account layer's, and it is gone from the protocol. A server that no
     /// longer knows a scope refuses the whole enrollment naming it (`EnrollError::UnknownScope`),
     /// so carrying it over would make every new machine fail to enrol.
+    fn credential_with(scopes: &[&str]) -> Credential {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "secret": "zc_test",
+            "system": { "id": "s", "name": "ruma", "slug": "ruma" },
+            "program": { "id": "p", "name": "zyris", "slug": "zyris" },
+            "scopes": scopes,
+        }))
+        .expect("a credential")
+    }
+
+    /// Measured on a real machine: a credential from before `projects:read` was asked for left
+    /// the Conversation tab with nothing but "this credential was not granted the projects:read
+    /// scope", for good, because nothing ever enrolled it again.
+    #[test]
+    fn a_credential_missing_a_scope_this_build_uses_is_noticed() {
+        let old = credential_with(&[
+            "agents:read",
+            "sessions:read",
+            "sessions:write",
+            "events:read",
+            "peers:write",
+        ]);
+        assert_eq!(missing_scopes(&old), vec!["projects:read"]);
+        assert!(missing_scopes(&credential_with(SCOPES)).is_empty());
+        // A scope granted beyond what is asked for is not a reason to enrol.
+        let mut wider: Vec<&str> = SCOPES.to_vec();
+        wider.push("files:read");
+        assert!(missing_scopes(&credential_with(&wider)).is_empty());
+    }
+
     #[test]
     fn the_credential_asks_for_no_scope_the_account_layer_had() {
         assert!(!SCOPES.contains(&"nodes:write"), "{SCOPES:?}");
@@ -811,8 +908,13 @@ mod tests {
         );
     }
 
+    /// The identity tests' credential, granted everything this build asks for — anything less
+    /// is now sent through enrolment again, which is not what these tests are about.
     fn a_credential() -> Credential {
-        crate::identity::tests::a_credential()
+        Credential {
+            scopes: SCOPES.iter().map(|scope| scope.to_string()).collect(),
+            ..crate::identity::tests::a_credential()
+        }
     }
 
     /// A refused credential is dead — revoked, or from before zyris-protocol#43 — so recovery must
