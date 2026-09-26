@@ -19,11 +19,7 @@ tracing = { workspace = true }
 zyris = { workspace = true }
 zyris-attacca = { workspace = true }
 zyris-fs = { workspace = true }
-# `wayland`: on a wlroots compositor (Hyprland, Sway) enigo drives `wlr-virtual-pointer` before X11.
-# Without it the only Linux backend is XTEST, which in a Wayland session reaches Xwayland's pointer
-# and not the one on screen — every call succeeds and nothing moves. enigo declares the feature's
-# dependencies for non-macOS unix only, so Windows and macOS builds do not change.
-zyris-input = { workspace = true, features = ["wayland"] }
+zyris-input = { workspace = true }
 # For one constant: the prefix every promoted MCP capability is named with. `guarded.rs`'s audit
 # exemption keys on it, so the two must be the same string — and two copies of a string that must
 # agree is exactly the shape that fails quietly.
@@ -32,6 +28,16 @@ zyris-runtime = { path = "../zyris-runtime" }
 zyris-screen = { workspace = true }
 zyris-terminal = { workspace = true }
 zyris-transfer = { workspace = true }
+
+# `wayland`: on a wlroots compositor (Hyprland, Sway) enigo drives `wlr-virtual-pointer` before X11.
+# Without it the only Linux backend is XTEST, which in a Wayland session reaches Xwayland's pointer
+# and not the one on screen — every call succeeds and nothing moves.
+#
+# **Linux only, and it has to be.** `zyris-input` gates its call to enigo's `outputs()` on the
+# feature alone, and enigo has that method on Linux only, so turning the feature on for every
+# target breaks the Windows build.
+[target.'cfg(target_os = "linux")'.dependencies]
+zyris-input = { workspace = true, features = ["wayland"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
