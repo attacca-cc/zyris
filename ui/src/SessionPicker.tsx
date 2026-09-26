@@ -174,6 +174,9 @@ export function SessionPicker({
         </select>
       </label>
 
+      {view.agents.length === 1 && (
+        <p className="note muted">New sessions talk to {view.agents[0].name}.</p>
+      )}
       {view.agents.length > 1 && (
         <label className="note">
           Agent for a new session{" "}

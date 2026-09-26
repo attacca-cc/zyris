@@ -234,6 +234,15 @@ pub enum TurnEvent {
     Lost { reason: String, resubscribing: bool },
 }
 
+/// The agent a voice session is made with when `voice.json` names no other: the one written for
+/// the ear, attacca-cc/prompts `agents/voice.yml`. Matched by name, which that file marks as
+/// load-bearing.
+pub const VOICE_AGENT: &str = "Voice";
+
+fn voice_agent(agents: &[(String, String)]) -> Option<&(String, String)> {
+    agents.iter().find(|(_, name)| name == VOICE_AGENT)
+}
+
 /// One session's live feed: the subscription, the cursor it resumes from, and the filter and
 /// splitter that turn deltas into something sayable.
 ///
@@ -446,6 +455,10 @@ impl Feed {
 
     /// Everything the Conversation screen needs to choose a session, read off the account.
     ///
+    /// **Narrowed to the [`VOICE_AGENT`] when the account has one**: its sessions (and the current
+    /// one, whatever it is), and it alone as the agent a new session is made with. A session made
+    /// for typing is answered in tables and markdown, which is the wrong thing to read aloud.
+    ///
     /// **Each of the three is read on its own**, and one that is refused leaves the other two
     /// standing with a sentence saying what is missing. A credential is granted scopes one by
     /// one: a machine enrolled without `projects:read` still has sessions and agents to choose
@@ -472,11 +485,22 @@ impl Feed {
             keep("agents", error);
             Vec::new()
         });
+        let current = self.session_id();
+        let (agents, sessions) = match voice_agent(&agents).cloned() {
+            Some((voice, name)) => {
+                let sessions = sessions
+                    .into_iter()
+                    .filter(|s| s.agent.as_deref() == Some(voice.as_str()) || Some(&s.id) == current.as_ref())
+                    .collect();
+                (vec![(voice, name)], sessions)
+            }
+            None => (agents, sessions),
+        };
         Ok(SessionsView {
             projects,
             sessions,
             agents: agents.into_iter().map(|(id, name)| AgentEntry { id, name }).collect(),
-            current: self.session_id(),
+            current,
             problems,
         })
     }
@@ -649,6 +673,10 @@ impl Feed {
                 );
             }
             return found.map(|(id, _)| id.clone());
+        }
+        // Not an arbitrary pick among several: the one agent written for being read aloud.
+        if let Some((id, _)) = voice_agent(agents) {
+            return Some(id.clone());
         }
         match agents {
             [] => {
@@ -910,6 +938,20 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    /// Several agents are a choice this does not make — unless one of them is the Voice agent,
+    /// which is the one written for being read aloud. A name in the settings still wins.
+    #[test]
+    fn the_voice_agent_is_chosen_among_several_unless_another_is_named() {
+        let agents = |names: &[&str]| -> Vec<(String, String)> {
+            names.iter().map(|n| (format!("id-{n}"), n.to_string())).collect()
+        };
+        let several = agents(&["Main Agent", "Voice", "Worker"]);
+        assert_eq!(Feed::choose_agent(&several, None).as_deref(), Some("id-Voice"));
+        assert_eq!(Feed::choose_agent(&several, Some("Main Agent")).as_deref(), Some("id-Main Agent"));
+        assert_eq!(Feed::choose_agent(&agents(&["Main Agent", "Worker"]), None), None);
+        assert_eq!(Feed::choose_agent(&agents(&["Main Agent"]), None).as_deref(), Some("id-Main Agent"));
+    }
 
     /// What reached Attacca, in order. The ordering rule is decided on this and not on a
     /// timing: a test that waited and then looked would pass for an implementation that
