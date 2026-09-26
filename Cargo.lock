@@ -9082,7 +9082,7 @@ dependencies = [
 [[package]]
 name = "zyris"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "zyris-caps",
  "zyris-core",
@@ -9120,7 +9120,7 @@ dependencies = [
 [[package]]
 name = "zyris-attacca"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -9143,7 +9143,7 @@ dependencies = [
 [[package]]
 name = "zyris-caps"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -9154,7 +9154,7 @@ dependencies = [
 [[package]]
 name = "zyris-core"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9177,7 +9177,7 @@ dependencies = [
 [[package]]
 name = "zyris-fs"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -9189,7 +9189,7 @@ dependencies = [
 [[package]]
 name = "zyris-input"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "enigo",
  "tokio",
@@ -9200,7 +9200,7 @@ dependencies = [
 [[package]]
 name = "zyris-macros"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9224,7 +9224,7 @@ dependencies = [
 [[package]]
 name = "zyris-p2p"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9242,7 +9242,7 @@ dependencies = [
 [[package]]
 name = "zyris-proto"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -9273,7 +9273,7 @@ dependencies = [
 [[package]]
 name = "zyris-screen"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "image",
  "libwayshot-xcap",
@@ -9287,7 +9287,7 @@ dependencies = [
 [[package]]
 name = "zyris-terminal"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -9325,7 +9325,7 @@ dependencies = [
 [[package]]
 name = "zyris-transfer"
 version = "0.2.0"
-source = "git+https://github.com/attacca-cc/zyris-protocol?rev=eefbde4ce11635828eea871e79a685dedc0ea917#eefbde4ce11635828eea871e79a685dedc0ea917"
+source = "git+https://github.com/attacca-cc/zyris-protocol?rev=b1a68282e475e10d08be367184bf7dacf74b39a3#b1a68282e475e10d08be367184bf7dacf74b39a3"
 dependencies = [
  "async-trait",
  "bytes",

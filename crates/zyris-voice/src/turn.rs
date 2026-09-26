@@ -91,8 +91,14 @@ pub trait TurnApi: Send + Sync + 'static {
         after: Option<i64>,
     ) -> zyris::Result<zyris::Streaming<ZTurnStatus, ZTurnFrame>>;
 
-    /// Post a message, starting a turn.
-    async fn send_message(&self, session_id: String, message: String) -> zyris::Result<()>;
+    /// Post a message, starting a turn — answered by `agent` when it is named, and by the
+    /// session's own agent otherwise.
+    async fn send_message(
+        &self,
+        session_id: String,
+        message: String,
+        agent: Option<String>,
+    ) -> zyris::Result<()>;
 
     /// Stop the turn that is running, if one is.
     ///
@@ -138,14 +144,41 @@ impl TurnApi for AttaccaApiClient {
         AttaccaApi::turn_events(self, session_id, after).await
     }
 
-    async fn send_message(&self, session_id: String, message: String) -> zyris::Result<()> {
+    async fn send_message(
+        &self,
+        session_id: String,
+        message: String,
+        agent: Option<String>,
+    ) -> zyris::Result<()> {
+        if let Some(agent) = agent {
+            let named = zyris_attacca::ZNewMessage {
+                session_id: session_id.clone(),
+                message: message.clone(),
+                agent_id: Some(agent),
+            };
+            match AttaccaApi::send_message_with(self, named).await {
+                // A deployment from before zyris-protocol#47 has no such tool. The message
+                // still goes, answered by the session's own agent, rather than not at all.
+                Err(error)
+                    if matches!(
+                        error.code,
+                        ErrorCode::MethodNotFound
+                            | ErrorCode::CapabilityNotAnnounced
+                            | ErrorCode::Unsupported
+                    ) =>
+                {
+                    tracing::warn!(%error, "this Attacca cannot name the agent that answers; the session's own will");
+                }
+                sent => return sent,
+            }
+        }
         // No attachments: this node speaks, it does not upload. `Datum` is the protocol's shape
         // for a file riding along with a message and nothing in the voice path produces one.
         AttaccaApi::send_message(self, session_id, message, Vec::new()).await
     }
 
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()> {
-        AttaccaApi::cancel_turn(self, session_id).await
+        AttaccaApi::cancel_turn(self, session_id, None).await
     }
 
     async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>> {
@@ -272,6 +305,10 @@ pub struct Feed {
     /// connected yet would be answering a question nobody asked; this is set when the answer
     /// is *your account has none* or *your account has several and I will not choose*.
     agent_trouble: Mutex<Option<Vec<String>>>,
+    /// The agent every message is answered by, whichever session it goes to: the one named in
+    /// the settings, else [`VOICE_AGENT`]. `None` until the first message looks it up, and
+    /// `Some(None)` on an account with neither, where the session's own agent answers.
+    answers_as: Mutex<Option<Option<String>>>,
 }
 
 /// Everything about the feed that a reconnect replaces, under one lock so that a generation and
@@ -342,6 +379,7 @@ impl Feed {
             events: broadcast::channel(EVENT_CAPACITY).0,
             state: Mutex::new(State { api: None, generation: 0, live: false, cursor: None }),
             agent_trouble: Mutex::new(None),
+            answers_as: Mutex::new(None),
         })
     }
 
@@ -610,7 +648,25 @@ impl Feed {
             // session and the cost of being right is one branch.
             return Err(WireError::new(ErrorCode::ConnectionLost, "there is no session"));
         };
-        api.send_message(session, message.into()).await
+        let agent = self.answering_agent(api.as_ref()).await;
+        api.send_message(session, message.into(), agent).await
+    }
+
+    /// Which agent answers what is said, looked up once. **Whichever session a person picked**:
+    /// one made with a typing agent is answered in markdown and reports, reasoning for a minute
+    /// in silence first, and none of that should be read aloud.
+    async fn answering_agent(&self, api: &dyn TurnApi) -> Option<String> {
+        if let Some(known) = self.answers_as.lock().expect("not poisoned").clone() {
+            return known;
+        }
+        let agents = match api.list_agents().await {
+            Ok(agents) => agents,
+            // Asked again next time; this message goes to the session's own agent.
+            Err(_) => return None,
+        };
+        let chosen = Feed::choose_agent(&agents, self.agent.as_deref());
+        *self.answers_as.lock().expect("not poisoned") = Some(chosen.clone());
+        chosen
     }
 
     /// Stop the turn that is running.
@@ -844,6 +900,8 @@ impl Feed {
         generation: u64,
     ) -> bool {
         match frame {
+            // A stop, followed by the `Status` that ends the turn; that is where this feed acts.
+            ZTurnFrame::Cancelled => true,
             ZTurnFrame::Delta { kind, text } => {
                 // **The one place the protocol's two kinds become the filter's two kinds**, and
                 // it is a `match` rather than a cast so that a third arm upstream is a compile
@@ -1005,7 +1063,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(super) enum Call {
         Subscribe { after: Option<i64> },
-        Send { message: String },
+        Send { message: String, agent: Option<String> },
         Cancel,
         Agents,
         Create { agent: String, project: Option<String> },
@@ -1180,8 +1238,13 @@ mod tests {
             Ok(zyris::Streaming::new(head, items))
         }
 
-        async fn send_message(&self, _session_id: String, message: String) -> zyris::Result<()> {
-            self.script.lock().unwrap().calls.push(Call::Send { message });
+        async fn send_message(
+            &self,
+            _session_id: String,
+            message: String,
+            agent: Option<String>,
+        ) -> zyris::Result<()> {
+            self.script.lock().unwrap().calls.push(Call::Send { message, agent });
             Ok(())
         }
 
@@ -1203,6 +1266,7 @@ mod tests {
         Ok(ZTurnFrame::Event {
             cursor,
             event: ZSessionEvent {
+                id: None,
                 seq: cursor,
                 cursor,
                 kind: "assistant_message".to_string(),
@@ -1250,9 +1314,33 @@ mod tests {
             api.calls(),
             vec![
                 Call::Subscribe { after: None },
-                Call::Send { message: "hello".to_string() }
+                Call::Agents,
+                Call::Send { message: "hello".to_string(), agent: None }
             ],
             "the subscription has to be open before the message that starts the turn"
+        );
+    }
+
+    /// Whichever session is current, what is said is answered by the Voice agent — looked up
+    /// once, not per message.
+    #[tokio::test]
+    async fn every_message_is_answered_by_the_voice_agent() {
+        let api = Fake::new().with_agents(&[("a-main", "Main Agent"), ("a-voice", "Voice")]);
+        let feed = Feed::new("session-made-with-main");
+
+        feed.attach(api.clone()).await;
+        within("the first message", feed.say("hello")).await.expect("posted");
+        within("the second message", feed.say("again")).await.expect("posted");
+
+        let calls = api.calls();
+        assert_eq!(calls.iter().filter(|c| matches!(c, Call::Agents)).count(), 1);
+        let sent: Vec<_> = calls.into_iter().filter(|c| matches!(c, Call::Send { .. })).collect();
+        assert_eq!(
+            sent,
+            vec![
+                Call::Send { message: "hello".into(), agent: Some("a-voice".into()) },
+                Call::Send { message: "again".into(), agent: Some("a-voice".into()) },
+            ]
         );
     }
 
@@ -1307,6 +1395,7 @@ mod tests {
             Ok(ZTurnFrame::Event {
                 cursor,
                 event: ZSessionEvent {
+                    id: None,
                     seq: cursor,
                     cursor,
                     kind: "tool_call".to_string(),

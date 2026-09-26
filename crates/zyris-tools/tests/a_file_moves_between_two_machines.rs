@@ -49,7 +49,8 @@ use zyris::{
 };
 use zyris_attacca::{
     AttaccaApi, AttaccaApiServer, ZAgent, ZHistoryQuery, ZJob, ZJobFilter, ZJobUpdate, ZMe,
-    ZNewAgent, ZNewJob, ZNewProject, ZNewSession, ZNewWork, ZPeerAddr, ZPeerEntry,
+    ZDelivered, ZNewAgent, ZNewJob, ZNewMessage, ZNewProject, ZNewSession, ZNewWork, ZPeerAddr,
+    ZPeerEntry,
     ZProject, ZProjectUpdate, ZSession, ZSessionEvent, ZSessionFilter, ZTurnFrame, ZTurnStatus,
     ZUsage, ZWork, ZWorkFilter, ZWorkTasks, ZWorkUpdate,
 };
@@ -688,7 +689,10 @@ impl AttaccaApi for Rendezvous {
     async fn send_message(&self, _s: String, _m: String, _d: Vec<Datum>) -> Result<()> {
         unused()
     }
-    async fn cancel_turn(&self, _session_id: String) -> Result<()> {
+    async fn send_message_with(&self, _message: ZNewMessage) -> Result<()> {
+        unused()
+    }
+    async fn cancel_turn(&self, _session_id: String, _delivered: Option<ZDelivered>) -> Result<()> {
         unused()
     }
     async fn list_jobs(&self, _filter: ZJobFilter) -> Result<Vec<ZJob>> {
