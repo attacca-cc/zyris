@@ -229,7 +229,8 @@ function heardLine(event: VoiceEvent): string {
 }
 
 // How loud answers are read. Moves freely under the finger and is sent once it is let go, so a
-// drag is one setting rather than forty.
+// drag is one setting rather than forty. From 10% rather than 0: drawn too small, one click saved
+// 0 and every answer went silent, which reads as the voice being broken rather than turned down.
 function VolumeSlider({
   volume,
   disabled,
@@ -245,12 +246,13 @@ function VolumeSlider({
     if (shown !== Math.round(volume * 100)) onCommit(shown / 100);
   };
   return (
-    <label className="note">
-      How loud answers are read — {shown}%{" "}
+    <label className="note volume">
+      How loud answers are read — {shown}%
       <input
         type="range"
+        className="volume-slider"
         aria-label="How loud answers are read"
-        min={0}
+        min={10}
         max={200}
         step={5}
         value={shown}

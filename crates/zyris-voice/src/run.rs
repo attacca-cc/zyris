@@ -198,7 +198,7 @@ pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
 
 /// The volume `settings` asks for, clamped the way the voice will clamp it.
 fn volume(settings: &Settings) -> f32 {
-    settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 2.0)
+    settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.1, 2.0)
 }
 
 /// The rate `settings` asks for, clamped the way the voice will clamp it.

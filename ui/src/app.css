@@ -375,5 +375,10 @@ section { margin-bottom: 2rem; }
   margin-bottom: 1rem;
 }
 .session-picker .picker { max-width: 22rem; }
+
+/* The volume slider on the Voice tab: its own line, as wide as the dropdowns above it, so it can
+   be aimed at rather than clicked to one end by accident. */
+.volume { display: block; }
+.volume-slider { accent-color: var(--fg); display: block; margin-top: 0.4rem; width: 100%; }
 .session-picker > p { flex-basis: 100%; margin: 0; }
 .session-actions { display: flex; gap: 0.5rem; }
