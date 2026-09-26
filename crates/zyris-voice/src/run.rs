@@ -108,6 +108,35 @@ pub struct Settings {
     pub speak_on: Option<String>,
 }
 
+/// What `Speaking::run` traces about a turn, for a run with no speaker: the agent's text, the
+/// start of an answer, and a failed run. Without it a person whose speaker would not open saw
+/// their own words on the Conversation screen and nothing after them.
+async fn show_without_speaking(
+    mut turns: broadcast::Receiver<crate::turn::TurnEvent>,
+    traces: broadcast::Sender<crate::Trace>,
+    events: broadcast::Sender<VoiceEvent>,
+) {
+    use crate::turn::TurnEvent;
+    loop {
+        match turns.recv().await {
+            Ok(TurnEvent::Shown { kind, text }) => {
+                let _ = traces.send(crate::Trace::Delta { kind: format!("{kind:?}"), text });
+            }
+            Ok(TurnEvent::Running(true)) => {
+                let _ = traces.send(crate::Trace::Answering);
+            }
+            Ok(TurnEvent::Event { event, .. }) if event.kind == "error" => {
+                let said = event.payload.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                let reason = format!("The agent did not answer: {said}");
+                let _ = traces.send(crate::Trace::Failed { reason: reason.clone() });
+                let _ = events.send(VoiceEvent::Failed { reason });
+            }
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
 fn compute_view(settings: &Settings) -> crate::view::ComputeView {
     use crate::view::ComputeOption;
@@ -740,6 +769,15 @@ impl Engine {
             }
             Err(reason) => {
                 tracing::info!(%reason, "nothing will be read aloud on this run");
+                // The answer is still written on the Conversation screen, which reads it off the
+                // trace that `Speaking` would otherwise have fed.
+                if let Some(feed) = &self.feed {
+                    tasks.push(tokio::spawn(show_without_speaking(
+                        feed.events(),
+                        self.traces.clone(),
+                        self.events.clone(),
+                    )));
+                }
                 (None, None)
             }
         };

@@ -603,6 +603,14 @@ impl From<cpal::DeviceDirection> for Direction {
 /// An error here is the host being unreachable, not an empty list: a machine with no microphone
 /// answers `Ok(vec![])`, which a window renders differently from "the sound server is not
 /// running". This project has had to separate those twice before.
+/// This program's own PipeWire stream, which PipeWire lists beside the real devices while it is
+/// open. Opening it as a microphone or a speaker loops Zyris into itself, and as a speaker it
+/// cannot play at all — somebody picked it on 2026-09-27 and heard no answers.
+///
+/// ponytail: matched by the node name PipeWire gives this binary; other programs' streams are
+/// still listed, since recording one (a browser's call, say) can be what somebody wants.
+pub const OWN_STREAM: &str = "pipewire:zyris";
+
 pub fn devices() -> Result<Vec<InputDevice>, DeviceProblem> {
     let host = cpal::default_host();
     let default = host.default_input_device().and_then(|device| device.id().ok());
@@ -614,6 +622,9 @@ pub fn devices() -> Result<Vec<InputDevice>, DeviceProblem> {
             // A device that will not say what it is has been unplugged between the enumeration
             // and now. Dropping it is right: it is absent, and there is nothing to tell anybody.
             let id = device.id().ok()?;
+            if id.to_string() == OWN_STREAM {
+                return None;
+            }
             let description = device.description().ok();
             Some(InputDevice {
                 is_default: Some(&id) == default.as_ref(),

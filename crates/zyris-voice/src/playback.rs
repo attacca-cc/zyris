@@ -361,6 +361,24 @@ impl Speaker {
     }
 }
 
+/// [`classify`], in a speaker's words where the microphone's would be wrong: "this device cannot
+/// record" was what a speaker that cannot play said.
+fn classify_output(error: &cpal::Error) -> DeviceProblem {
+    let detail = error.message().unwrap_or_default();
+    let say = |sentence: &str| {
+        if detail.is_empty() { sentence.to_owned() } else { format!("{sentence} ({detail})") }
+    };
+    match error.kind() {
+        cpal::ErrorKind::UnsupportedOperation => {
+            DeviceProblem::new(Recovery::Stop, say("this device cannot play sound"))
+        }
+        cpal::ErrorKind::UnsupportedConfig => {
+            DeviceProblem::new(Recovery::Stop, say("this speaker does not take a format Zyris can play"))
+        }
+        _ => classify(error),
+    }
+}
+
 /// Everything this machine could speak through, default and true outputs first.
 ///
 /// [`crate::capture::devices`]'s opposite number, with the same rule: an error is the host being
@@ -372,9 +390,12 @@ pub fn devices() -> Result<Vec<crate::view::InputDevice>, DeviceProblem> {
 
     let mut devices: Vec<crate::view::InputDevice> = host
         .output_devices()
-        .map_err(|error| classify(&error))?
+        .map_err(|error| classify_output(&error))?
         .filter_map(|device| {
             let id = device.id().ok()?;
+            if id.to_string() == crate::capture::OWN_STREAM {
+                return None;
+            }
             let description = device.description().ok();
             Some(crate::view::InputDevice {
                 is_default: Some(&id) == default.as_ref(),
@@ -444,7 +465,7 @@ impl Playback {
         // The probe that decides "absent" as well as the sample format to ask for. The same one
         // question, one answer rule `capture::open` follows — `default_output_device` answering
         // `Some` is not evidence that anything can be opened.
-        let native = device.default_output_config().map_err(|error| classify(&error))?;
+        let native = device.default_output_config().map_err(|error| classify_output(&error))?;
         let name = device.to_string();
         let rate = crate::tts::SAMPLE_RATE;
         let frame = render_frame(rate);
@@ -485,7 +506,7 @@ impl Playback {
         };
 
         // Output streams come back stopped.
-        stream.play().map_err(|error| classify(&error))?;
+        stream.play().map_err(|error| classify_output(&error))?;
 
         Ok((
             Playback {
@@ -529,12 +550,12 @@ impl Playback {
 
     /// Stop the device without dropping the handle. Not every backend can.
     pub fn pause(&self) -> Result<(), DeviceProblem> {
-        self.stream.pause().map_err(|error| classify(&error))
+        self.stream.pause().map_err(|error| classify_output(&error))
     }
 
     /// Start again after [`Self::pause`].
     pub fn resume(&self) -> Result<(), DeviceProblem> {
-        self.stream.play().map_err(|error| classify(&error))
+        self.stream.play().map_err(|error| classify_output(&error))
     }
 }
 
@@ -693,7 +714,7 @@ fn start(
             ));
         }
     }
-    .map_err(|error| classify(&error))
+    .map_err(|error| classify_output(&error))
 }
 
 #[cfg(test)]
