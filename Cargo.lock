@@ -9347,6 +9347,7 @@ dependencies = [
  "unicode-normalization",
  "webrtc-audio-processing",
  "whisper-rs",
+ "whisper-rs-sys",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "zyris",

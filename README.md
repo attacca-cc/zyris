@@ -637,6 +637,18 @@ the lines beside it put AVX2 back. A release with the voice refuses to build wit
 
 Neither half has been tried yet on a machine without a usable GPU.
 
+**Where each model runs is chosen on the Voice tab**, under *Where the models run*, and kept as
+`"transcribeOn"` and `"speakOn"` in `voice.json`:
+
+- Transcription lists the processor and every GPU whisper.cpp can use, integrated ones included,
+  in whisper's own order (`cpu`, `gpu:0`, `gpu:1`, …). A choice is kept by position, so adding a
+  card can move it.
+- Reading aloud offers the processor or "the GPU": ONNX Runtime 1.22's WebGPU provider takes no
+  adapter option, so on a machine with two cards the driver's high-performance one is used.
+
+Nothing is listed that the build cannot use; a build without the GPU features offers the
+processor alone. Changing either reloads that model.
+
 ```bash
 LIBONNXRUNTIME_NO_PKG_CONFIG=1 cargo run --release --features custom-protocol,gpu -p zyris-app
 ```

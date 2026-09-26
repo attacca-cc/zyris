@@ -121,12 +121,104 @@ pub const MODELS: [Choosable; 3] = [
 /// arrive at the agent as if they had been typed (zyris#18). A processor-only build keeps Base,
 /// where Large is ten seconds a sentence.
 pub fn choosable(id: Option<&str>) -> &'static Choosable {
+    choosable_on(id, default_device())
+}
+
+/// [`choosable`], for whisper running on `device` rather than wherever it runs by default.
+pub fn choosable_on(id: Option<&str>, device: Device) -> &'static Choosable {
     match id {
         Some(id) => MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0]),
-        None => unchosen(cfg!(feature = "gpu-stt"), |model| {
+        None => unchosen(device.is_gpu(), |model| {
             matches!(cached_state(model), ModelState::Ready { .. })
         }),
     }
+}
+
+/// Where whisper runs: the processor, or one of the GPUs [`devices`] lists, by whisper.cpp's own
+/// count of them (`gpu_device`: GPUs and integrated GPUs, in ggml's device order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Device {
+    Cpu,
+    Gpu(u32),
+}
+
+impl Device {
+    /// How it is written in `voice.json` and on the wire: `cpu`, `gpu:0`, `gpu:1`.
+    pub fn id(self) -> String {
+        match self {
+            Device::Cpu => "cpu".to_string(),
+            Device::Gpu(index) => format!("gpu:{index}"),
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Device> {
+        match id {
+            "cpu" => Some(Device::Cpu),
+            _ => id.strip_prefix("gpu:")?.parse().ok().map(Device::Gpu),
+        }
+    }
+
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Device::Gpu(_))
+    }
+}
+
+/// One place whisper can run, as the Voice tab lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub device: Device,
+    /// What ggml calls it: the processor's brand string, or the GPU's name from its driver.
+    pub name: String,
+    /// A GPU that shares the processor's memory — usually the slower of two.
+    pub integrated: bool,
+}
+
+/// Every place whisper can run on this machine: the processor, then each GPU in the order
+/// whisper.cpp counts them. A build without `gpu-stt` lists the processor alone.
+///
+/// ponytail: a GPU is remembered by its position, so plugging in a second card can move a
+/// choice onto a different one; key it by name as well if that turns out to happen.
+pub fn devices() -> Vec<DeviceInfo> {
+    use whisper_rs_sys as ggml;
+    let text = |raw: *const std::ffi::c_char| {
+        if raw.is_null() {
+            String::new()
+        } else {
+            // SAFETY: ggml hands back a NUL-terminated string it owns for the process lifetime.
+            unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().trim().to_string()
+        }
+    };
+    let mut cpu = None;
+    let mut gpus = Vec::new();
+    // SAFETY: the device registry is built once, on first use, and only read here.
+    for i in 0..unsafe { ggml::ggml_backend_dev_count() } {
+        let dev = unsafe { ggml::ggml_backend_dev_get(i) };
+        let kind = unsafe { ggml::ggml_backend_dev_type(dev) };
+        let name = text(unsafe { ggml::ggml_backend_dev_description(dev) });
+        if kind == ggml::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_CPU {
+            cpu.get_or_insert(name);
+        } else if kind == ggml::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_GPU
+            || kind == ggml::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU
+        {
+            gpus.push(DeviceInfo {
+                device: Device::Gpu(gpus.len() as u32),
+                name,
+                integrated: kind == ggml::ggml_backend_dev_type_GGML_BACKEND_DEVICE_TYPE_IGPU,
+            });
+        }
+    }
+    let processor = DeviceInfo {
+        device: Device::Cpu,
+        name: cpu.filter(|n| !n.is_empty()).unwrap_or_else(|| "Processor".to_string()),
+        integrated: false,
+    };
+    std::iter::once(processor).chain(gpus).collect()
+}
+
+/// Where whisper runs when nobody has said: the first GPU [`devices`] lists, else the processor.
+pub fn default_device() -> Device {
+    let first_gpu = devices().into_iter().find(|d| d.device.is_gpu());
+    first_gpu.map_or(Device::Cpu, |d| d.device)
 }
 
 fn unchosen(gpu: bool, on_disk: impl Fn(&Model) -> bool) -> &'static Choosable {
@@ -444,18 +536,28 @@ impl Stt {
     /// writes a screenful of model parameters to stderr on every load, which in `--headless`
     /// is the process log.
     pub fn load(path: &Path) -> Result<Stt, Fault> {
+        Stt::load_on(path, default_device())
+    }
+
+    /// [`Stt::load`], on `device`. A GPU index past the end of [`devices`] is whisper.cpp's to
+    /// handle, and it runs on the processor.
+    pub fn load_on(path: &Path, device: Device) -> Result<Stt, Fault> {
         static HOOKS: std::sync::Once = std::sync::Once::new();
         HOOKS.call_once(whisper_rs::install_logging_hooks);
 
         let mut parameters = whisper_rs::WhisperContextParameters::default();
-        // The GPU only in a build with the `gpu` feature. whisper.cpp falls back to the CPU on
-        // a machine where Vulkan finds no device.
-        parameters.use_gpu = cfg!(feature = "gpu-stt");
+        match device {
+            Device::Cpu => parameters.use_gpu = false,
+            Device::Gpu(index) => {
+                parameters.use_gpu = true;
+                parameters.gpu_device = index as std::ffi::c_int;
+            }
+        }
 
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
         // Base has six encoder layers; Small twelve, Large v3 Turbo thirty-two.
-        let short_window = !cfg!(feature = "gpu-stt") && context.model_n_audio_layer() <= 6;
+        let short_window = !device.is_gpu() && context.model_n_audio_layer() <= 6;
         let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()), short_window };
         // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
         let first = stt.warm_state()?;
@@ -604,6 +706,16 @@ mod tests {
     use super::*;
 
     /// A setting written by a later version, or by hand, must not stop listening from starting.
+    /// The id is what voice.json keeps, so it has to read back as the same place.
+    #[test]
+    fn a_device_reads_back_from_its_id() {
+        for device in [Device::Cpu, Device::Gpu(0), Device::Gpu(3)] {
+            assert_eq!(Device::from_id(&device.id()), Some(device));
+        }
+        assert_eq!(Device::from_id("gpu"), None, "the reader's \"any GPU\" is not a whisper device");
+        assert_eq!(Device::from_id("gpu:x"), None);
+    }
+
     #[test]
     fn a_model_id_this_build_does_not_offer_falls_back_to_base() {
         assert_eq!(choosable(Some("small")).id, "small");

@@ -99,6 +99,63 @@ pub struct Settings {
     /// [`DEFAULT_SPEAKING_RATE`]. Clamped to the range [`crate::tts::Tts::set_speed`] allows.
     #[serde(default)]
     pub speaking_rate: Option<f32>,
+    /// Where speech is transcribed: `cpu` or `gpu:N`, as [`stt::Device::id`] writes it. `None`
+    /// is [`stt::default_device`].
+    #[serde(default)]
+    pub transcribe_on: Option<String>,
+    /// Where answers are read: `cpu` or `gpu`. `None` is the GPU in a build that has one.
+    #[serde(default)]
+    pub speak_on: Option<String>,
+}
+
+/// Where the models can run and where these settings put them, as the Voice tab lists them.
+fn compute_view(settings: &Settings) -> crate::view::ComputeView {
+    use crate::view::ComputeOption;
+    let devices = stt::devices();
+    let processor = devices.first().map_or("Processor".to_string(), |cpu| cpu.name.clone());
+    let transcribe = devices
+        .iter()
+        .map(|d| ComputeOption {
+            id: d.device.id(),
+            name: match d.device {
+                stt::Device::Cpu => format!("Processor — {}", d.name),
+                stt::Device::Gpu(index) => format!(
+                    "GPU {} — {}{}",
+                    index + 1,
+                    d.name,
+                    if d.integrated { " (integrated)" } else { "" }
+                ),
+            },
+        })
+        .collect();
+    let mut speak = vec![ComputeOption { id: "cpu".into(), name: format!("Processor — {processor}") }];
+    if crate::tts::GPU_BUILT_IN {
+        speak.push(ComputeOption {
+            id: "gpu".into(),
+            name: "GPU — whichever the graphics driver calls the fastest".into(),
+        });
+    }
+    crate::view::ComputeView {
+        transcribe,
+        transcribe_on: transcribe_on(settings).id(),
+        speak,
+        speak_on: if speak_on_gpu(settings) { "gpu" } else { "cpu" }.into(),
+    }
+}
+
+/// Where this run transcribes.
+fn transcribe_on(settings: &Settings) -> stt::Device {
+    settings.transcribe_on.as_deref().and_then(stt::Device::from_id).unwrap_or_else(stt::default_device)
+}
+
+/// Whether this run reads answers on the GPU.
+fn speak_on_gpu(settings: &Settings) -> bool {
+    crate::tts::GPU_BUILT_IN && settings.speak_on.as_deref() != Some("cpu")
+}
+
+/// The speech model these settings choose, for the device they transcribe on.
+fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
+    stt::choosable_on(settings.speech_model.as_deref(), transcribe_on(settings))
 }
 
 /// How fast answers are read when nobody has said. Faster than Supertonic's own 1.05, which is
@@ -146,9 +203,9 @@ pub struct Engine {
     shown: std::sync::Mutex<Settings>,
     /// Whisper models already in memory, by path. Reopening a microphone or a speaker used to
     /// load and warm them again, which is seconds per model and most of a restart.
-    loaded: std::sync::Mutex<Vec<(PathBuf, Arc<stt::Stt>)>>,
-    /// The voice, loaded once: it is the same directory and the same voice on every start.
-    voice: std::sync::Mutex<Option<Arc<std::sync::Mutex<crate::tts::Tts>>>>,
+    loaded: std::sync::Mutex<Vec<(PathBuf, stt::Device, Arc<stt::Stt>)>>,
+    /// The voice, loaded once per place it runs: the same directory and voice on every start.
+    voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
     takes_checked: std::sync::atomic::AtomicBool,
 }
@@ -322,9 +379,10 @@ impl Engine {
             },
             speaker: settings.speaker.clone(),
             speaking_rate: speaking_rate(settings),
-            model: model_view(stt::state(&stt::choosable(settings.speech_model.as_deref()).model)),
+            compute: compute_view(settings),
+            model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
-                let chosen = stt::choosable(settings.speech_model.as_deref()).id;
+                let chosen = chosen_model(settings).id;
                 stt::MODELS
                     .iter()
                     .map(|choosable| SpeechModelView {
@@ -424,9 +482,23 @@ impl Engine {
         let rate = speaking_rate(&live.settings);
         live.settings.speaking_rate = Some(rate);
         self.store(&live.settings);
-        if let Some(tts) = lock(&self.voice).as_ref() {
+        if let Some((_, tts)) = lock(&self.voice).as_ref() {
             lock(tts).set_speed(rate);
         }
+    }
+
+    /// Choose where speech is transcribed (`cpu`, `gpu:N`) and answers are read (`cpu`, `gpu`),
+    /// and start listening again there if listening is on. `None` leaves that half as it is.
+    pub async fn choose_compute(&self, transcribe: Option<String>, speak: Option<String>) {
+        let mut live = self.live.lock().await;
+        if let Some(id) = transcribe.filter(|id| stt::Device::from_id(id).is_some()) {
+            live.settings.transcribe_on = Some(id);
+        }
+        if let Some(id) = speak.filter(|id| id == "cpu" || id == "gpu") {
+            live.settings.speak_on = Some(id);
+        }
+        self.store(&live.settings);
+        self.restart_if_running(&mut live).await;
     }
 
     /// Choose the speech model, and start listening again on it if listening is on.
@@ -550,7 +622,7 @@ impl Engine {
         // Only the model in use is held open by a running session.
         let in_use = {
             let live = self.live.lock().await;
-            stt::choosable(live.settings.speech_model.as_deref()).id == id
+            chosen_model(&live.settings).id == id
         };
         if in_use {
             self.set_listening(false).await;
@@ -602,7 +674,8 @@ impl Engine {
     async fn begin(&self, settings: &Settings) -> Result<(Running, String), String> {
         let choice = &settings.device;
         let typed_phrase = settings.wake_phrase.clone();
-        let path = match stt::state(&stt::choosable(settings.speech_model.as_deref()).model) {
+        let device = transcribe_on(settings);
+        let path = match stt::state(&chosen_model(settings).model) {
             stt::ModelState::Ready { path, .. } => path,
             // Everything else is the screen's business: it renders the same `ModelState` and has
             // a button for the one case a button fixes. The sentence here is about listening.
@@ -610,10 +683,10 @@ impl Engine {
         };
 
         let apm = Apm::new().map_err(|fault| fault.to_string())?;
-        let stt = self.stt_at(&path).await?;
+        let stt = self.stt_at(&path, device).await?;
         let checker = self.wake_checker(settings, &stt).await;
         // Only what this start uses stays in memory: a model chosen away from is let go.
-        lock(&self.loaded).retain(|(_, kept)| Arc::ptr_eq(kept, &stt) || Arc::ptr_eq(kept, &checker));
+        lock(&self.loaded).retain(|(_, _, kept)| Arc::ptr_eq(kept, &stt) || Arc::ptr_eq(kept, &checker));
         let phrase = enrolled_phrase(typed_phrase);
         if let Some(phrase) = &phrase
             && !self.takes_checked.swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -682,27 +755,29 @@ impl Engine {
     /// model is kept for what matters: the request.
     async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>) -> Arc<stt::Stt> {
         let named = std::env::var_os(stt::MODEL_ENV).is_some_and(|n| !n.is_empty());
-        if named || stt::choosable(settings.speech_model.as_deref()).model == stt::BASE {
+        if named || chosen_model(settings).model == stt::BASE {
             return chosen.clone();
         }
         let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else {
             return chosen.clone();
         };
-        self.stt_at(&path).await.unwrap_or_else(|_| chosen.clone())
+        self.stt_at(&path, transcribe_on(settings)).await.unwrap_or_else(|_| chosen.clone())
     }
 
     /// The whisper at `path`, loaded once and kept for the next start.
-    async fn stt_at(&self, path: &Path) -> Result<Arc<stt::Stt>, String> {
-        if let Some((_, stt)) = lock(&self.loaded).iter().find(|(at, _)| at == path) {
+    async fn stt_at(&self, path: &Path, device: stt::Device) -> Result<Arc<stt::Stt>, String> {
+        if let Some((_, _, stt)) =
+            lock(&self.loaded).iter().find(|(at, on, _)| at == path && *on == device)
+        {
             return Ok(stt.clone());
         }
         let at = path.to_path_buf();
-        let stt = tokio::task::spawn_blocking(move || stt::Stt::load(&at))
+        let stt = tokio::task::spawn_blocking(move || stt::Stt::load_on(&at, device))
             .await
             .map_err(|_| "loading the speech model stopped before it finished".to_string())?
             .map_err(|fault| fault.to_string())?;
         let stt = Arc::new(stt);
-        lock(&self.loaded).push((path.to_path_buf(), stt.clone()));
+        lock(&self.loaded).push((path.to_path_buf(), device, stt.clone()));
         Ok(stt)
     }
 
@@ -731,17 +806,18 @@ impl Engine {
             crate::tts::VoiceState::Unreadable { detail, .. } => return Err(detail),
             crate::tts::VoiceState::Nowhere { reason } => return Err(reason),
         };
-        let cached = lock(&self.voice).clone();
+        let gpu = speak_on_gpu(settings);
+        let cached = lock(&self.voice).clone().filter(|(on, _)| *on == gpu).map(|(_, tts)| tts);
         let tts = match cached {
             Some(tts) => tts,
             None => {
                 let voice = crate::tts::DEFAULT_VOICE;
-                let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load(&dir, voice))
+                let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load_on(&dir, voice, gpu))
                     .await
                     .map_err(|_| "loading the voice stopped before it finished".to_string())?
                     .map_err(|fault| fault.to_string())?;
                 let tts = Arc::new(std::sync::Mutex::new(tts));
-                *lock(&self.voice) = Some(tts.clone());
+                *lock(&self.voice) = Some((gpu, tts.clone()));
                 tts
             }
         };

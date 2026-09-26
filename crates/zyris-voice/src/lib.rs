@@ -524,6 +524,20 @@ impl Voice {
         self.look().await
     }
 
+    /// Choose where speech is transcribed and where answers are read; `None` leaves one alone.
+    pub async fn choose_compute(
+        &self,
+        transcribe: Option<String>,
+        speak: Option<String>,
+    ) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_compute(transcribe.clone(), speak.clone()).await;
+        }
+        let _ = (transcribe, speak);
+        self.look().await
+    }
+
     /// Choose how fast answers are read, now and at the next launch.
     pub async fn choose_speaking_rate(&self, rate: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

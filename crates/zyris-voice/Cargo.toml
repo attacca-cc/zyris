@@ -42,6 +42,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.whisper-rs-sys]
+workspace = true
+optional = true
+
 # Speech out: Supertonic 3 through ONNX Runtime. The feature choice and what it costs are argued
 # in the root manifest, where the version is declared.
 [dependencies.ort]
@@ -169,6 +173,7 @@ voice = [
     "dep:rubato",
     "dep:earshot",
     "dep:whisper-rs",
+    "dep:whisper-rs-sys",
     "dep:ort",
     "dep:unicode-normalization",
     "dep:directories",

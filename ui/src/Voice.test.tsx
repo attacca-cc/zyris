@@ -75,6 +75,19 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       },
       speaker: over.speaker ?? { kind: "default" },
       speakingRate: over.speakingRate ?? 1.25,
+      compute: over.compute ?? {
+        transcribe: [
+          { id: "cpu", name: "Processor — Intel Core i5" },
+          { id: "gpu:0", name: "GPU 1 — NVIDIA GeForce RTX 3050" },
+          { id: "gpu:1", name: "GPU 2 — AMD Radeon Graphics (integrated)" },
+        ],
+        transcribeOn: "gpu:0",
+        speak: [
+          { id: "cpu", name: "Processor — Intel Core i5" },
+          { id: "gpu", name: "GPU — whichever the graphics driver calls the fastest" },
+        ],
+        speakOn: "gpu",
+      },
       model: over.model ?? { state: "ready", path: MODEL, bytes: 147951465 },
       // The chosen row carries whatever `model` says, so a test that breaks the model in use
       // sees it in the list too.
@@ -496,6 +509,26 @@ describe("Voice", () => {
     fireEvent.click(await screen.findByRole("button", { name: /download small/i }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
+    );
+  });
+
+  it("chooses which of several GPUs transcribes, and the processor for reading aloud", async () => {
+    render(<Voice />);
+
+    const transcribe = await screen.findByRole<HTMLSelectElement>("combobox", {
+      name: /where speech is transcribed/i,
+    });
+    expect(transcribe.value).toBe("gpu:0");
+    expect(Array.from(transcribe.options).map((o) => o.value)).toEqual(["cpu", "gpu:0", "gpu:1"]);
+    fireEvent.change(transcribe, { target: { value: "gpu:1" } });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_voice_compute", { transcribe: "gpu:1", speak: null }),
+    );
+
+    const speak = screen.getByRole<HTMLSelectElement>("combobox", { name: /read aloud/i });
+    fireEvent.change(speak, { target: { value: "cpu" } });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("set_voice_compute", { transcribe: null, speak: "cpu" }),
     );
   });
 

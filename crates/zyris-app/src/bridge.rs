@@ -312,6 +312,17 @@ pub async fn set_voice_speaker(
     Ok(voice_screen(voice.choose_speaker(speaker).await, &hotkey))
 }
 
+/// Choose where speech is transcribed (`cpu`, `gpu:N`) and answers are read (`cpu`, `gpu`).
+#[tauri::command]
+pub async fn set_voice_compute(
+    transcribe: Option<String>,
+    speak: Option<String>,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_compute(transcribe, speak).await, &hotkey))
+}
+
 /// Choose how fast answers are read, now and at the next launch.
 #[tauri::command]
 pub async fn set_speaking_rate(
