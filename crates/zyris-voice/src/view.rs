@@ -97,6 +97,27 @@ pub enum DeviceList {
     NotHere { reason: String },
 }
 
+/// Where the two models can run, and where each one does.
+///
+/// Two lists rather than one because the two engines can be pointed at different things:
+/// whisper.cpp takes any GPU by its position, while ONNX Runtime's WebGPU provider takes only
+/// "the GPU" and lets the driver pick the card.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputeView {
+    pub transcribe: Vec<ComputeOption>,
+    pub transcribe_on: String,
+    pub speak: Vec<ComputeOption>,
+    pub speak_on: String,
+}
+
+/// One place a model can run: `cpu`, `gpu:N` or `gpu`, and a name a person recognises.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ComputeOption {
+    pub id: String,
+    pub name: String,
+}
+
 /// One speech model on offer.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +314,8 @@ pub struct VoiceView {
     /// How fast answers are read, as a multiple of the voice's own pace. See
     /// `run::DEFAULT_SPEAKING_RATE`.
     pub speaking_rate: f32,
+    /// Where speech is transcribed and answers are read.
+    pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
     /// `ZYRIS_WHISPER_MODEL` names.
     pub model: ModelView,
@@ -333,6 +356,7 @@ impl VoiceView {
             speakers: DeviceList::NotHere { reason: reason.clone() },
             speaker: Choice::Default,
             speaking_rate: 1.0,
+            compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),
             model_env: None,

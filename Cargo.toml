@@ -155,6 +155,9 @@ webrtc-audio-processing = "2.1.0"
 # screenful of model parameters and timings to stderr on every load, and in `--headless` that is
 # the process log. `zyris_voice::stt::Stt::load` installs the hooks once per process.
 whisper-rs = { version = "0.16.0", features = ["tracing_backend"] }
+# The same crate `whisper-rs` builds on, named directly for one thing it does not re-export:
+# ggml's device list, which is how the Voice tab names the GPUs whisper can run on.
+whisper-rs-sys = "0.15.0"
 # The Windows echo canceller, which is the operating system's own: the Voice Capture DSP,
 # `CWMAudioAEC`. **Only `zyris-voice` names this, only on Windows, behind `voice`**; nothing
 # here is built on Linux and `cargo tree` on a Linux target does not carry it.

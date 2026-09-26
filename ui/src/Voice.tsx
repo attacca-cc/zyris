@@ -102,6 +102,16 @@ type VoiceModelView =
   | { state: "nowhere"; reason: string }
   | { state: "notHere"; reason: string };
 
+// `view::ComputeView`: where each model can run and where it does. Two lists because whisper can
+// be pointed at any one GPU and the voice only at "the GPU".
+type ComputeOption = { id: string; name: string };
+type Compute = {
+  transcribe: ComputeOption[];
+  transcribeOn: string;
+  speak: ComputeOption[];
+  speakOn: string;
+};
+
 // `view::SpeechModelView`: one speech model on offer, and what is in the cache for it.
 type SpeechModel = {
   id: string;
@@ -130,6 +140,7 @@ export type VoiceScreen = {
     speaker: Choice;
     // A multiple of the voice's own pace, already clamped by the Rust side.
     speakingRate: number;
+    compute: Compute;
     model: ModelView;
     models: SpeechModel[];
     modelEnv: string | null;
@@ -773,6 +784,61 @@ export function Voice() {
         </p>
         {refused.speaker && <p className="note problem">{refused.speaker}</p>}
       </section>
+
+      {canHear && (
+        <section>
+          <h2>Where the models run</h2>
+          <label className="note">
+            Transcribing what you say{" "}
+            <select
+              className="picker"
+              aria-label="Where speech is transcribed"
+              value={voice.compute.transcribeOn}
+              disabled={busy !== null}
+              onChange={(event) =>
+                act("compute", "set_voice_compute", { transcribe: event.target.value, speak: null })
+              }
+            >
+              {voice.compute.transcribe.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="note">
+            Reading answers aloud{" "}
+            <select
+              className="picker"
+              aria-label="Where answers are read aloud"
+              value={voice.compute.speakOn}
+              disabled={busy !== null}
+              onChange={(event) =>
+                act("compute", "set_voice_compute", { transcribe: null, speak: event.target.value })
+              }
+            >
+              {voice.compute.speak.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {voice.compute.transcribe.length === 1 && voice.compute.speak.length === 1 && (
+            <p className="note muted">
+              This build of Zyris runs both on the processor. A build with the{" "}
+              <span className="mono">gpu</span> feature lists this computer&rsquo;s graphics cards
+              here.
+            </p>
+          )}
+          <p className="note muted">
+            A graphics card is several times faster than the processor for both. Transcribing can
+            be put on any one card; reading aloud goes to whichever card the graphics driver
+            offers first. Changing either reloads the model, which takes a few seconds.
+          </p>
+          {refused.compute && <p className="note problem">{refused.compute}</p>}
+        </section>
+      )}
 
       <section>
         <h2>Speech model</h2>

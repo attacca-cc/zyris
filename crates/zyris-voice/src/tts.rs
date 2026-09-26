@@ -769,6 +769,11 @@ pub struct Tts {
 impl Tts {
     /// Load every graph out of `dir` and take the voice called `voice`.
     pub fn load(dir: &Path, voice: &str) -> Result<Tts, Fault> {
+        Tts::load_on(dir, voice, GPU_BUILT_IN)
+    }
+
+    /// [`Tts::load`], on the GPU or not. `gpu` is ignored in a build without `gpu-tts`.
+    pub fn load_on(dir: &Path, voice: &str, gpu: bool) -> Result<Tts, Fault> {
         let style_file = VOICES
             .iter()
             .find(|v| v.name == voice)
@@ -778,10 +783,10 @@ impl Tts {
         let style = read_style(&dir.join(style_file))?;
         let indexer = Indexer::read(&dir.join("unicode_indexer.json"))?;
         Ok(Tts {
-            duration: session(&dir.join("duration_predictor.onnx"))?,
-            encoder: session(&dir.join("text_encoder.onnx"))?,
-            estimator: session(&dir.join("vector_estimator.onnx"))?,
-            vocoder: session(&dir.join("vocoder.onnx"))?,
+            duration: session(&dir.join("duration_predictor.onnx"), gpu)?,
+            encoder: session(&dir.join("text_encoder.onnx"), gpu)?,
+            estimator: session(&dir.join("vector_estimator.onnx"), gpu)?,
+            vocoder: session(&dir.join("vocoder.onnx"), gpu)?,
             indexer,
             style,
             voice: voice.to_string(),
@@ -956,17 +961,24 @@ impl Tts {
     }
 }
 
-fn session(path: &Path) -> Result<ort::session::Session, Fault> {
+/// Whether this build can read answers on the GPU at all.
+pub const GPU_BUILT_IN: bool = cfg!(feature = "gpu-tts");
+
+fn session(path: &Path, gpu: bool) -> Result<ort::session::Session, Fault> {
     ort::session::Session::builder()
         .and_then(|b| b.with_intra_threads(threads()))
-        .and_then(on_the_gpu)
+        .and_then(|b| if gpu { on_the_gpu(b) } else { Ok(b) })
         .and_then(|b| b.commit_from_file(path))
         .map_err(|e| Fault::Unusable { path: path.to_path_buf(), detail: e.to_string() })
 }
 
-/// WebGPU in a `gpu` build — Vulkan underneath on Linux, Direct3D 12 on Windows, so any vendor's
-/// card and no CUDA install. Not an error when there is no adapter: ONNX Runtime then runs every
-/// node on the processor, as a build without the feature always does.
+/// WebGPU in a `gpu-tts` build — Vulkan underneath on Linux, Direct3D 12 on Windows, so any
+/// vendor's card and no CUDA install. Not an error when there is no adapter: ONNX Runtime then runs
+/// every node on the processor, as a build without the feature always does.
+///
+/// **Which card is Dawn's choice**, the high-performance adapter. ONNX Runtime 1.22's WebGPU
+/// provider takes no adapter option; the one way to name a card is to build a Dawn device here and
+/// hand it over (`ep.webgpuexecutionprovider.webgpuDevice`), which is not done.
 ///
 /// The environment is committed first: registering the provider on the first builder of a
 /// process, before anything else has made one, failed with "Attempt to use DefaultLogger but none
