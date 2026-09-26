@@ -14,6 +14,11 @@ const { listen, emit } = vi.hoisted(() => {
   };
 });
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
+// The session picker above the turns asks the Rust side for sessions; these tests are about the
+// turns, so it is told there is no connection and says so.
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(() => Promise.reject("this machine is not connected to Attacca yet")),
+}));
 
 import { Conversation } from "./Conversation";
 import type { Trace } from "./state";

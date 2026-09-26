@@ -58,6 +58,7 @@ use zyris_attacca::{
 
 use crate::speak::{Filter, Kind};
 use crate::split::{Fragment, Splitter, IDLE_FLUSH};
+use crate::view::{AgentEntry, ProjectEntry, SessionEntry, SessionsView};
 
 /// How long a connection gets to announce `attacca_api` before this gives up on it.
 ///
@@ -112,8 +113,19 @@ pub trait TurnApi: Send + Sync + 'static {
     /// Create a session against an agent, and answer its id.
     ///
     /// No title: Attacca names a session from its first message, and a title given at creation
-    /// is permanent and suppresses that. No project: the default one is made on demand.
-    async fn create_session(&self, agent_id: String) -> zyris::Result<String>;
+    /// is permanent and suppresses that. `project: None` files it under the account's default
+    /// project, which is made on demand.
+    async fn create_session(
+        &self,
+        agent_id: String,
+        project: Option<String>,
+    ) -> zyris::Result<String>;
+
+    /// The account's projects: the default first, then the rest oldest-first.
+    async fn list_projects(&self) -> zyris::Result<Vec<ProjectEntry>>;
+
+    /// The account's sessions, in every project.
+    async fn list_sessions(&self) -> zyris::Result<Vec<SessionEntry>>;
 }
 
 #[zyris::async_trait]
@@ -148,18 +160,48 @@ impl TurnApi for AttaccaApiClient {
             .collect())
     }
 
-    async fn create_session(&self, agent_id: String) -> zyris::Result<String> {
+    async fn create_session(
+        &self,
+        agent_id: String,
+        project: Option<String>,
+    ) -> zyris::Result<String> {
         let session = AttaccaApi::create_session_with(
             self,
             zyris_attacca::ZNewSession {
                 agent_id,
                 title: None,
-                project_id: None,
+                project_id: project,
                 preamble: None,
             },
         )
         .await?;
         Ok(session.id)
+    }
+
+    async fn list_projects(&self) -> zyris::Result<Vec<ProjectEntry>> {
+        Ok(AttaccaApi::list_projects(self)
+            .await?
+            .into_iter()
+            .map(|project| ProjectEntry {
+                id: project.id,
+                name: project.name,
+                is_default: project.is_default,
+            })
+            .collect())
+    }
+
+    async fn list_sessions(&self) -> zyris::Result<Vec<SessionEntry>> {
+        Ok(AttaccaApi::list_sessions(self, zyris_attacca::ZSessionFilter::default())
+            .await?
+            .into_iter()
+            .map(|session| SessionEntry {
+                id: session.id,
+                title: session.title,
+                project: session.project_id,
+                agent: session.agent_id,
+                running: session.running,
+            })
+            .collect())
     }
 }
 
@@ -391,6 +433,116 @@ impl Feed {
         tokio::spawn(async move { feed.run(api, generation, items).await });
     }
 
+    /// The client of the connection that is current, or a sentence saying there is none.
+    fn api(&self) -> zyris::Result<Arc<dyn TurnApi>> {
+        self.state.lock().expect("the feed state is not poisoned").api.clone().ok_or_else(|| {
+            WireError::new(
+                ErrorCode::ConnectionLost,
+                "this machine is not connected to Attacca yet, so there are no sessions to \
+                 choose from",
+            )
+        })
+    }
+
+    /// Everything the Conversation screen needs to choose a session, read off the account.
+    ///
+    /// **Each of the three is read on its own**, and one that is refused leaves the other two
+    /// standing with a sentence saying what is missing. A credential is granted scopes one by
+    /// one: a machine enrolled without `projects:read` still has sessions and agents to choose
+    /// from, and failing the whole screen over the one it cannot read was a picker that showed
+    /// nothing but an error. `Err` only when there is no connection at all.
+    pub async fn sessions(&self) -> zyris::Result<SessionsView> {
+        let api = self.api()?;
+        let (projects, sessions, agents) =
+            tokio::join!(api.list_projects(), api.list_sessions(), api.list_agents());
+        let mut problems = Vec::new();
+        let mut keep = |what: &str, error: WireError| {
+            tracing::warn!(%error, "could not read this account's {what}");
+            problems.push(format!("{what}: {}", error.message));
+        };
+        let projects = projects.unwrap_or_else(|error| {
+            keep("projects", error);
+            Vec::new()
+        });
+        let sessions = sessions.unwrap_or_else(|error| {
+            keep("sessions", error);
+            Vec::new()
+        });
+        let agents = agents.unwrap_or_else(|error| {
+            keep("agents", error);
+            Vec::new()
+        });
+        Ok(SessionsView {
+            projects,
+            sessions,
+            agents: agents.into_iter().map(|(id, name)| AgentEntry { id, name }).collect(),
+            current: self.session_id(),
+            problems,
+        })
+    }
+
+    /// Talk to another session from now on, on the connection that is current.
+    ///
+    /// **The same path a new connection takes**, rather than a second way of subscribing:
+    /// [`Feed::attach`] bumps the generation, so the old subscription's pump stops at its next
+    /// frame and nothing it was in the middle of is read aloud as if it belonged to this one.
+    /// The cursor is dropped with the session it belonged to — a cursor from one session's
+    /// timeline means nothing in another's.
+    ///
+    /// `Err` when there is no connection, or when the subscription could not be opened; in the
+    /// second case the feed is left pointing at the session asked for, and the next connection
+    /// tries it again.
+    pub async fn switch_to(self: &Arc<Self>, session: String) -> zyris::Result<()> {
+        let api = self.api()?;
+        if self.session_id().as_deref() == Some(session.as_str()) && self.is_live() {
+            return Ok(());
+        }
+        *self.session_id.lock().expect("the session id is not poisoned") = Some(session);
+        self.state.lock().expect("the feed state is not poisoned").cursor = None;
+        self.attach(api).await;
+        if self.is_live() {
+            Ok(())
+        } else {
+            Err(WireError::new(
+                ErrorCode::Internal,
+                "Attacca would not let this machine listen to that session",
+            ))
+        }
+    }
+
+    /// Create a session in `project` against `agent`, and talk to it from now on.
+    ///
+    /// `agent: None` is the same rule a first session is made by — one agent is taken, several
+    /// is a choice this does not make — so a screen that offers no agent picker on an account
+    /// with one agent gets the obvious answer and one with several is told to pick.
+    pub async fn start_new(
+        self: &Arc<Self>,
+        project: Option<String>,
+        agent: Option<String>,
+    ) -> zyris::Result<String> {
+        let api = self.api()?;
+        let agent = match agent {
+            Some(agent) => agent,
+            None => {
+                let agents = api.list_agents().await?;
+                Feed::choose_agent(&agents, self.agent.as_deref()).ok_or_else(|| {
+                    WireError::new(
+                        ErrorCode::InvalidParams,
+                        if agents.is_empty() {
+                            "this account has no agent to start a session with"
+                        } else {
+                            "this account has more than one agent; choose which one to talk to"
+                        },
+                    )
+                })?
+            }
+        };
+        let id = api.create_session(agent, project).await?;
+        tracing::info!(session = %id, "created a session from the Conversation screen");
+        self.switch_to(id.clone()).await?;
+        Ok(id)
+    }
+
     /// Say something, starting a turn.
     ///
     /// **Refuses while no subscription is open**, which is the ordering rule made unavoidable
@@ -467,7 +619,7 @@ impl Feed {
             return false;
         };
         *self.agent_trouble.lock().expect("not poisoned") = None;
-        let id = match api.create_session(agent).await {
+        let id = match api.create_session(agent, None).await {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(%error, "could not create a session");
@@ -768,7 +920,7 @@ mod tests {
         Send { message: String },
         Cancel,
         Agents,
-        Create { agent: String },
+        Create { agent: String, project: Option<String> },
     }
 
     #[derive(Default)]
@@ -789,6 +941,10 @@ mod tests {
         agents: Vec<(String, String)>,
         /// What `create_session` answers with.
         made: Option<String>,
+        /// Which session each `turn_events` was for, in order.
+        subscribed_to: Vec<String>,
+        /// Refuse `list_projects` the way Attacca does for a credential without the scope.
+        no_projects_scope: bool,
     }
 
     /// A stand-in for Attacca.
@@ -810,6 +966,10 @@ mod tests {
 
         pub(super) fn calls(&self) -> Vec<Call> {
             self.script.lock().unwrap().calls.clone()
+        }
+
+        fn subscribed_to(&self) -> Vec<String> {
+            self.script.lock().unwrap().subscribed_to.clone()
         }
 
         fn subscriptions(&self) -> usize {
@@ -864,21 +1024,50 @@ mod tests {
             Ok(script.agents.clone())
         }
 
-        async fn create_session(&self, agent_id: String) -> zyris::Result<String> {
+        async fn create_session(
+            &self,
+            agent_id: String,
+            project: Option<String>,
+        ) -> zyris::Result<String> {
             let mut script = self.script.lock().unwrap();
-            script.calls.push(Call::Create { agent: agent_id });
+            script.calls.push(Call::Create { agent: agent_id, project });
             Ok(script.made.clone().unwrap_or_else(|| "made-1".to_string()))
+        }
+
+        async fn list_projects(&self) -> zyris::Result<Vec<ProjectEntry>> {
+            if self.script.lock().unwrap().no_projects_scope {
+                return Err(WireError::new(
+                    ErrorCode::ForbiddenScope,
+                    "this credential was not granted the projects:read scope",
+                ));
+            }
+            Ok(vec![ProjectEntry {
+                id: "p-default".to_string(),
+                name: "Default".to_string(),
+                is_default: true,
+            }])
+        }
+
+        async fn list_sessions(&self) -> zyris::Result<Vec<SessionEntry>> {
+            Ok(vec![SessionEntry {
+                id: "session-1".to_string(),
+                title: Some("First".to_string()),
+                project: Some("p-default".to_string()),
+                agent: Some("a1".to_string()),
+                running: false,
+            }])
         }
 
         async fn turn_events(
             &self,
-            _session_id: String,
+            session_id: String,
             after: Option<i64>,
         ) -> zyris::Result<zyris::Streaming<ZTurnStatus, ZTurnFrame>> {
             let (tx, rx) = mpsc::unbounded_channel();
             let head = {
                 let mut script = self.script.lock().unwrap();
                 script.calls.push(Call::Subscribe { after });
+                script.subscribed_to.push(session_id);
                 if std::mem::take(&mut script.refuse_subscribe) {
                     return Err(WireError::new(ErrorCode::Internal, "refused"));
                 }
@@ -1271,6 +1460,150 @@ mod tests {
 
         assert_eq!(next_event(&mut events).await, TurnEvent::Running(true));
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Choosing a session from the Conversation screen
+    // -----------------------------------------------------------------------------------------
+
+    /// **Switching is a new subscription, not a relabelled one.** The old stream is still a
+    /// running task holding a live channel; anything it says after the switch belongs to the
+    /// session somebody just left and must not be read aloud as an answer from the new one. And
+    /// the cursor goes with the session: a cursor from one timeline asked of another would skip
+    /// or replay events that have nothing to do with it.
+    #[tokio::test]
+    async fn switching_listens_to_the_new_session_and_nothing_from_the_old_one_is_said() {
+        let api = Fake::new();
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+        let old = within("the first subscription", api.stream(0)).await;
+        old.send(durable(7)).unwrap();
+        within("the cursor to move", async {
+            while feed.state.lock().unwrap().cursor != Some(7) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+
+        within("the switch", feed.switch_to("session-2".to_string())).await.expect("switched");
+        let new = within("the second subscription", api.stream(1)).await;
+        let mut events = feed.events();
+
+        assert_eq!(api.subscribed_to(), vec!["session-1", "session-2"]);
+        assert_eq!(
+            api.calls().last(),
+            Some(&Call::Subscribe { after: None }),
+            "the old session's cursor was carried into the new one"
+        );
+        assert_eq!(feed.session_id(), Some("session-2".to_string()));
+
+        old.send(assistant("This is from the session that was left. ")).unwrap();
+        old.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+        new.send(assistant("This is the new one. ")).unwrap();
+        new.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+
+        assert_eq!(next_say(&mut events).await, "This is the new one.");
+        within("the message to be posted", feed.say("hello")).await.expect("posted");
+    }
+
+    /// With no connection there is no client to switch on, and saying so is the whole answer —
+    /// the feed must not quietly change which session it will use at the next connection.
+    #[tokio::test]
+    async fn switching_with_no_connection_is_refused_and_changes_nothing() {
+        let feed = Feed::new("session-1");
+
+        let error = feed.switch_to("session-2".to_string()).await.expect_err("not connected");
+        assert_eq!(error.code, ErrorCode::ConnectionLost);
+        assert_eq!(feed.session_id(), Some("session-1".to_string()));
+        feed.sessions().await.expect_err("nothing to list without a connection");
+    }
+
+    /// A new session goes in the project somebody picked, and becomes the one this machine
+    /// talks to — made first, subscribed second, the order the rest of this module keeps.
+    #[tokio::test]
+    async fn a_new_session_is_made_in_the_chosen_project_and_listened_to() {
+        let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+
+        let id = within("the new session", feed.start_new(Some("p-2".into()), None))
+            .await
+            .expect("made");
+
+        assert_eq!(id, "made-1");
+        assert_eq!(feed.session_id(), Some("made-1".to_string()));
+        assert_eq!(
+            api.calls()[1..],
+            [
+                Call::Agents,
+                Call::Create { agent: "agent-1".into(), project: Some("p-2".into()) },
+                Call::Subscribe { after: None },
+            ]
+        );
+        assert_eq!(api.subscribed_to(), vec!["session-1", "made-1"]);
+    }
+
+    /// An agent named by the screen is used as given, without reading the list.
+    #[tokio::test]
+    async fn a_new_session_takes_the_agent_it_is_given() {
+        let api = Fake::new().with_agents(&[("a", "Ada"), ("b", "Bea")]);
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+
+        feed.start_new(None, Some("b".into())).await.expect("made");
+
+        assert_eq!(
+            api.calls()[1..2],
+            [Call::Create { agent: "b".into(), project: None }],
+            "the agent was chosen for it rather than taken from the screen"
+        );
+    }
+
+    /// Several agents and none named is a choice this does not make, from the screen any more
+    /// than at startup: nothing is created, and the session in use is left alone.
+    #[tokio::test]
+    async fn a_new_session_with_several_agents_and_none_chosen_is_refused() {
+        let api = Fake::new().with_agents(&[("a", "Ada"), ("b", "Bea")]);
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+
+        let error = feed.start_new(None, None).await.expect_err("there is a choice to make");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(!api.calls().iter().any(|c| matches!(c, Call::Create { .. })));
+        assert_eq!(feed.session_id(), Some("session-1".to_string()));
+    }
+
+    /// Measured on a real account: a machine enrolled without `projects:read` got nothing but
+    /// that error where the picker should have been. The sessions and agents it *can* read are
+    /// still the whole of what choosing needs.
+    #[tokio::test]
+    async fn a_scope_the_credential_lacks_costs_that_list_and_nothing_else() {
+        let api = Fake::new().with_agents(&[("a1", "Ada")]);
+        api.script.lock().unwrap().no_projects_scope = true;
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+
+        let view = feed.sessions().await.expect("the rest is still listed");
+        assert!(view.projects.is_empty());
+        assert_eq!(view.sessions.len(), 1);
+        assert_eq!(view.agents.len(), 1);
+        assert_eq!(view.problems.len(), 1);
+        assert!(view.problems[0].contains("projects:read"), "{:?}", view.problems);
+    }
+
+    /// What the screen is handed: every project, every session, every agent, and which session
+    /// is current.
+    #[tokio::test]
+    async fn the_sessions_view_carries_the_account_and_the_current_session() {
+        let api = Fake::new().with_agents(&[("a1", "Ada")]);
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+
+        let view = feed.sessions().await.expect("listed");
+        assert_eq!(view.current.as_deref(), Some("session-1"));
+        assert_eq!(view.projects.len(), 1);
+        assert_eq!(view.sessions[0].project.as_deref(), Some("p-default"));
+        assert_eq!(view.agents, vec![AgentEntry { id: "a1".into(), name: "Ada".into() }]);
+    }
 }
 
 #[cfg(test)]
@@ -1339,7 +1672,7 @@ mod stopping_a_turn {
             api.calls(),
             vec![
                 Call::Agents,
-                Call::Create { agent: "agent-1".into() },
+                Call::Create { agent: "agent-1".into(), project: None },
                 Call::Subscribe { after: None },
             ]
         );
@@ -1390,7 +1723,7 @@ mod stopping_a_turn {
             vec![
                 Call::Subscribe { after: None },
                 Call::Agents,
-                Call::Create { agent: "agent-1".to_string() },
+                Call::Create { agent: "agent-1".to_string(), project: None },
                 Call::Subscribe { after: None },
             ]
         );
@@ -1450,7 +1783,7 @@ mod stopping_a_turn {
             feed.attach(api.clone()).await;
 
             assert!(
-                api.calls().contains(&Call::Create { agent: "b".into() }),
+                api.calls().contains(&Call::Create { agent: "b".into(), project: None }),
                 "{named} did not settle it: {:?}",
                 api.calls()
             );

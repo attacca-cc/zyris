@@ -364,3 +364,16 @@ section { margin-bottom: 2rem; }
 .sofar { opacity: 0.75; font-style: italic; }
 .sofar-mark { font-style: normal; font-size: 0.8em; opacity: 0.7; }
 .turn-woke { border-left-color: #b8860b; }
+
+/* Which session the conversation is in. Dropdowns on one wrapping line, so a narrow window
+   stacks them rather than scrolling sideways. */
+.session-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.session-picker .picker { max-width: 22rem; }
+.session-picker > p { flex-basis: 100%; margin: 0; }
+.session-actions { display: flex; gap: 0.5rem; }

@@ -667,6 +667,8 @@ describe("Voice", () => {
     // And it says where to say which, because that is the one thing to do about it.
     expect(page).toContain(SETTINGS);
     expect(page).toMatch(/agent/);
+    // Or where to choose without editing a file.
+    expect(page).toMatch(/top of the Conversation tab/);
   });
 
   it("does not claim the agent's own record is cut short, and does not promise smooth speech", async () => {

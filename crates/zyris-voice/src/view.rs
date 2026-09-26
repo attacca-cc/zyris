@@ -255,6 +255,59 @@ pub enum SpeakingState {
     Session { id: String },
 }
 
+/// Where the conversation happens: the account's projects, its sessions, its agents, and which
+/// session this machine is talking to.
+///
+/// **Declared here rather than in `turn`**, which is where it is assembled, for the reason
+/// everything else in this file is: `turn` is behind the `voice` feature and the window has to be
+/// able to name the answer in both builds.
+///
+/// `sessions` is every session the account lists, across projects; the screen narrows it by the
+/// project somebody picked. One call rather than one per project, so that the project a session
+/// already chosen belongs to can be shown without a second round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionsView {
+    pub projects: Vec<ProjectEntry>,
+    pub sessions: Vec<SessionEntry>,
+    pub agents: Vec<AgentEntry>,
+    /// What is heard is sent here and what it answers is read aloud. `None` until one exists.
+    pub current: Option<String>,
+    /// One sentence per list that could not be read — most often a scope this machine's
+    /// credential was not granted. The list it names is empty rather than absent.
+    pub problems: Vec<String>,
+}
+
+/// One project. `is_default` is the account's undeletable fallback, where a session created
+/// without a project lands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectEntry {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// One session. `title` is `None` for one Attacca has not named yet: it names a session from its
+/// first message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEntry {
+    pub id: String,
+    pub title: Option<String>,
+    pub project: Option<String>,
+    pub agent: Option<String>,
+    pub running: bool,
+}
+
+/// One agent a new session can be created against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEntry {
+    pub id: String,
+    pub name: String,
+}
+
 /// What is on disk where the voice that reads the answers should be.
 ///
 /// [`crate::tts::VoiceState`] with the directory rendered as a string and one extra arm for the

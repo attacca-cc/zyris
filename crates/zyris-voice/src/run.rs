@@ -274,6 +274,34 @@ impl Engine {
         self.remember_the_session(feed).await;
     }
 
+    /// The account's projects, sessions and agents, and which session this machine is on.
+    pub async fn sessions(&self) -> Result<crate::view::SessionsView, String> {
+        let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
+        feed.sessions().await.map_err(|error| error.message)
+    }
+
+    /// Talk to another session from now on, and remember it for the next launch.
+    pub async fn choose_session(&self, session: String) -> Result<(), String> {
+        let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
+        let switched = feed.switch_to(session).await.map_err(|error| error.message);
+        // Written down even when the subscription failed: the feed now points at it and the
+        // next connection tries it, so the file has to agree with what the feed will do.
+        self.remember_the_session(feed).await;
+        switched
+    }
+
+    /// Start a session in `project` against `agent`, talk to it, and remember it.
+    pub async fn new_session(
+        &self,
+        project: Option<String>,
+        agent: Option<String>,
+    ) -> Result<String, String> {
+        let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
+        let made = feed.start_new(project, agent).await.map_err(|error| error.message);
+        self.remember_the_session(feed).await;
+        made
+    }
+
     /// Write down a session the feed made, if it made one.
     ///
     /// **A session created and forgotten is a new one on every launch**, which fills the
@@ -1672,6 +1700,27 @@ mod recording_a_take {
         // test that would sit here for a minute if the bound came back.
         assert!(took >= SILENT_DEVICE, "gave up after {took:?}, before the deadline");
         assert!(took < SILENT_DEVICE * 3, "took {took:?}, which is not a bounded wait");
+    }
+
+    /// One take from the real default microphone, the way the Voice tab's button records it.
+    #[test]
+    #[ignore = "opens the microphone on this machine"]
+    fn a_take_from_the_real_microphone() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_time()
+            .build()
+            .expect("a runtime");
+        let choice = match std::env::var("ZYRIS_TAKE_DEVICE") {
+            Ok(id) => Choice::Device { id },
+            Err(_) => Choice::Default,
+        };
+        let outcome = runtime
+            .block_on(async move { tokio::task::spawn_blocking(move || record_one(&choice)).await })
+            .expect("the recording thread did not panic");
+        match outcome {
+            Ok((samples, _)) => eprintln!("took {} samples", samples.len()),
+            Err(reason) => panic!("{reason}"),
+        }
     }
 }
 
