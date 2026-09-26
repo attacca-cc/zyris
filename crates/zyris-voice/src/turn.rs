@@ -199,6 +199,7 @@ impl TurnApi for AttaccaApiClient {
                 title: session.title,
                 project: session.project_id,
                 agent: session.agent_id,
+                agent_name: None,
                 running: session.running,
             })
             .collect())
@@ -455,9 +456,9 @@ impl Feed {
 
     /// Everything the Conversation screen needs to choose a session, read off the account.
     ///
-    /// **Narrowed to the [`VOICE_AGENT`] when the account has one**: its sessions (and the current
-    /// one, whatever it is), and it alone as the agent a new session is made with. A session made
-    /// for typing is answered in tables and markdown, which is the wrong thing to read aloud.
+    /// **Every session is listed, and only the [`VOICE_AGENT`] is offered for a new one** when the
+    /// account has it. Hiding the other sessions left every project but one looking empty, and a
+    /// person has to be able to go back to a conversation they had typed.
     ///
     /// **Each of the three is read on its own**, and one that is refused leaves the other two
     /// standing with a sentence saying what is missing. A credential is granted scopes one by
@@ -486,16 +487,21 @@ impl Feed {
             Vec::new()
         });
         let current = self.session_id();
-        let (agents, sessions) = match voice_agent(&agents).cloned() {
-            Some((voice, name)) => {
-                let sessions = sessions
-                    .into_iter()
-                    .filter(|s| s.agent.as_deref() == Some(voice.as_str()) || Some(&s.id) == current.as_ref())
-                    .collect();
-                (vec![(voice, name)], sessions)
-            }
-            None => (agents, sessions),
+        let agent_names = agents.clone();
+        let agents = match voice_agent(&agents).cloned() {
+            Some(voice) => vec![voice],
+            None => agents,
         };
+        // The agent's name on each session, so one made for typing can be told apart.
+        let sessions = sessions
+            .into_iter()
+            .map(|mut s| {
+                s.agent_name = s.agent.as_deref().and_then(|id| {
+                    agent_names.iter().find(|(a, _)| a == id).map(|(_, name)| name.clone())
+                });
+                s
+            })
+            .collect();
         Ok(SessionsView {
             projects,
             sessions,
@@ -1096,6 +1102,7 @@ mod tests {
                 title: Some("First".to_string()),
                 project: Some("p-default".to_string()),
                 agent: Some("a1".to_string()),
+                agent_name: None,
                 running: false,
             }])
         }

@@ -12,10 +12,10 @@ const ACCOUNT: SessionsView = {
     { id: "p-work", name: "Work", isDefault: false },
   ],
   sessions: [
-    { id: "s-lunch", title: "Lunch plans", project: "p-home", agent: "a1", running: false },
-    { id: "s-report", title: "Quarterly report", project: "p-work", agent: "a1", running: true },
+    { id: "s-lunch", title: "Lunch plans", project: "p-home", agent: "a1", agentName: null, running: false },
+    { id: "s-report", title: "Quarterly report", project: "p-work", agent: "a1", agentName: null, running: true },
     // No project: filed under the default one.
-    { id: "s-loose", title: null, project: null, agent: "a1", running: false },
+    { id: "s-loose", title: null, project: null, agent: "a1", agentName: null, running: false },
   ],
   agents: [{ id: "a1", name: "Ada" }],
   current: "s-report",

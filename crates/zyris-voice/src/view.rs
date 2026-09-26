@@ -297,6 +297,8 @@ pub struct SessionEntry {
     pub title: Option<String>,
     pub project: Option<String>,
     pub agent: Option<String>,
+    /// The agent's name, when this account's agent list has it.
+    pub agent_name: Option<String>,
     pub running: bool,
 }
 
