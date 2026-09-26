@@ -369,6 +369,8 @@ pub struct VoiceView {
     /// How fast answers are read, as a multiple of the voice's own pace. See
     /// `run::DEFAULT_SPEAKING_RATE`.
     pub speaking_rate: f32,
+    /// How loud answers are read, as a gain on the voice.
+    pub volume: f32,
     /// Where speech is transcribed and answers are read.
     pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
@@ -411,6 +413,7 @@ impl VoiceView {
             speakers: DeviceList::NotHere { reason: reason.clone() },
             speaker: Choice::Default,
             speaking_rate: 1.0,
+            volume: 1.0,
             compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),

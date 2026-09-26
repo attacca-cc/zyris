@@ -323,6 +323,16 @@ pub async fn set_voice_compute(
     Ok(voice_screen(voice.choose_compute(transcribe, speak).await, &hotkey))
 }
 
+/// Choose how loud answers are read, now and at the next launch.
+#[tauri::command]
+pub async fn set_voice_volume(
+    volume: f32,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_volume(volume).await, &hotkey))
+}
+
 /// Choose how fast answers are read, now and at the next launch.
 #[tauri::command]
 pub async fn set_speaking_rate(

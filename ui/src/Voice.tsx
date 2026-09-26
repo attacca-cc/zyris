@@ -140,6 +140,8 @@ export type VoiceScreen = {
     speaker: Choice;
     // A multiple of the voice's own pace, already clamped by the Rust side.
     speakingRate: number;
+    // A gain on the voice: 1 is as the model writes it.
+    volume: number;
     compute: Compute;
     model: ModelView;
     models: SpeechModel[];
@@ -224,6 +226,41 @@ function heardLine(event: VoiceEvent): string {
     case "interrupted":
       return "Stopped reading the answer out loud, because you started speaking.";
   }
+}
+
+// How loud answers are read. Moves freely under the finger and is sent once it is let go, so a
+// drag is one setting rather than forty.
+function VolumeSlider({
+  volume,
+  disabled,
+  onCommit,
+}: {
+  volume: number;
+  disabled: boolean;
+  onCommit: (volume: number) => void;
+}) {
+  const [shown, setShown] = useState(Math.round(volume * 100));
+  useEffect(() => setShown(Math.round(volume * 100)), [volume]);
+  const commit = () => {
+    if (shown !== Math.round(volume * 100)) onCommit(shown / 100);
+  };
+  return (
+    <label className="note">
+      How loud answers are read — {shown}%{" "}
+      <input
+        type="range"
+        aria-label="How loud answers are read"
+        min={0}
+        max={200}
+        step={5}
+        value={shown}
+        disabled={disabled}
+        onChange={(event) => setShown(Number(event.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+      />
+    </label>
+  );
 }
 
 // The rates offered, plus whatever is stored if somebody wrote another one into voice.json, so
@@ -697,6 +734,14 @@ export function Voice() {
               </label>
             )}
             {refused.rate && <p className="note problem">{refused.rate}</p>}
+            {voice.voiceModel.state === "ready" && (
+              <VolumeSlider
+                volume={voice.volume}
+                disabled={busy !== null}
+                onCommit={(volume) => act("volume", "set_voice_volume", { volume })}
+              />
+            )}
+            {refused.volume && <p className="note problem">{refused.volume}</p>}
           </>
         )}
       </section>

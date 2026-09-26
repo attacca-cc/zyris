@@ -75,6 +75,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       },
       speaker: over.speaker ?? { kind: "default" },
       speakingRate: over.speakingRate ?? 1.25,
+      volume: over.volume ?? 1,
       compute: over.compute ?? {
         transcribe: [
           { id: "cpu", name: "Processor — Intel Core i5" },
@@ -530,6 +531,17 @@ describe("Voice", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_compute", { transcribe: null, speak: "cpu" }),
     );
+  });
+
+  it("sets how loud answers are read when the slider is let go", async () => {
+    render(<Voice />);
+
+    const slider = await screen.findByRole<HTMLInputElement>("slider", { name: /how loud/i });
+    expect(slider.value).toBe("100");
+    fireEvent.change(slider, { target: { value: "150" } });
+    expect(invoke).not.toHaveBeenCalledWith("set_voice_volume", expect.anything());
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_voice_volume", { volume: 1.5 }));
   });
 
   it("sets how fast answers are read", async () => {

@@ -763,6 +763,8 @@ pub struct Tts {
     voice: String,
     steps: usize,
     speed: f32,
+    /// How loud, as a gain on what the vocoder writes. See [`Tts::set_volume`].
+    volume: f32,
     seed: u64,
 }
 
@@ -792,6 +794,7 @@ impl Tts {
             voice: voice.to_string(),
             steps: TOTAL_STEP,
             speed: SPEED,
+            volume: 1.0,
             seed: SEED,
         })
     }
@@ -819,6 +822,13 @@ impl Tts {
     /// What it is set to now.
     pub fn speed(&self) -> f32 {
         self.speed
+    }
+
+    /// How loud, as a gain: 1.0 is the voice as the model writes it, 0 is silent. Up to 2.0,
+    /// clipped at full scale rather than wrapped — a loud voice distorting is audible, a sample
+    /// wrapping round is a crack in the speaker.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = if volume.is_finite() { volume.clamp(0.0, 2.0) } else { 1.0 };
     }
 
     /// Say one fragment, in the language its script says ([`language_for`]). Blocking, and for
@@ -876,6 +886,7 @@ impl Tts {
         // much of that is speech. Keeping the rest would pad every fragment with up to 69 ms of
         // whatever the model put in an unasked-for frame.
         wav.truncate(samples.min(wav.len()));
+        louder(&mut wav, self.volume);
         Ok(Utterance { samples: wav, unvoiced: spoken.unvoiced })
     }
 
@@ -958,6 +969,15 @@ impl Tts {
             .map_err(onnx)?;
         let (_, wav) = out["wav_tts"].try_extract_tensor::<f32>().map_err(onnx)?;
         Ok(wav.to_vec())
+    }
+}
+
+/// Scale `wav` by `gain`, clipping at full scale.
+fn louder(wav: &mut [f32], gain: f32) {
+    if gain != 1.0 {
+        for sample in wav {
+            *sample = (*sample * gain).clamp(-1.0, 1.0);
+        }
     }
 }
 
@@ -1073,6 +1093,15 @@ fn noise(count: usize, seed: u64) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_scales_and_clips_at_full_scale() {
+        let mut wav = vec![0.25, -0.5, 0.75];
+        louder(&mut wav, 2.0);
+        assert_eq!(wav, vec![0.5, -1.0, 1.0]);
+        louder(&mut wav, 0.0);
+        assert_eq!(wav, vec![0.0, 0.0, 0.0]);
+    }
 
     #[test]
     fn a_fragment_is_read_in_the_language_its_script_says() {

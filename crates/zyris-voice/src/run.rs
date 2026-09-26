@@ -99,6 +99,9 @@ pub struct Settings {
     /// [`DEFAULT_SPEAKING_RATE`]. Clamped to the range [`crate::tts::Tts::set_speed`] allows.
     #[serde(default)]
     pub speaking_rate: Option<f32>,
+    /// How loud answers are read, as a gain on the voice: 1.0 is as the model writes it.
+    #[serde(default)]
+    pub volume: Option<f32>,
     /// Where speech is transcribed: `cpu` or `gpu:N`, as [`stt::Device::id`] writes it. `None`
     /// is [`stt::default_device`].
     #[serde(default)]
@@ -192,6 +195,11 @@ fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
 /// rate and transcribing them back with Large v3 Turbo: 1.25 came back word for word; 1.4 lost a
 /// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
 pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
+
+/// The volume `settings` asks for, clamped the way the voice will clamp it.
+fn volume(settings: &Settings) -> f32 {
+    settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 2.0)
+}
 
 /// The rate `settings` asks for, clamped the way the voice will clamp it.
 fn speaking_rate(settings: &Settings) -> f32 {
@@ -436,6 +444,7 @@ impl Engine {
             },
             speaker: settings.speaker.clone(),
             speaking_rate: speaking_rate(settings),
+            volume: volume(settings),
             compute: compute_view(settings),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
@@ -541,6 +550,18 @@ impl Engine {
         self.store(&live.settings);
         if let Some((_, tts)) = lock(&self.voice).as_ref() {
             lock(tts).set_speed(rate);
+        }
+    }
+
+    /// Choose how loud answers are read. Takes effect from the next sentence, like the rate.
+    pub async fn choose_volume(&self, gain: f32) {
+        let mut live = self.live.lock().await;
+        live.settings.volume = Some(gain);
+        let gain = volume(&live.settings);
+        live.settings.volume = Some(gain);
+        self.store(&live.settings);
+        if let Some((_, tts)) = lock(&self.voice).as_ref() {
+            lock(tts).set_volume(gain);
         }
     }
 
@@ -888,6 +909,7 @@ impl Engine {
             }
         };
         lock(&tts).set_speed(speaking_rate(settings));
+        lock(&tts).set_volume(volume(settings));
 
         let (speaker, tap, rate, stop) = open_speaker_on_a_thread(settings.speaker.clone()).await?;
 
