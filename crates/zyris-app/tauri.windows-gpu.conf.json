@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../../target/release/webgpu_dawn.dll": "webgpu_dawn.dll",
+      "../../target/release/dxcompiler.dll": "dxcompiler.dll",
+      "../../target/release/dxil.dll": "dxil.dll"
+    }
+  }
+}

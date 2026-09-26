@@ -1054,6 +1054,42 @@ mod tests {
         );
     }
 
+    /// The whole recording on the processor and on the first GPU, in a build that has one.
+    ///
+    /// Timings printed, not asserted; the words are what has to agree. Any model will do, so
+    /// Large v3 Turbo — the one a GPU build takes when nobody chooses — can be pointed at too.
+    /// Measured on Windows 11 with an RTX 3050, release, 2026-09-26: see the commit that added
+    /// this.
+    #[test]
+    fn the_gpu_hears_what_the_processor_hears() {
+        let Some(model) = base_model() else {
+            eprintln!("skipped: set {MODEL_ENV} to a whisper model to run this");
+            return;
+        };
+        let Some(gpu) = devices().into_iter().find(|d| d.device.is_gpu()) else {
+            eprintln!("skipped: whisper lists no GPU in this build on this machine");
+            return;
+        };
+        let audio = jfk();
+        let mut heard = Vec::new();
+        for device in [Device::Cpu, gpu.device] {
+            let stt = Stt::load_on(&model, device).expect("the model loads");
+            stt.transcribe(&audio).expect("it transcribes");
+            let started = std::time::Instant::now();
+            let text = stt.transcribe(&audio).expect("it transcribes");
+            eprintln!(
+                "{}: {:?} {text:?}",
+                if device.is_gpu() { gpu.name.as_str() } else { "cpu" },
+                started.elapsed()
+            );
+            heard.push(text.to_lowercase());
+        }
+        for text in &heard {
+            assert!(text.contains("fellow americans"), "{heard:?}");
+            assert!(text.contains("your country"), "{heard:?}");
+        }
+    }
+
     /// How many times the transcript says the only phrase in these three seconds.
     fn says_it(text: &str) -> usize {
         text.to_lowercase().matches("fellow american").count()

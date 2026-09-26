@@ -1457,6 +1457,47 @@ mod tests {
         );
     }
 
+    /// The same sentence on the processor and on the GPU, in a build that has one.
+    ///
+    /// **The timings are printed, not asserted** — nothing here may assert on a clock — but the
+    /// two answers have to agree on how long the sentence is: the GPU runs the same graphs, and a
+    /// provider that dropped or mangled a node would show first as a sentence of another length.
+    /// Measured on Windows 11 with an RTX 3050, release, 2026-09-26: 1.37 s on the processor and
+    /// 0.37 s through WebGPU for 3.6 s of audio. DirectML, tried first because the plain Windows
+    /// ONNX Runtime already carries it, managed 1.26 s and was dropped.
+    #[test]
+    fn the_gpu_says_what_the_processor_says() {
+        if !GPU_BUILT_IN {
+            eprintln!("skipped: this build reads answers on the processor only");
+            return;
+        }
+        let Some(dir) = models() else {
+            eprintln!("skipped: no Supertonic models; set {MODELS_ENV}");
+            return;
+        };
+        let sentence = "The quick brown fox jumps over the lazy dog, twice.";
+        let mut lengths = Vec::new();
+        for gpu in [false, true] {
+            let mut tts = Tts::load_on(&dir, DEFAULT_VOICE, gpu).expect("the models load");
+            // Twice, so the second is the one timed: a GPU provider compiles its kernels for the
+            // shapes it is first handed.
+            tts.say(sentence).expect("it speaks");
+            let started = std::time::Instant::now();
+            let said = tts.say(sentence).expect("it speaks");
+            eprintln!(
+                "{}: {:?} for {:?} of audio",
+                if gpu { "gpu" } else { "cpu" },
+                started.elapsed(),
+                said.duration()
+            );
+            lengths.push(said.duration().as_secs_f32());
+        }
+        assert!(
+            (lengths[0] - lengths[1]).abs() < 0.1,
+            "the processor and the GPU disagree on how long the sentence is: {lengths:?}"
+        );
+    }
+
     /// One sentence, out of the real graphs, as samples.
     #[test]
     fn one_sentence_comes_out_as_audio() {

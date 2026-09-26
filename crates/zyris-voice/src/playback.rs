@@ -943,6 +943,74 @@ mod tests {
         eprintln!("delay {:?}", playback.stream_delay());
     }
 
+    /// **Speaking and hearing on the real hardware, together**: a sentence synthesised, played
+    /// through the default speaker, picked up by the default microphone across the room, and
+    /// transcribed. Everything else in this crate proves one half against a stand-in for the
+    /// other; this is the only check that the machine can hear itself.
+    ///
+    /// Run by hand, with the speaker loud enough and no headset on — a headset has no acoustic
+    /// path from one to the other and fails this for a reason that is not a bug:
+    ///
+    ///     ZYRIS_TTS_MODELS=… ZYRIS_WHISPER_MODEL=…/ggml-base.bin cargo test --release \
+    ///     -p zyris-voice --features voice --lib speaker_to_microphone -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "plays through the speaker and records through the microphone"]
+    async fn speaker_to_microphone() {
+        use crate::capture::{Capture, Captured, APM_FRAME};
+        let Some(dir) = crate::tts::models_dir().filter(|dir| {
+            matches!(crate::tts::state_in(dir), crate::tts::VoiceState::Ready { .. })
+        }) else {
+            eprintln!("skipped: no Supertonic models; set {}", crate::tts::MODELS_ENV);
+            return;
+        };
+        let Some(model) = std::env::var_os(crate::stt::MODEL_ENV).map(std::path::PathBuf::from)
+        else {
+            eprintln!("skipped: set {} to a whisper model", crate::stt::MODEL_ENV);
+            return;
+        };
+        let sentence = "The quick brown fox jumps over the lazy dog.";
+        let said = crate::tts::Tts::load(&dir, crate::tts::DEFAULT_VOICE)
+            .expect("the models load")
+            .say(sentence)
+            .expect("it speaks");
+        let length = said.duration();
+
+        let (capture, mut chunks) =
+            Capture::open(&Choice::Default, APM_FRAME).expect("a microphone on this machine");
+        let (playback, _tap) = Playback::open(&Choice::Default).expect("a speaker opens");
+        eprintln!("microphone {:?}, speaker {:?}", capture.device(), playback.device());
+
+        // Half a second of the room first, so the recording has the sentence's start in it.
+        let mut heard = Vec::new();
+        let started = tokio::time::Instant::now();
+        let mut spoke = false;
+        let end = started + length + Duration::from_millis(1500);
+        while tokio::time::Instant::now() < end {
+            if !spoke && started.elapsed() > Duration::from_millis(500) {
+                assert!(playback.handle().speak(said.samples.clone()).is_some());
+                spoke = true;
+            }
+            match tokio::time::timeout(Duration::from_millis(500), chunks.recv()).await {
+                Ok(Some(Captured::Audio(chunk))) => heard.extend_from_slice(&chunk),
+                Ok(Some(Captured::Problem(problem))) => eprintln!("problem: {problem:?}"),
+                Ok(None) => panic!("the microphone stream ended"),
+                Err(_) => panic!("half a second with no audio from an open microphone"),
+            }
+        }
+        let peak = heard.iter().fold(0f32, |m, s| m.max(s.abs()));
+        eprintln!("recorded {:.1} s, peak {peak:.3}", heard.len() as f32 / 16_000.0);
+
+        let stt = crate::stt::Stt::load(&model).expect("the whisper model loads");
+        let text = stt.transcribe(&heard).expect("it transcribes");
+        eprintln!("said {sentence:?}\nheard {text:?}");
+        let text = text.to_lowercase();
+        assert!(
+            ["quick", "brown", "fox", "lazy", "dog"].iter().filter(|w| text.contains(*w)).count()
+                >= 3,
+            "the microphone did not hear the speaker say it"
+        );
+    }
+
     /// Ten milliseconds, whatever the stream rate turns out to be — because that is the frame the
     /// echo canceller takes, and it is fixed at 16 kHz on its side.
     #[test]
