@@ -29,6 +29,16 @@ zyris-screen = { workspace = true }
 zyris-terminal = { workspace = true }
 zyris-transfer = { workspace = true }
 
+# `wayland`: on a wlroots compositor (Hyprland, Sway) enigo drives `wlr-virtual-pointer` before X11.
+# Without it the only Linux backend is XTEST, which in a Wayland session reaches Xwayland's pointer
+# and not the one on screen — every call succeeds and nothing moves.
+#
+# **Linux only, and it has to be.** `zyris-input` gates its call to enigo's `outputs()` on the
+# feature alone, and enigo has that method on Linux only, so turning the feature on for every
+# target breaks the Windows build.
+[target.'cfg(target_os = "linux")'.dependencies]
+zyris-input = { workspace = true, features = ["wayland"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # `rt-multi-thread` on top of the two the other tests need: binding an iroh endpoint starts

@@ -225,6 +225,11 @@ impl Tools {
     /// is guessing coordinates. So this is one decision, made once, and it is `EnigoInput::new`.
     /// No separate probe: a second way of asking produces a second answer.
     ///
+    /// **Except where `input` would lie.** A Wayland session on a non-wlroots compositor connects
+    /// `EnigoInput::new` through Xwayland, whose XTEST moves nothing on screen; there the screen is
+    /// announced alone (see [`input_reaches_the_screen`]). Half useful is better than a tool that
+    /// reports every click as done.
+    ///
     /// **That probe only detects absence on Linux, and the difference is worth knowing before
     /// trusting it.** There, `Enigo::new` tries each backend and returns
     /// `EstablishCon("no successful connection")` when none answers. On Windows the fork's
@@ -256,7 +261,15 @@ impl Tools {
     fn screen_pair(&self) -> Vec<Arc<dyn ServeCapability>> {
         let capture = zyris_screen::HostScreenCapture::default();
         let backend = capture.backend();
+        let reaches =
+            input_reaches_the_screen(std::env::var_os("WAYLAND_DISPLAY").is_some(), backend);
         match zyris_input::EnigoInput::new(zyris_screen::HostDisplays(backend)) {
+            Ok(_) if !reaches => {
+                tracing::info!(
+                    "input is not announced: this Wayland compositor offers no wlr-virtual-pointer, and XTEST into Xwayland reports success without moving anything a person can see; serving input here needs libei"
+                );
+                vec![self.guard(ScreenCaptureServer(capture))]
+            }
             Ok(input) => vec![
                 self.guard(ScreenCaptureServer(capture)),
                 self.guard(InputServer(input)),
@@ -355,9 +368,46 @@ fn describe(descriptors: &[CapabilityDescriptor]) -> Vec<Announced> {
         .collect()
 }
 
+/// Whether `input` would move the pointer a person sees, rather than report success for events
+/// that go nowhere.
+///
+/// enigo tries `wlr-virtual-pointer` first, then X11. In a Wayland session that is not wlroots —
+/// GNOME, KDE — the first is absent and the second still connects, through Xwayland, whose XTEST
+/// moves only Xwayland's own pointer: `move_to` returns `Ok` and `location()` even reads the new
+/// point back, while the cursor on screen stays put. The screen backend stands in for "the
+/// compositor is wlroots", because `ScreenBackend::Wayland` is chosen exactly when `zwlr_screencopy`
+/// answers, and every mainstream wlroots compositor that offers it offers the virtual pointer too.
+/// The one path that would serve those other sessions is libei, which this build does not enable.
+fn input_reaches_the_screen(wayland_session: bool, backend: zyris_screen::ScreenBackend) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        !wayland_session || matches!(backend, zyris_screen::ScreenBackend::Wayland)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (wayland_session, backend);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An X11 session drives the real pointer through XTEST, and a wlroots session through
+    /// `wlr-virtual-pointer`. A Wayland session the screen reaches some other way — GNOME, KDE —
+    /// would be left with XTEST into Xwayland, which moves nothing a person can see.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn input_is_announced_only_where_it_reaches_the_screen() {
+        use zyris_screen::ScreenBackend;
+        assert!(input_reaches_the_screen(false, ScreenBackend::Xcap), "an X11 session");
+        assert!(input_reaches_the_screen(true, ScreenBackend::Wayland), "a wlroots session");
+        assert!(
+            !input_reaches_the_screen(true, ScreenBackend::Xcap),
+            "GNOME or KDE: XTEST into Xwayland reports success and moves nothing"
+        );
+    }
 
     /// How many tools each of this machine's own capabilities announces.
     ///
