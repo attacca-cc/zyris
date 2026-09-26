@@ -472,8 +472,10 @@ impl Playback {
 
         let counters = Counters::new();
 
-        // Mono first: the vocoder is mono and a backend that will take it saves the spreading.
-        // A backend that insists on its own channel count gets it, and [`Fill`] spreads.
+        // **The device's own channel count first**, and [`Fill`] spreads the mono voice across
+        // it. Mono first was taken whenever a backend would accept it, and PipeWire does: it
+        // linked the one channel to the sink's front-left and nothing else, so a pair of
+        // speakers played the answer from the left only. Mono stays as the fallback.
         //
         // **The queue is built inside the attempt, not before it.** A `Fill` owns the only
         // receiving end of it, and `build_output_stream` consumes the closure the `Fill` is
@@ -482,7 +484,7 @@ impl Playback {
         // for why a wrong rate is refused rather than converted.
         let mut opened = None;
         let mut refusal = None;
-        for channels in [1u16, native.channels()] {
+        for channels in [native.channels(), 1u16] {
             let config = cpal::StreamConfig {
                 channels,
                 sample_rate: rate,
