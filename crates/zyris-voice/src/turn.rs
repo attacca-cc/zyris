@@ -235,6 +235,15 @@ pub enum TurnEvent {
     Lost { reason: String, resubscribing: bool },
 }
 
+/// The summary a `report_result` tool call carries, which is how an agent running a session as
+/// a job answers. `None` for any other tool call.
+fn reported_summary(payload: &serde_json::Value) -> Option<String> {
+    (payload.get("name")?.as_str()? == "report_result")
+        .then(|| payload.get("arguments")?.get("summary")?.as_str().map(str::to_string))
+        .flatten()
+        .filter(|summary| !summary.trim().is_empty())
+}
+
 /// The agent a voice session is made with when `voice.json` names no other: the one written for
 /// the ear, attacca-cc/prompts `agents/voice.yml`. Matched by name, which that file marks as
 /// load-bearing.
@@ -776,6 +785,7 @@ impl Feed {
     ) -> Next {
         let mut filter = Filter::new();
         let mut splitter = Splitter::new();
+        let mut answered = false;
 
         loop {
             let idle = tokio::time::sleep(IDLE_FLUSH);
@@ -784,7 +794,7 @@ impl Feed {
             tokio::select! {
                 item = items.next() => match item {
                     Some(Ok(frame)) => {
-                        if !self.on_frame(frame, &mut filter, &mut splitter, generation) {
+                        if !self.on_frame(frame, &mut filter, &mut splitter, &mut answered, generation) {
                             return Next::Stop;
                         }
                     }
@@ -830,6 +840,7 @@ impl Feed {
         frame: ZTurnFrame,
         filter: &mut Filter,
         splitter: &mut Splitter,
+        answered: &mut bool,
         generation: u64,
     ) -> bool {
         match frame {
@@ -842,6 +853,9 @@ impl Feed {
                     ZDeltaKind::Assistant => Kind::Assistant,
                     ZDeltaKind::Reasoning => Kind::Reasoning,
                 };
+                if kind == Kind::Assistant && !text.trim().is_empty() {
+                    *answered = true;
+                }
                 let reading = filter.read(kind, &text);
                 if !self.publish(
                     TurnEvent::Shown { kind, text: reading.shown.text().to_string() },
@@ -864,9 +878,35 @@ impl Feed {
                     }
                     state.cursor = Some(cursor);
                 }
+                // **An answer that arrives as a report instead of as text.** An agent running a
+                // session as a job answers through its `report_result` tool: the web app shows
+                // that summary as the reply, and no assistant delta is written at all, so a
+                // question to such a session was heard, answered, and never said. Read the
+                // summary — but only in a turn that wrote nothing else, or it is said twice.
+                let report = (!*answered && event.kind == "tool_call")
+                    .then(|| reported_summary(&event.payload))
+                    .flatten();
+                if let Some(summary) = report {
+                    *answered = true;
+                    let reading = filter.read(Kind::Assistant, &format!("{summary} "));
+                    if !self.publish(
+                        TurnEvent::Shown { kind: Kind::Assistant, text: reading.shown.text().to_string() },
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    for fragment in splitter.push(&reading.aloud) {
+                        if !self.publish(TurnEvent::Say(fragment), generation) {
+                            return false;
+                        }
+                    }
+                }
                 self.publish(TurnEvent::Event { cursor, event }, generation)
             }
             ZTurnFrame::Status { running } => {
+                if running {
+                    *answered = false;
+                }
                 if !running {
                     // **The end of a turn, and the only thing that releases the last word.**
                     // `Filter::finish` holds the final token until something tells it the turn
@@ -1257,6 +1297,54 @@ mod tests {
             vec![Call::Subscribe { after: None }, Call::Subscribe { after: None }],
             "the message must not have been posted on the strength of the old subscription"
         );
+    }
+
+    /// A session run as a job answers through `report_result` and writes no text; the summary is
+    /// the answer, and it has to be said. In a turn that did write text, it is not said again.
+    #[tokio::test]
+    async fn a_reported_summary_is_said_when_the_turn_wrote_nothing_else() {
+        let report = |cursor: i64, summary: &str| -> zyris::Result<ZTurnFrame> {
+            Ok(ZTurnFrame::Event {
+                cursor,
+                event: ZSessionEvent {
+                    seq: cursor,
+                    cursor,
+                    kind: "tool_call".to_string(),
+                    payload: serde_json::json!({
+                        "kind": "tool_call",
+                        "name": "report_result",
+                        "arguments": { "status": "success", "summary": summary },
+                    }),
+                    created_at: None,
+                },
+            })
+        };
+        let api = Fake::new();
+        let feed = Feed::new("session-1");
+        let mut events = feed.events();
+        feed.attach(api.clone()).await;
+        let stream = within("the subscription", api.stream(0)).await;
+
+        stream.send(Ok(ZTurnFrame::Status { running: true })).unwrap();
+        stream.send(report(1, "Yes, I can hear you.")).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: true })).unwrap();
+        stream.send(assistant("Already said. ")).unwrap();
+        stream.send(report(2, "Not to be said twice.")).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+
+        // The subscription opens with the session's status, which is not the end of a turn.
+        let mut spoken = Vec::new();
+        let (mut started, mut ends) = (false, 0);
+        while ends < 2 {
+            match next_event(&mut events).await {
+                TurnEvent::Say(fragment) => spoken.push(fragment.text().to_string()),
+                TurnEvent::Running(true) => started = true,
+                TurnEvent::Running(false) if started => ends += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(spoken, vec!["Yes, I can hear you.".to_string(), "Already said.".to_string()]);
     }
 
     /// Rule 1, at the seam this task owns. The kind is a protocol-level distinction and the only
