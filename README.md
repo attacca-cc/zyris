@@ -42,7 +42,11 @@ pause switch, the audit log, and what Attacca lets an agent call in the first pl
 
 `input` and `screen_capture` are announced together or not at all — an agent that can see the
 screen but not act on it is half useful, and one that can act but not see is guessing
-coordinates. On Linux, neither appears when no display server answers. On Windows they are
+coordinates. On Linux, neither appears when no display server answers. The one exception is a
+Wayland session on a compositor that is not wlroots-based — GNOME, KDE — where `screen_capture`
+is announced and `input` is not: the only input path there is XTEST into Xwayland, which reports
+success while the pointer on screen does not move. On Hyprland, Sway and other wlroots
+compositors `input` drives `wlr-virtual-pointer` and is announced as usual. On Windows they are
 always announced: the layer underneath reports success without checking, so there is nothing
 to detect, and on a Windows session with no interactive desktop the pointer calls will look
 like they worked. Positions are in the pixels a screenshot actually returned, which on a scaled
