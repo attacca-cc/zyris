@@ -9099,6 +9099,7 @@ dependencies = [
  "directories",
  "futures-util",
  "global-hotkey",
+ "gtk",
  "open",
  "serde",
  "serde_json",

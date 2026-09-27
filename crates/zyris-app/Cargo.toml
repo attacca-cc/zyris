@@ -44,6 +44,8 @@ tracing-subscriber = { workspace = true }
 # `ashpd` speaks D-Bus to `xdg-desktop-portal`, which exists nowhere else. Windows takes the
 # `global-hotkey` path above and never reaches this.
 [target.'cfg(target_os = "linux")'.dependencies]
+# The version Tauri itself builds on, for styling the title bar GTK draws.
+gtk = "0.18"
 ashpd = { workspace = true }
 futures-util = { workspace = true }
 

@@ -34,6 +34,28 @@ use zyris_tools::{Servers, Tools, Transfers};
 /// the one somebody forgot. Blocking, because both callers are on the main thread with the event
 /// loop already finished or never started — there is nothing left to keep responsive, and the wait
 /// is what makes the stop mean anything.
+/// GTK draws the title bar on Linux, in the desktop theme's colours and a bold title that sit
+/// badly over the window's near-black. This makes it thin and dark to match; the buttons and
+/// dragging stay GTK's, so tiling and window rules keep working.
+#[cfg(target_os = "linux")]
+fn quiet_title_bar() {
+    use gtk::prelude::CssProviderExt;
+    let css = gtk::CssProvider::new();
+    let style = b"headerbar { min-height: 28px; padding: 0 6px; background: #0f0c0a; \
+                  border: none; border-bottom: 1px solid #1d1814; box-shadow: none; } \
+                  headerbar .title { font-weight: normal; font-size: 12px; color: #7d756e; } \
+                  headerbar button { min-height: 20px; min-width: 20px; padding: 2px; \
+                  color: #7d756e; background: none; border: none; box-shadow: none; } \
+                  headerbar button:hover { color: #e8e2dc; background: #1d1814; }";
+    if let Err(error) = css.load_from_data(style) {
+        tracing::warn!(%error, "could not style the title bar");
+        return;
+    }
+    if let Some(screen) = gtk::gdk::Screen::default() {
+        gtk::StyleContext::add_provider_for_screen(&screen, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+}
+
 fn stop_mcp_servers(servers: &Servers, runtime: &tokio::runtime::Handle) {
     runtime.block_on(servers.stop_all());
 }
@@ -259,6 +281,9 @@ pub fn run(
             bridge::new_conversation_session,
         ])
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            quiet_title_bar();
+
             // Taken here, after the single-instance plugin above has already had first refusal:
             // a second GUI launch has to reach that plugin — which focuses the running window
             // and lets this process exit — rather than being turned away before Tauri even
