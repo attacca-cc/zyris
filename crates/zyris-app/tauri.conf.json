@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Zyris",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "identifier": "cc.attacca.zyris",
   "build": {
     "frontendDist": "../../ui/dist",
@@ -29,7 +29,15 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "nsis"],
+    "targets": ["deb", "rpm", "nsis"],
+    "linux": {
+      "deb": {
+        "depends": ["libpipewire-0.3-0", "libasound2", "libgbm1", "libayatana-appindicator3-1"]
+      },
+      "rpm": {
+        "depends": ["pipewire-libs", "alsa-lib", "mesa-libgbm", "libayatana-appindicator-gtk3"]
+      }
+    },
     "icon": [
       "icons/icon.png",
       "icons/128x128@2x.png",
