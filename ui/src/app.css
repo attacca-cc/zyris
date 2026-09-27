@@ -1,8 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-/* Bundled rather than fetched: the window's CSP allows only 'self'. */
-@import "pretendard/dist/web/variable/pretendardvariable.css";
-@import "@fontsource-variable/space-grotesk";
+/* The fonts are registered in fonts.ts, not here; it says why. */
 
 /* The zyris.attacca.cc palette — `src/app/globals.css` in ridanit-ruma/zyris-attacca-cc — as
    shadcn's token names, so the components read the same names they are written against. There

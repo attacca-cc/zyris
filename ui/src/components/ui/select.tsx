@@ -1,10 +1,29 @@
+import { useEffect, useState } from "react";
 import type * as React from "react";
 import { Select as SelectPrimitive } from "radix-ui";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-function Select(props: React.ComponentProps<typeof SelectPrimitive.Root>) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />;
+// The choice shows at once. The screens answer a change with a round trip to Rust and show what
+// the machine then says, which left the old value on screen for as long as a microphone took to
+// reopen; the new one is shown until the control is enabled again or the value moves.
+function Select({ value, onValueChange, disabled, ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) {
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => {
+    if (!disabled) setPending(null);
+  }, [disabled, value]);
+  return (
+    <SelectPrimitive.Root
+      data-slot="select"
+      value={pending ?? value}
+      disabled={disabled}
+      onValueChange={(next) => {
+        setPending(next);
+        onValueChange?.(next);
+      }}
+      {...props}
+    />
+  );
 }
 
 function SelectValue(props: React.ComponentProps<typeof SelectPrimitive.Value>) {
@@ -42,14 +61,12 @@ function SelectContent({
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
   return (
-    // No open or close animation: a list someone is choosing from should be there at once, and
-    // the fade-out left a frame of the full list behind before it went.
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
         data-slot="select-content"
         position={position}
         className={cn(
-          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-lg border bg-popover text-popover-foreground shadow-xl shadow-black/40",
+          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-lg border bg-popover text-popover-foreground shadow-xl shadow-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0",
           position === "popper" && "w-full min-w-(--radix-select-trigger-width) data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1",
           className,
         )}
