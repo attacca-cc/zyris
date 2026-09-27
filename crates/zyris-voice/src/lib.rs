@@ -591,6 +591,34 @@ impl Voice {
         self.look().await
     }
 
+    /// Read answers aloud or not, now and at the next launch.
+    pub async fn set_read_aloud(&self, on: bool) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.set_read_aloud(on).await;
+        }
+        let _ = on;
+        self.look().await
+    }
+
+    /// Send a typed message to the conversation's session.
+    pub async fn send_text(&self, text: String) -> Result<(), String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.send_text(text).await;
+        }
+        let _ = text;
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Stop reading the answer aloud, as the push-to-talk key would. Nothing if nothing is.
+    pub fn stop_speaking(&self) {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.stop_speaking();
+        }
+    }
+
     /// Choose how fast answers are read, now and at the next launch.
     pub async fn choose_speaking_rate(&self, rate: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

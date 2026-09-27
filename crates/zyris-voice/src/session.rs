@@ -1628,6 +1628,25 @@ impl Speaking {
         Some(interruption)
     }
 
+    /// Stop reading, without interrupting anybody: what is queued is thrown away and whatever is
+    /// still being made is dropped when it finishes, but the turn goes on, nothing is cancelled
+    /// and no note is kept for the next message. Reading aloud was switched off; the agent was
+    /// not cut off.
+    ///
+    /// Traces `Spoke` when something was being read, so the window stops showing speech.
+    pub fn hush(&self) {
+        let mut state = self.lock();
+        state.generation += 1;
+        self.out.silence();
+        let was_reading = !state.ledger.is_empty();
+        state.ledger.clear();
+        drop(state);
+        if was_reading {
+            self.trace(crate::Trace::Spoke);
+            self.publish(VoiceEvent::Spoke);
+        }
+    }
+
     /// Cancel the turn that was interrupted.
     ///
     /// Separate from [`Speaking::stop`] because the two halves belong to different places: the
@@ -3598,6 +3617,32 @@ mod barge_in {
         let note = rig.speaking.take_note().expect("the interruption left a note");
         assert!(note.contains("\u{201c}Yes.\u{201d}"), "the note is the one it describes: {note}");
         assert_eq!(rig.speaking.take_note(), None, "and it goes in front of one message, not two");
+    }
+
+    /// Switching reading aloud off stops the speaker where it is, but interrupts nobody: no
+    /// cancel, no note, and a sentence that finishes being made afterwards is not played.
+    #[tokio::test]
+    async fn hushing_stops_the_speaker_without_interrupting_the_turn() {
+        let (voice, open) = Voicebox::gated();
+        let mut rig = rig(voice);
+        open.send(()).expect("the first sentence goes straight through");
+        rig.say("Yes.").await;
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+        let speaking = rig.speaking.clone();
+        let making = tokio::spawn(async move { speaking.synthesise("And more.").await });
+        settle().await;
+
+        rig.speaking.hush();
+        open.send(()).expect("the voice is waiting");
+        tokio::time::timeout(PATIENCE, making).await.expect("finishes").expect("no panic");
+
+        // The discard happens in the callback.
+        rig.play(6000);
+        assert_eq!(rig.speaker.played(), 0, "nothing reached the device after the switch");
+        assert_eq!(rig.speaker.pending(), 0, "and nothing is left to play");
+        assert_eq!(rig.next_event().await, VoiceEvent::Spoke);
+        assert_eq!(rig.speaking.take_note(), None, "nobody was interrupted");
+        assert_eq!(rig.conversation.told(), Vec::new(), "and nothing was cancelled");
     }
 
     /// **The hole this closes**: the key going down while the agent is still thinking, or while
