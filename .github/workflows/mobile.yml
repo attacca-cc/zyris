@@ -143,7 +143,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # `init` refuses to write a project with no development team, even one only ever built for
+      # the simulator, which signs nothing. Without the secret it gets a placeholder that never
+      # reaches a signing step.
       - name: Generate the Xcode project
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM || 'SIMULATOR0' }}
         run: pnpm tauri ios init --ci
 
       # **An iPhone runs only what Apple has signed for it**, and signing needs the account's
@@ -151,6 +156,8 @@ jobs:
       # simulator, which checks that everything compiles and links for iOS and publishes nothing.
       - name: Build for the simulator (no signing identity)
         if: env.APPLE_DEVELOPMENT_TEAM == ''
+        env:
+          APPLE_DEVELOPMENT_TEAM: SIMULATOR0
         run: pnpm tauri ios build --target aarch64-sim --debug --ci
 
       - name: Build the signed IPA
