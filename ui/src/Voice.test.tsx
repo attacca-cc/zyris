@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 import { Voice, type VoiceScreen } from "./Voice";
+import { choose, optionsOf, shown } from "./test/select";
 
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
 const TAKES = "/home/ada/.local/share/zyris/wake-word";
@@ -138,9 +139,10 @@ function answers(first: Screen, then?: Screen) {
 // the DOM: a test on class names passes for a screen that paints two states identically and says
 // the same words about both.
 // The microphone dropdown's entries, the default among them.
-function microphones(): HTMLOptionElement[] {
-  const picker = screen.queryByRole("combobox", { name: /the microphone/i });
-  return picker ? Array.from(picker.querySelectorAll("option")) : [];
+function microphones(): string[] {
+  return screen.queryByRole("combobox", { name: /the microphone/i })
+    ? optionsOf(/the microphone/i)
+    : [];
 }
 
 function readable(): string {
@@ -258,7 +260,7 @@ describe("Voice", () => {
     await screen.findByText(/no GlobalShortcuts interface/i);
     // **The rule this whole project keeps restating**: a control that cannot work is worse than
     // an absent one. Opening a microphone here would open one nothing could ever start a turn on.
-    expect(screen.queryByRole("button", { name: /turn on/i })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /listening/i })).toBeNull();
     expect(readable()).toMatch(/no push-to-talk key on this desktop/i);
   });
 
@@ -279,7 +281,7 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    expect(await screen.findByRole("button", { name: /turn on/i })).toBeTruthy();
+    expect(await screen.findByRole("switch", { name: /listening/i })).toBeTruthy();
   });
 
   // ------------------------------------------------------------------------------------------
@@ -300,7 +302,7 @@ describe("Voice", () => {
     );
 
     render(<Voice />);
-    (await screen.findByRole("button", { name: /turn on/i })).click();
+    fireEvent.click(await screen.findByRole("switch", { name: /listening/i }));
 
     await waitFor(() =>
       expect(readable()).toMatch(/the speech model has not been downloaded yet/i),
@@ -357,7 +359,7 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/made without the audio stack/i);
-    expect(screen.queryByRole("button", { name: /turn on/i })).toBeNull();
+    expect(screen.queryByRole("switch", { name: /listening/i })).toBeNull();
   });
 
   it("re-reads the machine when a turn fails, and not when one merely ends", async () => {
@@ -413,7 +415,7 @@ describe("Voice", () => {
     render(<Voice />);
 
     await waitFor(() => expect(microphones().length).toBe(3));
-    const labels = microphones().map((o) => o.textContent);
+    const labels = microphones();
     expect(labels).toContain("Built-in Audio Analog Stereo — microphone (default)");
     expect(labels).toContain("Built-in Audio Analog Stereo — loudspeaker and microphone");
   });
@@ -424,13 +426,12 @@ describe("Voice", () => {
     render(<Voice />);
 
     await waitFor(() => expect(microphones()).toHaveLength(3));
-    const picker = screen.getByRole<HTMLSelectElement>("combobox", { name: /the microphone/i });
     // A screen that showed the wrong one as chosen would have somebody recording their
     // loudspeakers and reading that they had picked the microphone.
-    expect(picker.value).toBe("device:alsa_output.builtin.monitor");
+    expect(shown(/the microphone/i)).toBe("Built-in Audio Analog Stereo — loudspeaker and microphone");
     expect(readable()).toMatch(/what this computer is playing/i);
 
-    fireEvent.change(picker, { target: { value: "device:alsa_input.builtin" } });
+    choose(/the microphone/i, "Built-in Audio Analog Stereo — microphone (default)");
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_device", {
         device: { kind: "device", id: "alsa_input.builtin" },
@@ -469,8 +470,8 @@ describe("Voice", () => {
     answers(machine({}));
     render(<Voice />);
 
-    const picker = await screen.findByRole("combobox", { name: /the speaker/i });
-    fireEvent.change(picker, { target: { value: "device:alsa_output.hdmi" } });
+    await screen.findByRole("combobox", { name: /the speaker/i });
+    choose(/the speaker/i, /HDMI/);
 
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_speaker", {
@@ -499,10 +500,11 @@ describe("Voice", () => {
     );
     render(<Voice />);
 
-    const picker = await screen.findByRole<HTMLSelectElement>("combobox", { name: /speech model/i });
-    expect(Array.from(picker.options).map((o) => o.value)).toEqual(["base", "turbo"]);
-    expect(picker.value).toBe("base");
-    fireEvent.change(picker, { target: { value: "turbo" } });
+    const base = await screen.findByRole("radio", { name: "Base" });
+    expect(base.getAttribute("aria-checked")).toBe("true");
+    // Only what is on disk can be chosen.
+    expect(screen.getByRole("radio", { name: "Small" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: "Turbo" }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }),
     );
@@ -516,18 +518,16 @@ describe("Voice", () => {
   it("chooses which of several GPUs transcribes, and the processor for reading aloud", async () => {
     render(<Voice />);
 
-    const transcribe = await screen.findByRole<HTMLSelectElement>("combobox", {
-      name: /where speech is transcribed/i,
-    });
-    expect(transcribe.value).toBe("gpu:0");
-    expect(Array.from(transcribe.options).map((o) => o.value)).toEqual(["cpu", "gpu:0", "gpu:1"]);
-    fireEvent.change(transcribe, { target: { value: "gpu:1" } });
+    await screen.findByRole("combobox", { name: /where speech is transcribed/i });
+    const names = optionsOf(/where speech is transcribed/i);
+    expect(names).toHaveLength(3);
+    expect(shown(/where speech is transcribed/i)).toBe(names[1]);
+    choose(/where speech is transcribed/i, names[2]);
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_compute", { transcribe: "gpu:1", speak: null }),
     );
 
-    const speak = screen.getByRole<HTMLSelectElement>("combobox", { name: /read aloud/i });
-    fireEvent.change(speak, { target: { value: "cpu" } });
+    choose(/where answers are read aloud/i, optionsOf(/where answers are read aloud/i)[0]);
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("set_voice_compute", { transcribe: null, speak: "cpu" }),
     );
@@ -536,9 +536,9 @@ describe("Voice", () => {
   it("sets how fast answers are read", async () => {
     render(<Voice />);
 
-    const picker = await screen.findByRole<HTMLSelectElement>("combobox", { name: /how fast/i });
-    expect(picker.value).toBe("1.25");
-    fireEvent.change(picker, { target: { value: "1.4" } });
+    await screen.findByRole("combobox", { name: /how fast/i });
+    expect(shown(/how fast/i)).toBe("1.25×");
+    choose(/how fast/i, "1.4×");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speaking_rate", { rate: 1.4 }));
   });
 
@@ -547,9 +547,10 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await screen.findByRole("button", { name: /download base/i });
+    const download = await screen.findByRole("button", { name: /download base/i });
     expect(readable()).toContain("141 MB");
-    expect(readable()).toContain(MODEL);
+    // Where it goes is on the button, for whoever wants to know before agreeing.
+    expect(download.getAttribute("title")).toContain(MODEL);
   });
 
   it("offers no download for something at the model's path that could not be read", async () => {
