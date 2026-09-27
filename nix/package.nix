@@ -36,11 +36,11 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "zyris";
-  version = "0.1.1";
+  version = "0.1.2";
 
   src = fetchurl {
     url = "https://github.com/attacca-cc/zyris/releases/download/v${finalAttrs.version}/Zyris_${finalAttrs.version}_amd64.deb";
-    hash = "sha256-IO0A6EF00C/s+SQo5o4ph3vidzjoYQwMXnFsxOzVPV4=";
+    hash = "sha256-aORjDU36SyM9K2dHqpMqBu9BO0COQUOT6hc2UQbNTWg=";
   };
 
   nativeBuildInputs = [
@@ -69,6 +69,7 @@ stdenv.mkDerivation (finalAttrs: {
     xorg.libxcb
     xorg.libX11
     wayland
+    vulkan-loader
   ];
 
   # Loaded with dlopen, so autoPatchelf cannot see them in the binary: the tray, and the
