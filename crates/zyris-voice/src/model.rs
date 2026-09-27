@@ -623,9 +623,14 @@ mod tests {
     /// A directory that goes away with the test. `tempfile` is not a dependency of this crate
     /// and one download test is not a reason to make it one.
     fn tempdir() -> PathBuf {
+        // **A counter, not only the clock.** Windows' clock is coarse enough that two tests
+        // starting together read the same instant, got the same directory, and one test's
+        // finished download showed up as the other's leftover.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "zyris-stt-{}-{}",
+            "zyris-stt-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -654,16 +659,10 @@ mod tests {
     }
 
     fn assert_nothing_left_behind(dir: &Path, model: &Model) {
-        // The same lazy delete as the part files below: on Windows a file under the model's own
-        // name can stay visible for a moment after it was removed, and failed CI once.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while dir.join(model.file).exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "a failed download must never leave a file under the model's own name"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        assert!(
+            !dir.join(model.file).exists(),
+            "a failed download must never leave a file under the model's own name"
+        );
 
         // **Windows deletes lazily and this assertion has to know that.** `remove_file` on a
         // file another handle still holds does not unlink it; it marks it delete-pending, and
