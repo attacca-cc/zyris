@@ -165,7 +165,13 @@ jobs:
           APPLE_DEVELOPMENT_TEAM: SIMULATOR0
         run: |
           set -uo pipefail
-          printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGN_IDENTITY =\nDEVELOPMENT_TEAM =\n' > "$RUNNER_TEMP/unsigned.xcconfig"
+          # Signing off in the project itself: an xcconfig passed from outside does not stop
+          # Xcode's automatic signing asking for an account and a provisioning profile.
+          project=crates/zyris-app/gen/apple/zyris-app.xcodeproj/project.pbxproj
+          sed -i '' -e 's/DEVELOPMENT_TEAM = SIMULATOR0;/DEVELOPMENT_TEAM = ""; CODE_SIGN_STYLE = Manual; CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; PROVISIONING_PROFILE_SPECIFIER = "";/' "$project"
+          sed -i '' -e 's/CODE_SIGN_STYLE = Automatic;//' "$project"
+          grep -c "CODE_SIGNING_ALLOWED = NO" "$project"
+          printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGN_IDENTITY =\nDEVELOPMENT_TEAM =\nCODE_SIGN_STYLE = Manual\n' > "$RUNNER_TEMP/unsigned.xcconfig"
           export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/unsigned.xcconfig"
           pnpm tauri ios build --target aarch64 --ci || echo "the export needs signing; keeping the archive"
           set -e

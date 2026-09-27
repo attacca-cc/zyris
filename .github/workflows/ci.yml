@@ -1,7 +1,10 @@
 name: CI
 
+# Pull requests, and main once they land. Not every branch push as well: a pull request's
+# branch was tested twice for each commit, once as a push and once as the pull request.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
