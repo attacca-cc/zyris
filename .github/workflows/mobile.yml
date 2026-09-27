@@ -171,6 +171,21 @@ jobs:
           sed -i '' -e 's/DEVELOPMENT_TEAM = SIMULATOR0;/DEVELOPMENT_TEAM = ""; CODE_SIGN_STYLE = Manual; CODE_SIGNING_ALLOWED = NO; CODE_SIGNING_REQUIRED = NO; CODE_SIGN_IDENTITY = ""; PROVISIONING_PROFILE_SPECIFIER = "";/' "$project"
           sed -i '' -e 's/CODE_SIGN_STYLE = Automatic;//' "$project"
           grep -c "CODE_SIGNING_ALLOWED = NO" "$project"
+          # And in project.yml, which `tauri ios build` turns back into the project above.
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("crates/zyris-app/gen/apple/project.yml")
+          text = p.read_text()
+          def unsigned(m):
+              pad = m.group(1)
+              keys = ["CODE_SIGN_STYLE: Manual", "CODE_SIGNING_ALLOWED: NO", "CODE_SIGNING_REQUIRED: NO",
+                      'CODE_SIGN_IDENTITY: ""', 'PROVISIONING_PROFILE_SPECIFIER: ""']
+              return pad + 'DEVELOPMENT_TEAM: ""' + "".join("\n" + pad + k for k in keys)
+          text, n = re.subn(r"^([ \t]*)DEVELOPMENT_TEAM: \S+", unsigned, text, flags=re.M)
+          text = re.sub(r"^([ \t]*)CODE_SIGN_STYLE: Automatic\n", "", text, flags=re.M)
+          p.write_text(text)
+          print("project.yml: signing off in", n, "places")
+          PY
           printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGN_IDENTITY =\nDEVELOPMENT_TEAM =\nCODE_SIGN_STYLE = Manual\n' > "$RUNNER_TEMP/unsigned.xcconfig"
           export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/unsigned.xcconfig"
           pnpm tauri ios build --target aarch64 --ci || echo "the export needs signing; keeping the archive"
