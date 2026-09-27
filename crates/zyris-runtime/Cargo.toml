@@ -16,6 +16,12 @@ tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing = { workspace = true }
 zyris = { workspace = true }
 
+# keyring's Apple store refuses to build for iOS without its `protected` feature (the data
+# protection keychain, the only one an iOS app has), and keyring's own features only turn it on
+# in its `cli` bundle. Named here for that target alone; the desktop build is unchanged.
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
+
 [dev-dependencies]
 # `testing` gives `zyris::testing::duplex`, a pair of connected nodes with no socket in it.
 # `announcement.rs`'s assertions are all about what the *peer* can see and call, and there is no
