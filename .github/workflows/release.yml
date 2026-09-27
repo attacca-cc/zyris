@@ -60,9 +60,9 @@ jobs:
           - os: ubuntu-latest
             container: debian:bookworm
             artifact: zyris-linux
-            # Speech, and the echo canceller with it. `aec` implies `voice`; it is spelled out
-            # so a reader of this file can see both without opening a manifest.
-            features: voice,aec
+            # Speech, the echo canceller, and transcription on any Vulkan GPU. `aec` implies
+            # `voice`; it is spelled out so a reader of this file can see it without opening a manifest.
+            features: voice,aec,gpu-stt
             # Nothing to add to `tauri.conf.json` on Linux.
             config: ""
             # The filenames carry the version and the architecture, so glob rather than guess.
@@ -72,7 +72,7 @@ jobs:
           # signed or notarised: the notes say how to open it the first time.
           - os: macos-latest
             artifact: zyris-macos
-            features: voice
+            features: voice,metal
             config: ""
             bundles: target/release/bundle/dmg/*.dmg
           - os: windows-latest
@@ -159,6 +159,8 @@ jobs:
             libgbm-dev \
             libasound2-dev \
             libclang-dev \
+            libvulkan-dev \
+            glslc \
             ninja-build \
             python3-pip
           # Meson from PyPI: the echo canceller's build runs `meson setup --reconfigure` on a

@@ -41,7 +41,8 @@
           "libpipewire-0.3-0",
           "libasound2",
           "libgbm1",
-          "libayatana-appindicator3-1"
+          "libayatana-appindicator3-1",
+          "libvulkan1"
         ]
       },
       "rpm": {
@@ -49,7 +50,8 @@
           "pipewire-libs",
           "alsa-lib",
           "mesa-libgbm",
-          "libayatana-appindicator-gtk3"
+          "libayatana-appindicator-gtk3",
+          "vulkan-loader"
         ]
       }
     },

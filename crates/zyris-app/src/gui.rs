@@ -463,7 +463,7 @@ pub fn run(
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
             // Tauri would call `std::process::exit` next; this does the same, minus the C++
-            // exit handlers that crash a GPU voice build. See `zyris_voice::exit_process`.
+            // exit handlers that crash a voice build. See `zyris_voice::exit_process`.
             zyris_voice::exit_process(0);
         }
         _ => {}
