@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { KeyRoundIcon, WifiIcon, WifiOffIcon } from "lucide-react";
 import type { State } from "./state";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { CopyButton, Fingerprint } from "@/components/CopyButton";
+import { IconTile, Mono, Note, Problem } from "@/components/IconTile";
+import { Page, PageHeader } from "@/components/PageHeader";
 
 // This computer's own peer fingerprint, as the `peer_fingerprint` command answers with it — the
 // same string `Peering::fingerprint` hands the approval screen about somebody else's machine, and
@@ -44,74 +49,89 @@ export function Status({ state }: { state: State }) {
   }, []);
 
   return (
-    <main className="screen">
-      <header className="status-head">
-        {/* Freshness is an indicator's job; the text says what is true, not how long ago. */}
-        <span className={state.connected ? "dot dot-on" : "dot dot-off"} aria-hidden="true" />
-        <h1>{state.connected ? "Connected" : "Not connected"}</h1>
-      </header>
+    <Page>
+      <PageHeader title="Status" description="This computer's link to Attacca." />
 
-      {state.node ? (
-        <dl className="facts">
-          <dt>Node</dt>
-          <dd>{state.node.nodeName}</dd>
-          <dt>Id</dt>
-          <dd className="mono">{state.node.nodeId}</dd>
-        </dl>
-      ) : (
-        <p className="muted">This node has not connected yet.</p>
-      )}
+      <Card
+        className={
+          state.connected
+            ? "bg-[radial-gradient(500px_200px_at_0%_0%,rgba(127,176,105,0.08),transparent_70%),var(--card)]"
+            : undefined
+        }
+      >
+        <CardHeader className="items-center">
+          <IconTile tone={state.connected ? "success" : "muted"} className="size-11 rounded-xl [&_svg]:size-5">
+            {state.connected ? <WifiIcon /> : <WifiOffIcon />}
+          </IconTile>
+          <div className="flex flex-col gap-0.5">
+            <h2 className="m-0 text-lg font-semibold text-heading">{state.connected ? "Connected" : "Not connected"}</h2>
+            <CardDescription>
+              {state.connected ? "Your agents can reach this computer." : "Your agents cannot reach this computer right now."}
+            </CardDescription>
+          </div>
+        </CardHeader>
 
-      {!state.connected && state.problem && (
-        <p className="problem">
-          {state.problem}
-          <br />
-          <span className="muted">
-            {state.retrying
-              ? "Zyris keeps trying on its own."
-              : "Zyris has stopped trying. Restart it to reconnect."}
-          </span>
-        </p>
-      )}
+        {!state.connected && state.problem && (
+          <div className="flex flex-col gap-1">
+            <Problem>{state.problem}</Problem>
+            <Note>
+              {state.retrying ? "Zyris keeps trying on its own." : "Zyris has stopped trying. Restart it to reconnect."}
+            </Note>
+          </div>
+        )}
 
-      {/* **The other half of the approval screen, and it lives here rather than beside the node
-          id above.** Somebody reaches this section because a different computer is asking them to
-          approve this one and they have been told to come and read the value off it. That works
-          before this machine has ever connected — the key is on disk and the endpoint binds
-          without a network — so it must not be inside the `state.node` branch, which is empty
-          until Attacca has answered.
+        {state.node ? (
+          <dl className="m-0 grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-x-4 gap-y-3 border-t border-sidebar-border pt-4 text-[0.84375rem]">
+            <dt className="text-muted-foreground">Computer name</dt>
+            <dd className="m-0 text-heading">{state.node.nodeName}</dd>
+            <dt className="text-muted-foreground">Node ID</dt>
+            <dd className="m-0 flex min-w-0 items-center gap-2">
+              <Mono className="truncate text-foreground">{state.node.nodeId}</Mono>
+              <CopyButton text={state.node.nodeId} label="Copy the node ID" />
+            </dd>
+          </dl>
+        ) : (
+          <Note>This computer has not connected yet.</Note>
+        )}
+      </Card>
 
-          Not in the `facts` list either, for the opposite reason: the two values above come from
-          Attacca and name this node on the account, and this one comes from a key file on this
-          disk and names this machine to its peers. Putting a third `dt` under the same `dl` would
-          invite exactly the mix-up a person is least able to recover from — reading the node id
-          aloud, character by character, against a fingerprint. */}
-      <section>
-        <h2>This computer&rsquo;s fingerprint</h2>
+      {/* **Apart from the node id above, on purpose.** Those come from Attacca and name this node
+          on the account; this comes from a key file on this disk and names this machine to its
+          peers. It works before this machine has ever connected, so it is not inside the node
+          branch — and keeping it separate stops anybody reading the node id aloud against a
+          fingerprint. */}
+      <Card>
+        <CardHeader className="items-center">
+          <IconTile>
+            <KeyRoundIcon />
+          </IconTile>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <CardTitle>This computer's fingerprint</CardTitle>
+            <CardDescription>Read this out when another of your machines asks you to approve this one.</CardDescription>
+          </div>
+          {typeof fingerprint === "string" && !fingerprintProblem && (
+            <CopyButton text={fingerprint} label="Copy the fingerprint" withText />
+          )}
+        </CardHeader>
         {fingerprintProblem ? (
-          <p className="problem">{fingerprintProblem}</p>
+          <Problem>{fingerprintProblem}</Problem>
         ) : fingerprint === undefined ? (
-          <p className="muted">Reading this computer&rsquo;s fingerprint.</p>
+          <Note>Reading this computer's fingerprint.</Note>
         ) : fingerprint === null ? (
-          <p className="muted">
-            File transfer is not running on this computer, so it has no fingerprint and no other
-            machine can send a file here. Zyris says why in its log when it starts.
-          </p>
+          <Note>
+            File transfer is not running on this computer, so it has no fingerprint and no other machine can
+            send a file here. Zyris says why in its log when it starts.
+          </Note>
         ) : (
           <>
-            {/* The same face and spacing the approval screen uses, because the two are read
-                against each other group by group. `white-space: pre-wrap` keeps the single
-                spaces, wrapping happens only at them, and selecting the value copies it whole. */}
-            <p className="fingerprint">{fingerprint}</p>
-            <p className="muted note">
-              Read this out when another of your machines asks you to approve this one. It is the
-              same after every restart, and it is not a secret — it is the short form of this
-              computer&rsquo;s public key, and the only thing it is good for is telling this
-              machine apart from one pretending to be it.
-            </p>
+            <Fingerprint value={fingerprint} />
+            <Note className="text-xs text-subtle">
+              Not a secret — it is the short form of this computer's public key, and it stays the same after
+              every restart.
+            </Note>
           </>
         )}
-      </section>
-    </main>
+      </Card>
+    </Page>
   );
 }

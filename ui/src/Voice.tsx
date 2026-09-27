@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { Children, useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AudioLinesIcon,
@@ -307,7 +307,9 @@ function Section({
         </div>
         {action}
       </CardHeader>
-      {children && <div className="flex flex-col gap-3">{children}</div>}
+      {/* Only when something is in it: a card of conditional lines that are all off is just its
+          header, not a header over an empty gap. */}
+      {Children.toArray(children).length > 0 && <div className="flex flex-col gap-3">{children}</div>}
     </Card>
   );
 }
@@ -335,7 +337,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function Keys({ trigger }: { trigger: string }) {
   const caps = keyCaps(trigger);
   return (
-    <span className="inline-flex items-center gap-1">
+    <span className="mx-0.5 inline-flex items-center gap-1 align-middle whitespace-nowrap">
       {caps.map((cap, i) => (
         <span key={`${cap}-${i}`} className="inline-flex items-center gap-1">
           {i > 0 && <span className="text-subtle">+</span>}
@@ -558,7 +560,7 @@ export function Voice() {
             <span className="text-[0.78125rem] text-muted-foreground">Push-to-talk key</span>
             {hotkey.state === "working" && (
               <>
-                <p className="m-0 flex flex-wrap items-center gap-1.5 text-sm text-heading">
+                <p className="m-0 text-sm leading-7 text-heading">
                   Hold <Keys trigger={hotkey.trigger} /> to talk, from any window.
                 </p>
                 {/* The caveat belongs to the backend, not to whether a key is bound. */}

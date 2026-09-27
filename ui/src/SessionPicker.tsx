@@ -173,7 +173,6 @@ export function SessionPicker({
                 {view.projects.map((p) => (
                   <SelectItem key={p.id} value={p.id}>
                     {p.name}
-                    {p.isDefault ? " (default)" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>

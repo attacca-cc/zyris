@@ -143,7 +143,7 @@ export function fold(turns: Turn[], action: Action): Turn[] {
         ? replaceLast({ ...open, state: "lost", detail: "No speech was found." })
         : replaceLast({ ...open, state: "said", text: action.text });
     case "typed":
-      return [...turns, newYou("said", action.text)];
+      return action.text.trim() === "" ? turns : [...turns, newYou("said", action.text)];
     case "sent": {
       const index = lastIndex(turns, (t) => t.who === "you" && t.state === "said" && t.text === action.text);
       if (index >= 0) return replaceAt(index, { ...(turns[index] as YouTurn), state: "sent" });
