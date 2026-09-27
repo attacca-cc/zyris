@@ -2,20 +2,13 @@ name: Mobile
 
 # The phone apps: an Android APK and an iOS build of the same window, a typed conversation (see
 # `crates/zyris-app/src/mobile.rs`). A `v*` tag attaches them to that tag's release; a manual run
-# builds them, and attaches them to the release named in `release` when one is given.
+# builds them, and attaches them to the release named in `release` when one is given. Not on pull
+# requests: a macOS build is the slowest thing CI runs, and a phone build is checked when one is
+# made.
 on:
   push:
     tags:
       - "v*"
-  # A pull request that touches the phone build checks it, and publishes nothing.
-  pull_request:
-    paths:
-      - "crates/zyris-app/src/mobile.rs"
-      - "crates/zyris-app/src/lib.rs"
-      - "crates/zyris-app/Cargo.toml"
-      - "crates/zyris-app/tauri.conf.json"
-      - "crates/zyris-voice/src/chat.rs"
-      - ".github/workflows/mobile.yml"
   workflow_dispatch:
     inputs:
       release:
@@ -193,6 +186,9 @@ jobs:
           version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' crates/zyris-app/tauri.conf.json | head -1)
           mkdir -p out/Payload
           cp -R "$app" out/Payload/
+          # The static library the executable was linked from is copied in as a resource by the
+          # template; the app does not load it, and it is most of the bundle's size.
+          rm -f out/Payload/*.app/libapp.a
           (cd out && zip -qry "Zyris_${version}_ios-unsigned.ipa" Payload && rm -rf Payload)
           ls -la out
 
