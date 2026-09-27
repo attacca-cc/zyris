@@ -170,10 +170,12 @@ jobs:
           # Vulkan headers newer than Debian 12's 1.3.239: ggml-vulkan uses VK_EXT_layer_settings.
           # Headers only, into /usr/local, which CMake searches before /usr; the loader stays
           # Debian's.
-          curl -fsSL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.357.0.tar.gz | tar xz
+          curl -fsSL -o vulkan-headers.tar.gz https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.357.0.tar.gz
+          echo "e87dce08116151f6b6d7de6b6faf41498e87e6cf848ff16fa3bd5402190ad4a3  vulkan-headers.tar.gz" | sha256sum -c -
+          tar xzf vulkan-headers.tar.gz
           cmake -S Vulkan-Headers-vulkan-sdk-1.4.357.0 -B vulkan-headers -DCMAKE_INSTALL_PREFIX=/usr/local
           $SUDO cmake --install vulkan-headers
-          rm -rf Vulkan-Headers-vulkan-sdk-1.4.357.0 vulkan-headers
+          rm -rf vulkan-headers.tar.gz Vulkan-Headers-vulkan-sdk-1.4.357.0 vulkan-headers
 
       - uses: pnpm/action-setup@v4
 
