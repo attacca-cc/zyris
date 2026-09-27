@@ -324,12 +324,13 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for f in bundles/*/Zyris.app.tar.gz bundles/*/Zyris.app.tar.gz.sig; do
+          # Each artifact keeps the bundler's layout: bundles/<artifact>/<kind>/<file>.
+          for f in $(find bundles -name 'Zyris.app.tar.gz*'); do
             mv "$f" "${f/Zyris.app/Zyris_${TAG#v}_aarch64.app}"
           done
-          entry() { # key file
+          entry() { # key file-glob
             local file sig
-            file=$(ls bundles/*/$2); sig=$(cat "$file.sig")
+            file=$(find bundles -name "$2" | head -1); sig=$(cat "$file.sig")
             jq -n --arg sig "$sig" --arg url "https://github.com/$REPO/releases/download/$TAG/$(basename "$file")" \
               '{signature: $sig, url: $url}' | jq --arg k "$1" '{($k): .}'
           }
