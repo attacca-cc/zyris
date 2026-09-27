@@ -245,6 +245,9 @@ pub struct Engine {
     /// connection and the cursor belongs to the feed.
     feed: Option<Arc<Feed>>,
     live: Mutex<Live>,
+    /// How far each running download has got, keyed as [`crate::view::DownloadView::id`]. A
+    /// plain mutex: it is written from the download's progress callback, which is not async.
+    downloads: std::sync::Mutex<std::collections::BTreeMap<String, crate::view::DownloadView>>,
     /// The settings as last stored, for [`Engine::look`] to read while `live` is held by a start
     /// that is loading models. Without it the Voice screen waited seconds for its first answer.
     shown: std::sync::Mutex<Settings>,
@@ -315,6 +318,7 @@ impl Engine {
             feed: Some(feed),
             shown: std::sync::Mutex::new(settings.clone()),
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
+            downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             loaded: std::sync::Mutex::new(Vec::new()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
@@ -523,7 +527,21 @@ impl Engine {
             wake: wake_view(),
             voice_model: voice_model_view(crate::tts::state()),
             voice_model_env: std::env::var(crate::tts::MODELS_ENV).ok().filter(|n| !n.is_empty()),
+            downloads: self.downloads.lock().expect("downloads is never poisoned").values().cloned().collect(),
         }
+    }
+
+    /// Note how far the download `id` has got, for [`Engine::look`].
+    fn progressed(&self, id: &str, progress: crate::model::Progress) {
+        self.downloads.lock().expect("downloads is never poisoned").insert(
+            id.to_string(),
+            crate::view::DownloadView { id: id.to_string(), received: progress.received, total: progress.total },
+        );
+    }
+
+    /// Forget the download `id`, however it ended.
+    fn finished(&self, id: &str) {
+        self.downloads.lock().expect("downloads is never poisoned").remove(id);
     }
 
     /// Turn listening on or off, and leave the state saying what that did.
@@ -693,7 +711,10 @@ impl Engine {
         let model = stt::choosable(Some(&id)).model;
         let dir = stt::cache_dir()
             .ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
-        stt::fetch(&model, &dir, |_| {}).await.map_err(|f| f.to_string())?;
+        let key = format!("model:{id}");
+        let fetched = stt::fetch(&model, &dir, |progress| self.progressed(&key, progress)).await;
+        self.finished(&key);
+        fetched.map_err(|f| f.to_string())?;
         self.choose_model(id).await;
         Ok(())
     }
@@ -724,7 +745,9 @@ impl Engine {
         std::fs::create_dir_all(&dir).map_err(|error| {
             format!("{} could not be created: {error}", dir.display())
         })?;
-        crate::tts::fetch_missing(&dir, |_| {}).await.map_err(|fault| fault.to_string())
+        let fetched = crate::tts::fetch_missing(&dir, |progress| self.progressed("voice", progress)).await;
+        self.finished("voice");
+        fetched.map_err(|fault| fault.to_string())
     }
 
     /// Record one wake word take from the chosen microphone and keep it.
@@ -1547,6 +1570,19 @@ mod tests {
     }
 
     /// The switch is written down and read back, and the view says what it is.
+    /// A download shows how far it has got while it runs, and is gone once it ends (#31).
+    #[tokio::test]
+    async fn a_running_download_is_in_the_view_until_it_ends() {
+        let engine = Engine::new(None, broadcast::channel(4).0);
+        engine.progressed("model:base", crate::model::Progress { received: 5, total: Some(10) });
+        assert_eq!(
+            engine.look().await.downloads,
+            vec![crate::view::DownloadView { id: "model:base".into(), received: 5, total: Some(10) }]
+        );
+        engine.finished("model:base");
+        assert!(engine.look().await.downloads.is_empty());
+    }
+
     #[tokio::test]
     async fn reading_aloud_is_remembered_and_shown() {
         let dir = tempdir();

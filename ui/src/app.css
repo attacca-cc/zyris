@@ -91,8 +91,10 @@
   /* Everything is sized in rem, so this one line scales the whole window: 16px at the 1000px the
      window opens at, growing to 20px. A tiling window manager hands the window the whole screen,
      and at a fixed size the interface became a small island in the middle of it. */
+  /* One size at every window width (#34). It grew with the window up to 20px, so a maximised
+     window drew everything a quarter larger instead of showing more. */
   html {
-    font-size: clamp(16px, 0.5vw + 11px, 20px);
+    font-size: 16px;
   }
 
   html,

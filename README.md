@@ -547,9 +547,30 @@ actually goes through it.
 ## Install
 
 Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the
-downloads are on the [releases page](https://github.com/attacca-cc/zyris/releases): a
-`Zyris_<version>_amd64.deb` for Debian and Ubuntu, a `Zyris_<version>_x64-setup.exe` for
-Windows. **Nothing is tagged yet** — see Status below for what is still being written.
+downloads are on the [releases page](https://github.com/attacca-cc/zyris/releases):
+
+| Platform | File |
+|---|---|
+| Windows 10/11 (x64) | `Zyris_<version>_x64-setup.exe` |
+| Debian 12+, Ubuntu 23.04+, Mint 22+ | `Zyris_<version>_amd64.deb` |
+| Fedora 37+, openSUSE | `Zyris-<version>-1.x86_64.rpm` |
+| macOS (Apple Silicon) | `Zyris_<version>_aarch64.dmg` |
+| Android (arm64) | `Zyris_<version>_arm64.apk` |
+| iPhone, iPad | `Zyris_<version>_ios-unsigned.ipa`, installed with AltStore or Sideloadly |
+
+**On NixOS**, the flake in this repository packages the released `.deb` against nixpkgs:
+
+```bash
+nix run github:attacca-cc/zyris
+# or, in a NixOS configuration: nixpkgs.overlays = [ zyris.overlays.default ];
+#                                environment.systemPackages = [ pkgs.zyris ];
+```
+
+**The macOS app is not signed or notarised yet**, so the first launch is refused: open it with
+right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zyris.app` once.
+
+**The phone apps are a typed conversation**: enrolment, the connection and the Conversation
+screen. Speech and the tools a computer offers its agents are in the desktop apps only for now.
 
 **These need a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on anything
 older Zyris will not start at all.** Not the speech alone: the transcription engine is compiled

@@ -33,6 +33,9 @@ env:
   # should be. `.cargo/config.toml` names the AVX2 set for every build in this workspace, this
   # one included, and `crates/zyris-voice/build.rs` refuses a release without it.
   GGML_NATIVE: "OFF"
+  # whisper.cpp uses std::filesystem, which Apple's libc++ offers from macOS 10.15, and the
+  # compilers default lower. Every Apple Silicon Mac runs 11 or later. Read only by Apple targets.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 permissions:
   contents: read
@@ -64,6 +67,14 @@ jobs:
             config: ""
             # The filenames carry the version and the architecture, so glob rather than guess.
             bundles: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm
+          # Apple Silicon. whisper.cpp takes Metal there by default, so there is no `gpu` to add;
+          # the AVX flags in .cargo/config.toml only mean anything on x86 and are ignored. Not
+          # signed or notarised: the notes say how to open it the first time.
+          - os: macos-latest
+            artifact: zyris-macos
+            features: voice
+            config: ""
+            bundles: target/release/bundle/dmg/*.dmg
           - os: windows-latest
             artifact: zyris-nsis
             # No `aec`: `webrtc-audio-processing` has no supported Windows build upstream. The
@@ -266,6 +277,7 @@ jobs:
             target/release/bundle/deb/*.deb
             target/release/bundle/rpm/*.rpm
             target/release/bundle/nsis/*.exe
+            target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   release:
@@ -292,6 +304,7 @@ jobs:
             bundles/**/*.deb
             bundles/**/*.rpm
             bundles/**/*.exe
+            bundles/**/*.dmg
           fail_on_unmatched_files: true
           draft: false
           # The merged pull requests since the last tag, as GitHub lists them.

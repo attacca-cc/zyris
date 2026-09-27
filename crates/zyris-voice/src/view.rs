@@ -417,6 +417,19 @@ pub struct VoiceView {
     /// operator pointed Zyris at gets no Download button, because those files are theirs to
     /// manage and a fetch into them is this program overwriting a choice somebody made.
     pub voice_model_env: Option<String>,
+    /// The downloads under way, by what they are for: `model:<id>` for a speech model, `voice`
+    /// for the voice's files. A window draws a bar from them while a download runs (#31).
+    pub downloads: Vec<DownloadView>,
+}
+
+/// How far one download has got.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadView {
+    pub id: String,
+    pub received: u64,
+    /// What the whole thing is, when it is known.
+    pub total: Option<u64>,
 }
 
 impl VoiceView {
@@ -443,6 +456,7 @@ impl VoiceView {
             speaking: SpeakingState::NotHere { reason: reason.clone() },
             voice_model: VoiceModelView::NotHere { reason: reason.clone() },
             voice_model_env: None,
+            downloads: Vec::new(),
             wake: WakeView {
                 state: WakeState::NotHere { reason },
                 dir: None,

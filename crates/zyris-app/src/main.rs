@@ -1,3 +1,6 @@
+// A window app on Windows, not a console one: a release build started from the Start menu opened
+// a terminal beside the window (#32). Debug builds keep the console for their log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! Zyris: a desktop node for Attacca.
 //!
 //! This file picks a runtime and does nothing else. Both runtimes are handed the same
