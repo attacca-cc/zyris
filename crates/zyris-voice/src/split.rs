@@ -118,8 +118,15 @@ pub const MODEL_LEAD_IN: Duration = Duration::from_millis(325);
 /// was 619 ms.
 pub const MODEL_TAIL: Duration = Duration::from_millis(352);
 
-/// What a person hears as one sentence ending rather than as a voice that has stopped.
-pub const SENTENCE_PAUSE: Duration = Duration::from_millis(350);
+/// What a person hears as one sentence ending rather than as a voice that has stopped. Short on
+/// purpose: fragments are cut where the writing paused, not only at full stops, and a longer seam
+/// made every answer sound halting.
+pub const SENTENCE_PAUSE: Duration = Duration::from_millis(250);
+
+/// How much of the model's lead-in and tail is kept when a fragment is trimmed before it is
+/// queued (`tts::trim`): enough not to clip a soft first or last sound.
+pub const KEPT_LEAD_IN: Duration = Duration::from_millis(40);
+pub const KEPT_TAIL: Duration = Duration::from_millis(90);
 
 /// Silence to put **between** two fragments, on top of what they already carry.
 ///
@@ -134,7 +141,7 @@ pub const SENTENCE_PAUSE: Duration = Duration::from_millis(350);
 /// the lead-in and tail are ever trimmed off a fragment before it is queued — which the
 /// measurements say is worth doing, and which belongs with whoever hands samples to
 /// `playback`, not here — these constants move and the gap reappears by itself.
-pub const GAP: Duration = SENTENCE_PAUSE.saturating_sub(MODEL_TAIL.saturating_add(MODEL_LEAD_IN));
+pub const GAP: Duration = SENTENCE_PAUSE.saturating_sub(KEPT_TAIL.saturating_add(KEPT_LEAD_IN));
 
 /// One piece of speech, ready to be synthesised.
 ///
@@ -457,24 +464,12 @@ mod tests {
         assert_eq!(splitter.flush(), None);
     }
 
-    /// **The gap, and the reason it is nothing.**
-    ///
-    /// Asserting it is zero would pass for a constant somebody typed. What is asserted is the
-    /// *derivation*: the model already leaves more than [`SENTENCE_PAUSE`] at every seam, so
-    /// there is nothing to add — and both the spec's 80–150 ms and the reference
-    /// implementation's 0.3 s would have made an audible gap worse.
+    /// **The gap is what the trimmed pads leave short of a pause**, and the seam it makes is
+    /// well under what the untrimmed model left — which ran from 677 ms up.
     #[test]
-    fn nothing_is_added_between_fragments_because_the_model_already_leaves_too_much() {
-        let seam = MODEL_TAIL + MODEL_LEAD_IN;
-        assert!(
-            seam > SENTENCE_PAUSE,
-            "measured {seam:?} of silence at a seam against a {SENTENCE_PAUSE:?} pause"
-        );
-        assert_eq!(GAP, Duration::ZERO);
-        assert!(
-            seam > Duration::from_millis(150) && seam > Duration::from_millis(300),
-            "both the spec's figure and the reference's are additions to {seam:?}"
-        );
+    fn the_seam_is_one_pause_once_the_pads_are_trimmed() {
+        assert_eq!(GAP + KEPT_TAIL + KEPT_LEAD_IN, SENTENCE_PAUSE);
+        assert!(MODEL_TAIL + MODEL_LEAD_IN >= SENTENCE_PAUSE + Duration::from_millis(400));
     }
 
     /// The first fragment is not cut below [`FIRST_MIN_CHARS`], because the saving stops there.
