@@ -41,15 +41,21 @@ jobs:
   bundle:
     name: bundle (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Empty for Windows, which then runs on the host.
+    container: ${{ matrix.container }}
     strategy:
       # One platform failing says nothing about the other, and both are wanted.
       fail-fast: false
       matrix:
         include:
-          # **22.04, not latest**: the binary asks for the glibc of the runner that built it, and
-          # 0.0.2 built on 24.04 needed GLIBC_2.39 — nothing older than Ubuntu 24.04 or Debian 13
-          # could start it. 22.04's 2.35 reaches Debian 12, Ubuntu 22.04 and Mint 21.
-          - os: ubuntu-22.04
+          # **In Debian 12, not on the runner**: the binary asks for the glibc of the system that
+          # built it, and 0.0.2 built on ubuntu-latest needed GLIBC_2.39 — nothing older than
+          # Ubuntu 24.04 or Debian 13 could start it. Debian 12's 2.36 reaches Ubuntu 23.04+,
+          # Mint 22 and Fedora 37+ as well. Ubuntu 22.04 was tried and cannot build this: its
+          # PipeWire 0.3.48 is older than the headers libspa 0.10 (through xcap) needs, and
+          # building against newer headers would make a binary its own PipeWire cannot start.
+          - os: ubuntu-latest
+            container: debian:bookworm
             artifact: zyris-linux
             # Speech, and the echo canceller with it. `aec` implies `voice`; it is spelled out
             # so a reader of this file can see both without opening a manifest.
@@ -119,8 +125,11 @@ jobs:
       - name: Install system libraries
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # Root and no sudo in the container; the tools a runner image has and Debian does not.
+          SUDO=$(command -v sudo || true)
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config cmake clang file \
             libwebkit2gtk-4.1-dev \
             libjavascriptcoregtk-4.1-dev \
             libsoup-3.0-dev \
