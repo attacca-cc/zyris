@@ -29,13 +29,28 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "nsis"],
+    "targets": [
+      "deb",
+      "rpm",
+      "nsis",
+      "dmg"
+    ],
     "linux": {
       "deb": {
-        "depends": ["libpipewire-0.3-0", "libasound2", "libgbm1", "libayatana-appindicator3-1"]
+        "depends": [
+          "libpipewire-0.3-0",
+          "libasound2",
+          "libgbm1",
+          "libayatana-appindicator3-1"
+        ]
       },
       "rpm": {
-        "depends": ["pipewire-libs", "alsa-lib", "mesa-libgbm", "libayatana-appindicator-gtk3"]
+        "depends": [
+          "pipewire-libs",
+          "alsa-lib",
+          "mesa-libgbm",
+          "libayatana-appindicator-gtk3"
+        ]
       }
     },
     "icon": [
