@@ -58,6 +58,19 @@ zyris-voice = { path = "../zyris-voice", features = ["conversation"] }
 serde_json = { workspace = true }
 tauri-plugin-opener = "2"
 
+# Android verifies TLS through the platform, over JNI, and the verifier has to be handed the JVM
+# and the app's Context before the first request — see `mobile.rs`. Same versions as the lockfile.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+ndk-context = "0.1"
+rustls-platform-verifier = "0.7"
+
+# iOS has no certificate files for the websocket's `rustls-native-certs` to read, so Mozilla's roots
+# are written to one at start and pointed at with `SSL_CERT_FILE` — see `mobile.rs`.
+[target.'cfg(target_os = "ios")'.dependencies]
+base64 = "0.22"
+webpki-root-certs = "1"
+
 # The Wayland half of the push-to-talk key. Linux only, because the GlobalShortcuts portal is:
 # `ashpd` speaks D-Bus to `xdg-desktop-portal`, which exists nowhere else. Windows takes the
 # `global-hotkey` path above and never reaches this.

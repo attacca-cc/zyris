@@ -65,6 +65,29 @@ jobs:
       - name: Generate the Android project
         run: pnpm tauri android init --ci
 
+      # The Kotlin half of `rustls-platform-verifier`, which TLS on Android calls into (see
+      # `init_tls_verifier` in mobile.rs). It ships as a Maven repository inside a crate, so the
+      # Gradle project is pointed at the copy cargo downloaded.
+      - name: Add the TLS verifier's Kotlin component
+        run: |
+          set -euo pipefail
+          manifest=$(cargo metadata --format-version 1 --filter-platform aarch64-linux-android \
+            | jq -r '.packages[] | select(.name == "rustls-platform-verifier-android") | .manifest_path')
+          maven="$(dirname "$manifest")/maven"
+          version=$(ls "$maven/rustls/rustls-platform-verifier")
+          app=crates/zyris-app/gen/android/app
+          cat >> "$app/build.gradle.kts" <<EOF
+
+          repositories {
+              maven { url = uri("$maven") }
+          }
+          dependencies {
+              implementation("rustls:rustls-platform-verifier:$version")
+          }
+          EOF
+          echo '-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }' >> "$app/proguard-rules.pro"
+          tail -8 "$app/build.gradle.kts"
+
       - name: Build the APK
         run: pnpm tauri android build --apk --target aarch64 --ci
 
