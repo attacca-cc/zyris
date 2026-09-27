@@ -167,6 +167,13 @@ jobs:
           # fresh directory, which Debian 12's meson 1.0 refuses ("does not contain a valid build
           # tree") and newer ones accept.
           $SUDO pip3 install --break-system-packages 'meson>=1.3'
+          # Vulkan headers newer than Debian 12's 1.3.239: ggml-vulkan uses VK_EXT_layer_settings.
+          # Headers only, into /usr/local, which CMake searches before /usr; the loader stays
+          # Debian's.
+          curl -fsSL https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.357.0.tar.gz | tar xz
+          cmake -S Vulkan-Headers-vulkan-sdk-1.4.357.0 -B vulkan-headers -DCMAKE_INSTALL_PREFIX=/usr/local
+          $SUDO cmake --install vulkan-headers
+          rm -rf Vulkan-Headers-vulkan-sdk-1.4.357.0 vulkan-headers
 
       - uses: pnpm/action-setup@v4
 
