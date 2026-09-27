@@ -243,6 +243,9 @@ pub fn run(
             bridge::set_voice_device,
             bridge::set_voice_speaker,
             bridge::set_speaking_rate,
+            bridge::set_read_aloud,
+            bridge::send_conversation_text,
+            bridge::stop_speaking,
             bridge::set_voice_compute,
             bridge::set_speech_model,
             bridge::fetch_speech_model,
@@ -362,6 +365,7 @@ pub fn run(
             // listening is a turn nobody would ever be told about.
             bridge::forward_voice(app.handle().clone(), setup_voice.events(), &setup_runtime);
             bridge::forward_traces(app.handle().clone(), setup_voice.traces(), &setup_runtime);
+            bridge::forward_levels(app.handle().clone(), setup_voice.levels(), &setup_runtime);
 
             // **Acting on an answer a person already gave.** Nothing is opened here unless the
             // stored settings say it was asked for on some earlier run; on a machine nobody has
