@@ -654,10 +654,16 @@ mod tests {
     }
 
     fn assert_nothing_left_behind(dir: &Path, model: &Model) {
-        assert!(
-            !dir.join(model.file).exists(),
-            "a failed download must never leave a file under the model's own name"
-        );
+        // The same lazy delete as the part files below: on Windows a file under the model's own
+        // name can stay visible for a moment after it was removed, and failed CI once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while dir.join(model.file).exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a failed download must never leave a file under the model's own name"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
 
         // **Windows deletes lazily and this assertion has to know that.** `remove_file` on a
         // file another handle still holds does not unlink it; it marks it delete-pending, and
