@@ -42,6 +42,7 @@ use crate::capture::{
     APM_FRAME, Capture, Captured, Choice, Chunker, VAD_FRAME, read_delay,
 };
 use crate::playback::{Playback, Render, Speaker};
+use crate::answers::Answers;
 use crate::session::{Session, Speaking, Stopped};
 use crate::turn::Feed;
 use crate::vad::{Endpointer, Listening};
@@ -106,6 +107,10 @@ pub struct Settings {
     /// Where answers are read: `cpu` or `gpu`. `None` is the GPU in a build that has one.
     #[serde(default)]
     pub speak_on: Option<String>,
+    /// Whether answers are read aloud while listening is on. **`None` is on**, so that every
+    /// file written before this switch existed goes on reading answers aloud exactly as it did.
+    #[serde(default)]
+    pub read_aloud: Option<bool>,
 }
 
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
@@ -164,6 +169,11 @@ fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
 /// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
 pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
 
+/// Whether `settings` has answers read aloud. See [`Settings::read_aloud`].
+fn read_aloud(settings: &Settings) -> bool {
+    settings.read_aloud.unwrap_or(true)
+}
+
 /// The rate `settings` asks for, clamped the way the voice will clamp it.
 fn speaking_rate(settings: &Settings) -> f32 {
     settings.speaking_rate.filter(|r| r.is_finite()).unwrap_or(DEFAULT_SPEAKING_RATE).clamp(0.5, 2.0)
@@ -208,6 +218,12 @@ pub struct Engine {
     voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
     takes_checked: std::sync::atomic::AtomicBool,
+    /// The one reader of the answer stream, whether or not anything is listening. See
+    /// [`crate::answers`].
+    answers: Arc<Answers>,
+    /// Whether that reader has been started. It is started by the first connection rather than
+    /// here, because `new` is not async and may run before the runtime does.
+    answers_started: std::sync::atomic::AtomicBool,
 }
 
 struct Live {
@@ -249,10 +265,12 @@ impl Engine {
             Some(session) => Feed::continuing(session, settings.agent.clone()),
             None => Feed::making_one(settings.agent.clone()),
         };
+        let traces = broadcast::channel(TRACE_CAPACITY).0;
+        let answers = Answers::new(traces.clone(), events.clone(), read_aloud(&settings));
         Engine {
             settings_path,
             events,
-            traces: broadcast::channel(TRACE_CAPACITY).0,
+            traces,
             keys: broadcast::channel(KEY_CAPACITY).0,
             feed: Some(feed),
             shown: std::sync::Mutex::new(settings.clone()),
@@ -260,6 +278,8 @@ impl Engine {
             loaded: std::sync::Mutex::new(Vec::new()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
+            answers,
+            answers_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -270,6 +290,11 @@ impl Engine {
     /// waited for somebody to turn listening on would miss every delta written before they did.
     pub async fn on_connect(&self, connection: zyris::Connection) {
         let Some(feed) = &self.feed else { return };
+        // Subscribed before the feed connects, so that nothing it publishes on this connection
+        // is sent to a channel with nobody reading it yet.
+        if !self.answers_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tokio::spawn(self.answers.clone().run(feed.events()));
+        }
         feed.on_connect(connection).await;
         self.remember_the_session(feed).await;
     }
@@ -871,12 +896,15 @@ impl Engine {
             self.events.clone(),
         );
         let speaking = speaking.tracing(self.traces.clone());
-        tasks.push(tokio::spawn(speaking.clone().run(feed.events())));
+        // Fed by `Answers` rather than straight off the feed, so that what the agent writes is
+        // shown whether or not this speaker exists.
+        tasks.push(tokio::spawn(speaking.clone().run(self.answers.attach(speaking.clone()))));
         Ok((speaking, stop, tasks))
     }
 
     /// Stop whatever is listening. Safe to call when nothing is.
     async fn halt(&self, live: &mut Live) {
+        self.answers.detach();
         if let Some(running) = live.running.take() {
             // Dropping the sender would do it too; sending says which of the two happened to
             // anybody reading the thread.

@@ -1375,10 +1375,9 @@ pub struct Speaking {
     out: Arc<dyn Play>,
     turn: Arc<dyn Says>,
     events: broadcast::Sender<VoiceEvent>,
-    /// The diagnostic stream, for the half of the pipeline that runs after the agent answers.
-    /// **Everything it needs is already here**: `run` sees `TurnEvent::Shown` — what the agent
-    /// wrote — beside `TurnEvent::Say` — what the filter and splitter made of it — so the two
-    /// texts can be shown against each other without `turn.rs` knowing about tracing at all.
+    /// The diagnostic stream, for the half of the pipeline that runs after the agent answers:
+    /// fragments, synthesis, the queue and playback. What the agent *wrote* is traced by
+    /// [`crate::answers::Answers`], which reads the feed whether or not anything is speaking.
     traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
 }
@@ -1452,39 +1451,20 @@ impl Speaking {
                     }
                     self.synthesise(fragment.text()).await;
                 }
-                // Carried to the trace and nowhere else. This is what the agent wrote, before
-                // the filter took the code fences and asides out of it, and seeing the two
-                // beside each other is the only way to tell "the filter ate it" from "the
-                // agent never said it".
-                Ok(crate::turn::TurnEvent::Shown { kind, text }) => {
-                    self.trace(crate::Trace::Delta { kind: format!("{kind:?}"), text });
+                // A new answer: whatever an interruption muted belonged to the last one. Traced
+                // by `Answers`, which saw it first.
+                Ok(crate::turn::TurnEvent::Running(true)) => {
+                    let mut state = self.lock();
+                    state.running = true;
+                    state.muted = false;
                 }
                 // The end of a turn. Everything sayable has been said; what is left is waiting
                 // for the speaker to get through it.
-                Ok(crate::turn::TurnEvent::Running(true)) => {
-                    {
-                        let mut state = self.lock();
-                        state.running = true;
-                        state.muted = false;
-                    }
-                    self.trace(crate::Trace::Answering);
-                }
                 Ok(crate::turn::TurnEvent::Running(false)) => {
                     self.lock().running = false;
                     self.drained().await
                 }
-                // The server writes a failed agent run into the timeline as an `error` event
-                // and says nothing else: no delta, often not even a status. Without this a
-                // person who asked something heard silence and saw nothing.
-                Ok(crate::turn::TurnEvent::Event { event, .. }) if event.kind == "error" => {
-                    let said = event.payload.get("message").and_then(|m| m.as_str());
-                    self.publish(VoiceEvent::Failed {
-                        reason: match said {
-                            Some(message) => format!("The agent did not answer: {message}"),
-                            None => "The agent did not answer.".to_string(),
-                        },
-                    });
-                }
+                // Deltas and the timeline's own events are `Answers`'s: it does not forward them.
                 Ok(_) => {}
                 // A fragment was dropped before it was read, which is a sentence that will never
                 // be spoken. Nothing can recover it — a `Delta` is not durable and nothing
@@ -3886,29 +3866,6 @@ mod barge_in {
             .await
             .expect("the worker ends when the feed does, or a stopped session leaks a task")
             .expect("it does not panic");
-    }
-
-    /// A failed agent run arrives only as an `error` event in the timeline, and it has to be
-    /// said as a failure — this is what production sent on 2026-09-25 while nothing was heard.
-    #[tokio::test]
-    async fn an_agent_run_that_failed_is_a_failure_and_not_silence() {
-        let mut rig = rig(Voicebox::plain());
-        let (turns, subscription) = broadcast::channel(16);
-        let worker = tokio::spawn(rig.speaking.clone().run(subscription));
-
-        let event: zyris_attacca::ZSessionEvent = serde_json::from_value(serde_json::json!({
-            "seq": 2, "cursor": 2, "kind": "error",
-            "payload": { "kind": "error", "message": "The agent run failed. Please try again. (ref c3cd2811)" },
-        }))
-        .expect("the wire shape");
-        turns.send(crate::turn::TurnEvent::Event { cursor: 2, event }).expect("the worker is reading");
-
-        match rig.next_event().await {
-            VoiceEvent::Failed { reason } => assert!(reason.contains("ref c3cd2811"), "{reason}"),
-            other => panic!("{other:?}"),
-        }
-        drop(turns);
-        let _ = tokio::time::timeout(PATIENCE, worker).await;
     }
 
     /// The double `session::tests` already has, reached through its module so that there is one

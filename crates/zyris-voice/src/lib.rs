@@ -135,6 +135,11 @@ pub mod wake;
 #[cfg(feature = "voice")]
 mod run;
 
+// The one reader of the answer stream: traces what the window shows, forwards what the speaker
+// reads. See the module comment for why it had to be separate from `session::Speaking`.
+#[cfg(feature = "voice")]
+pub mod answers;
+
 // What the Voice screen renders. **Not behind the feature**, because `zyris-app` may contain no
 // `#[cfg(feature = "voice")]` and therefore has to be able to name the answer on either build.
 pub mod view;
@@ -312,7 +317,13 @@ pub enum Trace {
     Dropped,
     /// The agent started a new answer. What follows is a turn of its own, even with nothing said
     /// on this machine in between — an answer to a message typed somewhere else, say.
-    Answering,
+    ///
+    /// `aloud` is whether this answer will be read: reading aloud is switched on and a speaker is
+    /// open. When it is false no `Fragment` follows, and the window shows the text as it is.
+    #[serde(rename_all = "camelCase")]
+    Answering { aloud: bool },
+    /// The agent stopped writing the answer. Speech may well go on after this: writing is faster.
+    Answered,
     /// The speaker ran out of things to play.
     Spoke,
     /// Speech was cut off by the key, and how much of the answer had been heard.
