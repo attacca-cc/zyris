@@ -4,7 +4,11 @@
     "resources": {
       "../../target/release/webgpu_dawn.dll": "webgpu_dawn.dll",
       "../../target/release/dxcompiler.dll": "dxcompiler.dll",
-      "../../target/release/dxil.dll": "dxil.dll"
+      "../../target/release/dxil.dll": "dxil.dll",
+      "../../target/release/msvcp140.dll": "msvcp140.dll",
+      "../../target/release/msvcp140_1.dll": "msvcp140_1.dll",
+      "../../target/release/vcruntime140.dll": "vcruntime140.dll",
+      "../../target/release/vcruntime140_1.dll": "vcruntime140_1.dll"
     }
   }
 }

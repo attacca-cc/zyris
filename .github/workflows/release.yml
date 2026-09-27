@@ -46,15 +46,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            artifact: zyris-deb
+          # **22.04, not latest**: the binary asks for the glibc of the runner that built it, and
+          # 0.0.2 built on 24.04 needed GLIBC_2.39 — nothing older than Ubuntu 24.04 or Debian 13
+          # could start it. 22.04's 2.35 reaches Debian 12, Ubuntu 22.04 and Mint 21.
+          - os: ubuntu-22.04
+            artifact: zyris-linux
             # Speech, and the echo canceller with it. `aec` implies `voice`; it is spelled out
             # so a reader of this file can see both without opening a manifest.
             features: voice,aec
             # Nothing to add to `tauri.conf.json` on Linux.
             config: ""
             # The filenames carry the version and the architecture, so glob rather than guess.
-            bundles: target/release/bundle/deb/*.deb
+            bundles: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm
           - os: windows-latest
             artifact: zyris-nsis
             # No `aec`: `webrtc-audio-processing` has no supported Windows build upstream. The
@@ -175,6 +178,22 @@ jobs:
           install_runtime: false
           cache: true
 
+      # **The C++ runtime the installer has to carry.** whisper.cpp and ONNX Runtime are C++ built
+      # against the DLL runtime, so zyris.exe imports MSVCP140.dll and MSVCP140_1.dll, which a
+      # fresh Windows does not have until something installs the Visual C++ redistributable.
+      # 0.0.2's installer carried neither. Copied from the runner's System32 next to the build,
+      # where tauri.windows-gpu.conf.json picks them up; Microsoft allows this app-local copy.
+      - name: Put the Visual C++ runtime beside the build
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/release
+          for dll in msvcp140.dll msvcp140_1.dll vcruntime140.dll vcruntime140_1.dll; do
+            cp "/c/Windows/System32/$dll" target/release/
+          done
+          ls -la target/release/*.dll
+
       - name: Build the bundles
         shell: bash
         env:
@@ -208,7 +227,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.bundles }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/rpm/*.rpm
+            target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
   release:
@@ -233,9 +255,12 @@ jobs:
         with:
           files: |
             bundles/**/*.deb
+            bundles/**/*.rpm
             bundles/**/*.exe
           fail_on_unmatched_files: true
           draft: false
+          # The merged pull requests since the last tag, as GitHub lists them.
+          generate_release_notes: true
           # A tag carrying a pre-release suffix — v0.0.1-pre-alpha.1 — is marked as one, and a
           # plain v1.2.3 is not. Written out rather than left to the action inferring it,
           # because "is this a pre-release" is the one thing a person downloading it reads
