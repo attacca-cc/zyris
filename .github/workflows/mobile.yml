@@ -7,6 +7,15 @@ on:
   push:
     tags:
       - "v*"
+  # A pull request that touches the phone build checks it, and publishes nothing.
+  pull_request:
+    paths:
+      - "crates/zyris-app/src/mobile.rs"
+      - "crates/zyris-app/src/lib.rs"
+      - "crates/zyris-app/Cargo.toml"
+      - "crates/zyris-app/tauri.conf.json"
+      - "crates/zyris-voice/src/chat.rs"
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
     inputs:
       release:
