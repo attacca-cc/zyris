@@ -139,6 +139,11 @@ mod run;
 // `#[cfg(feature = "voice")]` and therefore has to be able to name the answer on either build.
 pub mod view;
 
+// How loud the microphone and the speaker are, for the Conversation screen's backdrop. Outside
+// the feature for the same reason `view` is: `zyris-app` forwards `Level` on either build.
+pub mod meter;
+pub use meter::{LEVELS_PER_SECOND, Level, Source};
+
 /// Why a build with no `voice` feature will never hear anything.
 ///
 /// Worded for a person reading the window, not for a developer reading a log: whoever installed
