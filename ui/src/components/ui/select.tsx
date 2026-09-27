@@ -66,16 +66,42 @@ function SelectContent({
         data-slot="select-content"
         position={position}
         className={cn(
-          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-lg border bg-popover text-popover-foreground shadow-xl shadow-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0",
+          "relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-lg border bg-popover text-popover-foreground shadow-xl shadow-black/40 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fill-mode-forwards data-[state=closed]:fade-out-0",
           position === "popper" && "w-full min-w-(--radix-select-trigger-width) data-[side=bottom]:translate-y-1 data-[side=top]:-translate-y-1",
           className,
         )}
         {...props}
+        onPointerDownOutside={(event) => {
+          props.onPointerDownOutside?.(event);
+          openTheOneUnder(event.detail.originalEvent);
+        }}
       >
         <SelectPrimitive.Viewport className="p-1">{children}</SelectPrimitive.Viewport>
       </SelectPrimitive.Content>
     </SelectPrimitive.Portal>
   );
+}
+
+// A press on another dropdown while this one is open. The open list is modal — the page takes no
+// pointer events under it — so that press would only close this one and a second press would be
+// needed. It is passed on to the dropdown under it once this one has let go, so one press closes
+// this and opens that. Found by position, since nothing under the list can be hit-tested yet.
+function openTheOneUnder(press: PointerEvent) {
+  const { clientX: x, clientY: y } = press;
+  const trigger = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-slot=select-trigger]")).find(
+    (candidate) => {
+      const box = candidate.getBoundingClientRect();
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    },
+  );
+  // Not the one that is open: pressing its own trigger is how a person closes it.
+  if (!trigger || trigger.disabled || trigger.getAttribute("aria-expanded") === "true") return;
+  setTimeout(() => {
+    trigger.focus();
+    trigger.dispatchEvent(
+      new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse", clientX: x, clientY: y }),
+    );
+  }, 0);
 }
 
 function SelectItem({
