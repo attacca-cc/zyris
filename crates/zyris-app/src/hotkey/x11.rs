@@ -164,6 +164,7 @@ impl Hotkey for GrabbedHotkey {
 #[cfg(test)]
 mod windows_tests {
     use super::*;
+    use global_hotkey::hotkey::{Code, Modifiers};
 
     /// A hand-run test needs the message pump a Tauri app would otherwise provide: `WM_HOTKEY`
     /// reaches `global-hotkey`'s window only through `DispatchMessage`, and a `#[test]` has no
