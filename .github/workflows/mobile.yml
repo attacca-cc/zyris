@@ -122,7 +122,9 @@ jobs:
     name: ios
     runs-on: macos-latest
     env:
-      APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+      # Whether there is a signing team at all. Its own name, because a step that sets the
+      # team itself (the placeholder below) would change what its own `if` reads.
+      SIGNED: ${{ secrets.APPLE_DEVELOPMENT_TEAM != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -151,18 +153,36 @@ jobs:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM || 'SIMULATOR0' }}
         run: pnpm tauri ios init --ci
 
-      # **An iPhone runs only what Apple has signed for it**, and signing needs the account's
-      # team, certificate and provisioning profile. Without them the app is built for the
-      # simulator, which checks that everything compiles and links for iOS and publishes nothing.
-      - name: Build for the simulator (no signing identity)
-        if: env.APPLE_DEVELOPMENT_TEAM == ''
+      # **An iPhone runs only what Apple has signed for it**, and signing for the App Store needs
+      # the account's team, certificate and provisioning profile. Without them the app is built
+      # for devices with signing switched off, and the archive's app is packed as an unsigned IPA:
+      # a person installs it with AltStore or Sideloadly, which sign it with their own Apple ID.
+      # The export step that follows the archive needs signing and fails; the archive is what is
+      # kept.
+      - name: Build an unsigned IPA (no signing identity)
+        if: env.SIGNED != 'true'
         env:
           APPLE_DEVELOPMENT_TEAM: SIMULATOR0
-        run: pnpm tauri ios build --target aarch64-sim --debug --ci
+        run: |
+          set -uo pipefail
+          printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nCODE_SIGN_IDENTITY =\nDEVELOPMENT_TEAM =\n' > "$RUNNER_TEMP/unsigned.xcconfig"
+          export XCODE_XCCONFIG_FILE="$RUNNER_TEMP/unsigned.xcconfig"
+          pnpm tauri ios build --target aarch64 --ci || echo "the export needs signing; keeping the archive"
+          set -e
+          archive=$(find crates/zyris-app/gen/apple -name '*.xcarchive' -type d | head -1)
+          echo "archive: $archive"
+          app=$(find "$archive/Products/Applications" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$app"
+          version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' crates/zyris-app/tauri.conf.json | head -1)
+          mkdir -p out/Payload
+          cp -R "$app" out/Payload/
+          (cd out && zip -qry "Zyris_${version}_ios-unsigned.ipa" Payload && rm -rf Payload)
+          ls -la out
 
       - name: Build the signed IPA
-        if: env.APPLE_DEVELOPMENT_TEAM != ''
+        if: env.SIGNED == 'true'
         env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
@@ -174,8 +194,15 @@ jobs:
           mkdir -p out && find crates/zyris-app/gen/apple -name '*.ipa' -exec cp {} out/ \;
 
       - uses: actions/upload-artifact@v4
-        if: env.APPLE_DEVELOPMENT_TEAM != ''
         with:
           name: zyris-ios
           path: out/*.ipa
           if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release || github.ref_name }}
+          files: out/*.ipa
+          fail_on_unmatched_files: true
