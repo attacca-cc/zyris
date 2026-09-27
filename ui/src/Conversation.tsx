@@ -121,7 +121,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
       />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Backdrop mode={mode.current} level={level} />
+        <Backdrop mode={mode.current} level={level} paused={hidden} />
 
         {turns.length === 0 ? (
           <div className="relative flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">

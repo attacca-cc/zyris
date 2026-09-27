@@ -540,6 +540,38 @@ describe("Voice", () => {
     );
   });
 
+  it("chooses a model from its name, and says it is switching until listening is back", async () => {
+    const ready = (file: string, bytes: number) => ({ state: "ready" as const, path: file, bytes });
+    const before = machine({
+      models: [
+        { id: "base", name: "Base", note: "Fast.", bytes: 1, state: ready(MODEL, 1), chosen: true },
+        { id: "turbo", name: "Turbo", note: "Accurate.", bytes: 2, state: ready("/m/turbo.bin", 2), chosen: false },
+      ],
+    });
+    let finish: (screen: Screen) => void = () => {};
+    invoke.mockImplementation((command: string) =>
+      command === "set_speech_model" ? new Promise((resolve) => (finish = resolve)) : Promise.resolve(before),
+    );
+    render(<Voice />);
+
+    fireEvent.click(await screen.findByText("Accurate."));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }));
+    expect((await screen.findByRole("status")).textContent).toMatch(/switching to this model/i);
+    expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
+
+    await act(async () =>
+      finish({
+        ...before,
+        voice: {
+          ...before.voice,
+          models: before.voice.models.map((m) => ({ ...m, chosen: m.id === "turbo" })),
+        },
+      }),
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
+  });
+
   it("chooses which of several GPUs transcribes, and the processor for reading aloud", async () => {
     render(<Voice />);
 

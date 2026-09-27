@@ -8,6 +8,7 @@ import {
   DownloadIcon,
   InfoIcon,
   KeyboardIcon,
+  LoaderCircleIcon,
   MicIcon,
   SpeakerIcon,
   Trash2Icon,
@@ -507,6 +508,9 @@ export function Voice() {
   const [problem, setProblem] = useState<string | null>(null);
   // Which control is waiting on the Rust side, so it cannot be pressed twice.
   const [busy, setBusy] = useState<string | null>(null);
+  // The model asked for, while listening restarts on it. Loading a large model onto a graphics
+  // card takes seconds, and the list should say which one is on its way rather than look stuck.
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
   // What each control was refused, beside that control.
   const [refused, setRefused] = useState<Record<string, string>>({});
   const [last, setLast] = useState<VoiceEvent | null>(null);
@@ -939,9 +943,12 @@ export function Voice() {
           <>
             <RadioGroup
               aria-label="Speech model"
-              value={voice.models.find((m) => m.chosen)?.id ?? ""}
+              value={(busy === "model" && switchingTo) || (voice.models.find((m) => m.chosen)?.id ?? "")}
               disabled={idle}
-              onValueChange={(id) => act("model", "set_speech_model", { id })}
+              onValueChange={(id) => {
+                setSwitchingTo(id);
+                act("model", "set_speech_model", { id });
+              }}
               className="gap-2"
             >
               {voice.models.map((model) => (
@@ -949,6 +956,7 @@ export function Voice() {
                   key={model.id}
                   model={model}
                   busy={busy}
+                  switching={busy === "model" && switchingTo === model.id}
                   refused={refused[`model:${model.id}`]}
                   onFetch={() => act(`model:${model.id}`, "fetch_speech_model", { id: model.id })}
                   onForget={() => act(`model:${model.id}`, "forget_speech_model", { id: model.id })}
@@ -1048,12 +1056,14 @@ function Takes({ recorded, wanted, children }: { recorded: number; wanted: numbe
 function ModelRow({
   model,
   busy,
+  switching,
   refused,
   onFetch,
   onForget,
 }: {
   model: SpeechModel;
   busy: string | null;
+  switching: boolean;
   refused: string | undefined;
   onFetch: () => void;
   onForget: () => void;
@@ -1064,19 +1074,35 @@ function ModelRow({
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-3.5 py-3",
-        model.chosen ? "border-primary/70 bg-primary/5" : "border-sidebar-border bg-inset",
+        model.chosen || switching ? "border-primary/70 bg-primary/5" : "border-sidebar-border bg-inset",
       )}
     >
       <div className="action-row items-center gap-3">
         {/* Only a model on disk can be chosen; the chosen one stays marked even when it is not. */}
-        <RadioGroupItem value={model.id} aria-label={model.name} disabled={!ready && !model.chosen} />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <RadioGroupItem
+          id={`model-${model.id}`}
+          value={model.id}
+          aria-label={model.name}
+          disabled={!ready && !model.chosen}
+        />
+        {/* A label for the radio, so the name and the note choose the model too, not only the
+            small circle beside them. */}
+        <label
+          htmlFor={`model-${model.id}`}
+          className={cn("flex min-w-0 flex-1 flex-col gap-0.5", ready && !model.chosen && "cursor-pointer")}
+        >
           <span className="text-sm font-medium text-heading">
             {model.name} <span className="font-normal text-muted-foreground">· {megabytes(model.bytes)}</span>
           </span>
           <span className="text-[0.78125rem] text-muted-foreground">{model.note}</span>
-        </div>
-        {ready && model.chosen && (
+        </label>
+        {switching && (
+          <span role="status" className="inline-flex items-center gap-1.5 text-xs text-primary">
+            <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
+            Switching to this model…
+          </span>
+        )}
+        {ready && model.chosen && !switching && (
           <span className="inline-flex items-center gap-1 text-xs text-[#a9c99a]">
             <CheckIcon className="size-3.5" aria-hidden="true" />
             In use
