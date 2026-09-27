@@ -147,15 +147,9 @@ fn needs_a_key_bound(desktop: &str, trigger: &str) -> HotkeySupport {
     let line = compositor_line(desktop, SHORTCUT_ID, trigger);
     HotkeySupport::NeedsAKeyBound {
         how: match &line {
-            Some(_) => format!(
-                "{desktop} does not let an application choose the key, so Zyris cannot \
-                 bind {trigger} for you. Add this line to your compositor configuration \
-                 if you have not already, and reload it."
-            ),
+            Some(_) => format!("To use {trigger}, add this line to your {desktop} configuration:"),
             None => format!(
-                "{desktop} does not let an application choose the key. Bind one to the \
-                 global shortcut named {SHORTCUT_ID} in your desktop's keyboard \
-                 settings; Zyris cannot tell whether you have."
+                "Bind a key to the global shortcut {SHORTCUT_ID} in {desktop}'s keyboard settings."
             ),
         },
         shortcut_id: SHORTCUT_ID.to_string(),

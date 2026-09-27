@@ -208,9 +208,9 @@ function whatItIs(device: InputDevice): string {
     case "input":
       return "a microphone";
     case "output":
-      return "a loudspeaker — recording it captures what this computer is playing, not what you say";
+      return "a loudspeaker: it records what is playing, not your voice";
     case "duplex":
-      return "a loudspeaker and a microphone in one — recording it may capture what this computer is playing";
+      return "a speaker with a microphone: it may pick up what is playing";
     case "unknown":
       return "the sound system will not say which it is without opening it";
   }
@@ -596,7 +596,7 @@ export function Voice() {
     <Page>
       <PageHeader
         title="Voice"
-        description="Talk to your agent and hear it answer. What you say is turned into text on this computer — the audio is not sent anywhere."
+        description="Talk to your agent and hear it answer."
       />
 
       {problem && <Problem>{problem}</Problem>}
@@ -610,14 +610,14 @@ export function Voice() {
             : voice.listening.state === "on"
               ? (
                   <>
-                    The microphone <Mono>{voice.listening.device}</Mono> is open. Nothing is recorded
-                    until you hold the push-to-talk key or say the wake word.
+                    <Mono>{voice.listening.device}</Mono> is open. It records only on the key or the
+                    wake word.
                   </>
                 )
               : voice.listening.state === "starting"
                 ? voice.listening.detail
                 : voice.listening.state === "off"
-                  ? "Nothing is listening. Zyris opens no microphone until you turn this on."
+                  ? "Off. No microphone is open."
                   : undefined
         }
         action={
@@ -640,8 +640,7 @@ export function Voice() {
         {canHear && voice.listening.state === "failed" && <Problem>{voice.listening.reason}</Problem>}
         {canHear && !aKeyCouldWork && (
           <Problem>
-            There is no push-to-talk key on this desktop, so a microphone opened here could never be
-            asked to record anything. See below.
+            This desktop has no push-to-talk key, so nothing could start a recording. See below.
           </Problem>
         )}
         {refused.listening && <Problem>{refused.listening}</Problem>}
@@ -651,7 +650,7 @@ export function Voice() {
       <Section
         icon={<KeyboardIcon />}
         title="How to start talking"
-        description="Either one starts a turn. Pressing the key while the agent speaks interrupts it."
+        description="Either starts a turn. The key also interrupts an answer."
       >
         <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
           <Panel>
@@ -663,11 +662,7 @@ export function Voice() {
                 </p>
                 {/* The caveat belongs to the backend, not to whether a key is bound. */}
                 {!hotkey.releaseConfirmed && (
-                  <Note>
-                    It has not been confirmed that letting go of the key reaches Zyris on this kind of
-                    desktop. If a turn does not end when you let go, Zyris ends it and throws the
-                    recording away.
-                  </Note>
+                  <Note>If letting go does not end a turn, Zyris ends it and drops the recording.</Note>
                 )}
               </>
             )}
@@ -679,23 +674,12 @@ export function Voice() {
                     <pre className="m-0 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs text-heading">
                       {hotkey.line}
                     </pre>
-                    <Note>
-                      That is the line for {hotkey.desktop}. The shortcut it points at is called{" "}
-                      <Mono>{hotkey.shortcutId}</Mono>.
-                    </Note>
                   </>
                 ) : (
                   <Note>
-                    Zyris does not know how {hotkey.desktop} spells that line, so it shows none. Bind a
-                    key to the global shortcut named <Mono>{hotkey.shortcutId}</Mono> in your desktop's
-                    keyboard settings.
+                    The shortcut is called <Mono>{hotkey.shortcutId}</Mono>.
                   </Note>
                 )}
-                <Note>
-                  Zyris cannot tell whether you have bound a key — your desktop does not say. It also
-                  has not been confirmed that letting go of the key reaches Zyris here; if a turn does
-                  not end when you let go, Zyris ends it and throws the recording away.
-                </Note>
               </>
             )}
             {hotkey.state === "unavailable" && (
@@ -719,13 +703,10 @@ export function Voice() {
                 {/* The sentence that must not drift, carried from the Rust side. */}
                 <Note className="text-foreground">{voice.wake.note}</Note>
                 {voice.wake.state.state === "unreadable" && (
-                  <Problem>
-                    Zyris could not read what has been recorded, so it cannot say how much of the wake
-                    word is there. {voice.wake.state.reason}
-                  </Problem>
+                  <Problem>The recordings could not be read. {voice.wake.state.reason}</Problem>
                 )}
                 {voice.wake.state.state === "nothing" && (
-                  <Note>Nothing has been recorded. {voice.wake.wanted} takes are wanted.</Note>
+                  <Note>No recordings yet; {voice.wake.wanted} are needed.</Note>
                 )}
                 {voice.wake.state.state === "partial" && (
                   <Takes recorded={voice.wake.state.recorded} wanted={voice.wake.wanted}>
@@ -734,8 +715,7 @@ export function Voice() {
                 )}
                 {voice.wake.state.state === "complete" && (
                   <Takes recorded={voice.wake.state.recorded} wanted={voice.wake.wanted}>
-                    All {voice.wake.state.recorded} takes are recorded. To record again, clear these
-                    first.
+                    All {voice.wake.state.recorded} takes recorded.
                   </Takes>
                 )}
                 <div className="flex flex-wrap gap-2">
@@ -754,10 +734,7 @@ export function Voice() {
                 {refused.wake && <Problem>{refused.wake}</Problem>}
                 {refused.wakeClear && <Problem>{refused.wakeClear}</Problem>}
                 {canHear && (
-                  <Note>
-                    Recording starts when you press the button and stops when you stop speaking, or
-                    after {voice.wake.seconds} seconds.
-                  </Note>
+                  <Note>Each take stops when you stop speaking, or after {voice.wake.seconds} seconds.</Note>
                 )}
               </>
             )}
@@ -768,7 +745,7 @@ export function Voice() {
       <Section
         icon={<SpeakerIcon />}
         title="Microphone and speaker"
-        description="Changing either reopens the microphone and the speaker together."
+        description="Changing either reopens both."
       >
         <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
           <Field label="Microphone">
@@ -867,10 +844,7 @@ export function Voice() {
                 anything is read aloud. */}
             {voice.voiceModel.state === "ready" ? (
               <Note>
-                While listening is on, answers from session <Mono>{voice.speaking.id}</Mono> are read
-                aloud as they are written — with pauses between sentences, since speaking runs behind
-                writing. Pressing the key stops it, and what you say next tells the agent where it was
-                cut off.
+                While listening is on, answers are read aloud as they are written, with pauses between sentences.
               </Note>
             ) : (
               <Note>
@@ -918,7 +892,7 @@ export function Voice() {
       <Section
         icon={<AudioLinesIcon />}
         title="Speech recognition"
-        description="A larger model understands you better and is slower. Each is downloaded once."
+        description="Larger is more accurate and slower."
       >
         {voice.model.state === "notHere" && <Problem>{voice.model.reason}</Problem>}
         {voice.model.state === "nowhere" && (
@@ -972,14 +946,14 @@ export function Voice() {
           <Note>This takes a few minutes on a slow connection. Nothing is kept until the whole file has arrived and been checked.</Note>
         )}
         {refused.model && <Problem>{refused.model}</Problem>}
-        <Note>Choosing one takes effect at once if listening is on, and deleting the one in use turns listening off.</Note>
+        <Note>Deleting the one in use turns listening off.</Note>
       </Section>
 
       {canHear && (
         <Section
           icon={<CpuIcon />}
           title="Performance"
-          description="A graphics card is several times faster than the processor. Changing this reloads the model."
+          description="A graphics card is several times faster."
         >
           <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
             <Field label="Transcribing what you say">
@@ -1031,8 +1005,7 @@ export function Voice() {
 
       <p className="m-0 flex items-start gap-2 rounded-lg border border-sidebar-border px-3.5 py-3 text-[0.8125rem] text-muted-foreground">
         <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        What you say is sent to the agent in this computer's Attacca session as text. No recording is
-        kept once it has been turned into text.
+        Speech is turned into text on this computer; only the text is sent, and no audio is kept.
       </p>
     </Page>
   );
