@@ -577,6 +577,9 @@ pub struct Render {
     conversion: Conversion,
     to_apm: Chunker,
     analysed: u64,
+    /// Where the loudness of what was played goes, for the window's backdrop.
+    levels: Option<tokio::sync::broadcast::Sender<crate::Level>>,
+    meter: crate::meter::Meter,
 }
 
 impl Render {
@@ -591,11 +594,25 @@ impl Render {
             conversion: Conversion::new(output_rate, 1)?,
             to_apm: Chunker::new(crate::capture::APM_FRAME),
             analysed: 0,
+            levels: None,
+            meter: crate::meter::Meter::new((output_rate / crate::LEVELS_PER_SECOND) as usize),
         })
+    }
+
+    /// Publish how loud what is played is. This is the tap — what the callback really wrote —
+    /// so the level follows the speaker and not the queue.
+    pub fn metering(mut self, levels: tokio::sync::broadcast::Sender<crate::Level>) -> Render {
+        self.levels = Some(levels);
+        self
     }
 
     /// One tap frame. Answers how many canceller frames it completed.
     pub fn feed(&mut self, played: &[f32]) -> Result<usize, crate::apm::Fault> {
+        if let Some(levels) = &self.levels
+            && let Some(rms) = self.meter.push(played)
+        {
+            let _ = levels.send(crate::Level { source: crate::Source::Speaker, rms });
+        }
         let mut frames = 0;
         let converted = self.conversion.feed(played);
         for frame in self.to_apm.push(converted) {
@@ -1125,6 +1142,28 @@ mod stopping_and_the_reference {
 
         assert_eq!(first, 0, "the resampler is still filling its first chunk");
         assert_eq!(render.analysed(), 0);
+    }
+
+    /// What was played is metered as it goes past, at the speaker's own rate: a second of it is
+    /// twenty-five levels, whatever that rate is.
+    #[test]
+    fn a_second_of_the_speaker_is_twenty_five_levels() {
+        let apm = Arc::new(Apm::new().expect("a processor at the capture rate"));
+        let rate = crate::tts::SAMPLE_RATE;
+        let (levels, mut seen) = tokio::sync::broadcast::channel(64);
+        let mut render = Render::new(apm, rate).expect("44.1 kHz is ordinary").metering(levels);
+
+        let frame = render_frame(rate);
+        for i in 0..100 {
+            render.feed(&ramp(frame, i * frame)).expect("a frame the canceller accepts");
+        }
+
+        let mut measured = 0;
+        while let Ok(level) = seen.try_recv() {
+            assert_eq!(level.source, crate::Source::Speaker);
+            measured += 1;
+        }
+        assert_eq!(measured, crate::LEVELS_PER_SECOND as usize);
     }
 
     /// One second of what was played arrives as **one second of the canceller's frames**, at its

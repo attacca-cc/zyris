@@ -443,6 +443,16 @@ impl Voice {
         }
     }
 
+    /// A new subscription to how loud the microphone and the speaker are. Closed on a disabled
+    /// voice, for [`Voice::events`]'s reason.
+    pub fn levels(&self) -> broadcast::Receiver<Level> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.levels();
+        }
+        broadcast::channel(1).1
+    }
+
     /// Whether this can work **at all** — a build with an audio stack, on a machine with a
     /// microphone that answers. Cheap, and safe to call repeatedly.
     ///

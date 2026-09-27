@@ -279,6 +279,10 @@ pub struct Session {
     /// The diagnostic stream. Never `Option`: a sender with no subscribers costs an atomic
     /// load per send, and a `None` arm here would be a branch on every step of the pipeline.
     traces: broadcast::Sender<crate::Trace>,
+    /// Where the microphone's loudness goes while a turn is open, for the window's backdrop.
+    /// `None` until [`Session::metering`]: nothing is measured that nobody asked for.
+    levels: Option<broadcast::Sender<crate::Level>>,
+    meter: crate::meter::Meter,
     /// When the transcription in flight was handed over, so the trace can say what it cost.
     since: Option<std::time::Instant>,
     /// A look at the turn so far, running while the key is still down.
@@ -367,6 +371,10 @@ impl Session {
             // Replaced by [`Session::tracing`] when anything is watching. A channel nobody
             // subscribed to is the ordinary case and sending on it is a discarded error.
             traces: broadcast::channel(1).0,
+            levels: None,
+            meter: crate::meter::Meter::new(
+                (crate::capture::SAMPLE_RATE / crate::LEVELS_PER_SECOND) as usize,
+            ),
             since: None,
             partial: None,
             partial_from: 0,
@@ -446,6 +454,12 @@ impl Session {
     /// Publish every step onto this stream as well.
     pub fn tracing(mut self, traces: broadcast::Sender<crate::Trace>) -> Session {
         self.traces = traces;
+        self
+    }
+
+    /// Publish how loud the microphone is while a turn is open.
+    pub fn metering(mut self, levels: broadcast::Sender<crate::Level>) -> Session {
+        self.levels = Some(levels);
         self
     }
 
@@ -586,6 +600,15 @@ impl Session {
             // on the same condition, so nothing observable changes, and what this saves is the
             // processor running a hundred times a second over audio nobody asked for.
             return;
+        }
+
+        // Only while a turn is open: the backdrop moves with the person's voice when they are
+        // talking to the agent, and a room being listened to for the wake word is not that.
+        if self.turn.is_some()
+            && let Some(levels) = &self.levels
+            && let Some(rms) = self.meter.push(samples)
+        {
+            let _ = levels.send(crate::Level { source: crate::Source::Microphone, rms });
         }
 
         // Out of `self` so that the per-frame work can be an ordinary `&mut self` method. Both
@@ -2201,6 +2224,46 @@ mod tests {
         zyris.press().await;
 
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.stops().await;
+    }
+
+    /// The backdrop moves with the person's voice **only while they are talking to the agent**:
+    /// nothing is measured between turns, and a turn's audio is.
+    #[tokio::test]
+    async fn the_microphone_is_metered_only_while_a_turn_is_open() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let (levels, mut seen) = broadcast::channel(256);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let scribe = Scribe::always("hello");
+        let session =
+            Session::new(audio_rx, keys_rx, apm, scribe.clone(), events).metering(levels);
+        let zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+        let loud = vec![0.5f32; crate::capture::SAMPLE_RATE as usize];
+
+        zyris.feed(&loud).await;
+        assert!(seen.try_recv().is_err(), "nothing is measured between turns");
+
+        zyris.press().await;
+        // In the chunks a device delivers: one push that spans several windows reports only
+        // the last of them.
+        for chunk in loud.chunks(crate::capture::APM_FRAME) {
+            zyris.feed(chunk).await;
+        }
+        let mut measured = Vec::new();
+        while let Ok(level) = seen.try_recv() {
+            measured.push(level);
+        }
+        assert_eq!(measured.len(), crate::LEVELS_PER_SECOND as usize, "a second is 25 levels");
+        assert!(measured.iter().all(|level| level.source == crate::Source::Microphone));
+        assert!(measured.iter().all(|level| (level.rms - 0.5).abs() < 1e-3), "{measured:?}");
         zyris.stops().await;
     }
 

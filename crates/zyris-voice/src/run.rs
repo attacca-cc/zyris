@@ -250,6 +250,9 @@ pub struct Engine {
     /// The one reader of the answer stream, whether or not anything is listening. See
     /// [`crate::answers`].
     answers: Arc<Answers>,
+    /// How loud the microphone and the speaker are. Its own channel rather than more traces: 25
+    /// numbers a second per source would crowd the trace stream the Conversation screen reads.
+    levels: broadcast::Sender<crate::Level>,
     /// Whether that reader has been started. It is started by the first connection rather than
     /// here, because `new` is not async and may run before the runtime does.
     answers_started: std::sync::atomic::AtomicBool,
@@ -308,6 +311,7 @@ impl Engine {
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
             answers,
+            levels: broadcast::channel(LEVEL_CAPACITY).0,
             answers_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -400,6 +404,11 @@ impl Engine {
     /// A new subscription to the diagnostic stream.
     pub fn traces(&self) -> broadcast::Receiver<crate::Trace> {
         self.traces.subscribe()
+    }
+
+    /// A new subscription to the levels. See [`crate::meter`].
+    pub fn levels(&self) -> broadcast::Receiver<crate::Level> {
+        self.levels.subscribe()
     }
 
     /// The push-to-talk key went down or came up.
@@ -851,6 +860,7 @@ impl Engine {
             session = session.conversation(feed.clone());
         }
         session = session.tracing(self.traces.clone());
+        session = session.metering(self.levels.clone());
         session = session.expecting(settings.vocabulary.as_deref().unwrap_or(DEFAULT_VOCABULARY));
         if let Some(phrase) = phrase {
             session = session.listening_for(phrase);
@@ -946,7 +956,9 @@ impl Engine {
         let mut tasks = Vec::new();
         // The render side of the echo canceller. Started before anything can be queued, so that
         // the first thing ever played is also the first thing the canceller is told about.
-        let render = Render::new(apm.clone(), rate).map_err(|problem| problem.reason)?;
+        let render = Render::new(apm.clone(), rate)
+            .map_err(|problem| problem.reason)?
+            .metering(self.levels.clone());
         tasks.push(tokio::spawn(render.run(tap)));
         tasks.push(tokio::spawn(declare_stream_delay(
             apm,
@@ -1032,6 +1044,10 @@ const KEY_CAPACITY: usize = 32;
 /// ten sentences is fifty, and the middle of the pipeline is exactly what somebody watching it
 /// is looking for. A lag here costs nothing but a gap in a log.
 const TRACE_CAPACITY: usize = 512;
+
+/// How many levels a window may fall behind by. Shallow on purpose: a level is out of date in
+/// forty milliseconds, and one that lagged is better dropped than delivered.
+const LEVEL_CAPACITY: usize = 64;
 
 /// Why listening cannot start, said in terms of the model.
 fn no_model(state: &stt::ModelState) -> String {
