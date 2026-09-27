@@ -116,6 +116,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       speaking: over.speaking ?? { state: "session", id: "s-1" },
       voiceModel: over.voiceModel ?? { state: "ready", dir: VOICE },
       voiceModelEnv: over.voiceModelEnv ?? null,
+      downloads: over.downloads ?? [],
       wake: over.wake ?? {
         state: { state: "nothing" },
         dir: TAKES,
@@ -547,6 +548,13 @@ describe("Voice", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
     );
+  });
+
+  it("shows how far a model's download has got", async () => {
+    answers(machine({ downloads: [{ id: "model:small", received: 243800984, total: 487601967 }] }));
+    render(<Voice />);
+    expect(await screen.findByText(/233 MB of 465 MB · 50%/)).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: /download progress/i })).toBeTruthy();
   });
 
   it("chooses a model from its name, and says it is switching until listening is back", async () => {

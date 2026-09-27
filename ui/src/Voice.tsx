@@ -19,6 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Kbd } from "@/components/ui/kbd";
+import { Progress } from "@/components/ui/progress";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -177,6 +178,8 @@ export type VoiceScreen = {
     speaking: Speaking;
     voiceModel: VoiceModelView;
     voiceModelEnv: string | null;
+    // Downloads under way: `model:<id>` for a speech model, `voice` for the voice's files.
+    downloads?: { id: string; received: number; total: number | null }[];
   };
   hotkey: HotkeySupport;
 };
@@ -443,6 +446,24 @@ function KeyChanger({ busy, onChoose }: { busy: boolean; onChoose: (trigger: str
   );
 }
 
+type Download = { id: string; received: number; total: number | null };
+
+// How far a download has got: a bar, and the megabytes in words for when the bar is too small to
+// read. Nothing when nothing is downloading.
+function DownloadBar({ download }: { download?: Download }) {
+  if (!download) return null;
+  const percent = download.total ? Math.min(100, (download.received / download.total) * 100) : null;
+  return (
+    <div className="flex flex-col gap-1">
+      <Progress value={percent ?? 0} aria-label="Download progress" />
+      <span className="text-xs text-muted-foreground">
+        {megabytes(download.received)}
+        {download.total ? ` of ${megabytes(download.total)} · ${Math.floor(percent ?? 0)}%` : " so far"}
+      </span>
+    </div>
+  );
+}
+
 function DevicePicker({
   list,
   chosen,
@@ -571,6 +592,19 @@ export function Voice() {
       })
       .finally(() => setBusy(null));
   }
+
+  // While something downloads, read the machine twice a second so its bar moves (#31). The
+  // command that started it answers only when the file is whole.
+  const downloading = busy === "voiceModel" || (busy?.startsWith("model:") ?? false);
+  useEffect(() => {
+    if (!downloading) return;
+    const timer = setInterval(() => {
+      void invoke<VoiceScreen>("voice_state")
+        .then(setScreen)
+        .catch(() => {});
+    }, 500);
+    return () => clearInterval(timer);
+  }, [downloading]);
 
   if (screen === undefined) {
     return (
@@ -794,12 +828,15 @@ export function Voice() {
               <Mono>{voice.voiceModel.dir}</Mono>.
             </p>
             {voice.voiceModelEnv === null ? (
-              <div>
-                <Button size="sm" disabled={idle} onClick={() => act("voiceModel", "fetch_voice_model")}>
-                  <DownloadIcon />
-                  {busy === "voiceModel" ? "Downloading" : "Download the voice"}
-                </Button>
-              </div>
+              <>
+                <div>
+                  <Button size="sm" disabled={idle} onClick={() => act("voiceModel", "fetch_voice_model")}>
+                    <DownloadIcon />
+                    {busy === "voiceModel" ? "Downloading" : "Download the voice"}
+                  </Button>
+                </div>
+                <DownloadBar download={voice.downloads?.find((d) => d.id === "voice")} />
+              </>
             ) : (
               <Note>
                 <Mono>ZYRIS_TTS_MODELS</Mono> points at <Mono>{voice.voiceModelEnv}</Mono>, so those files
@@ -933,6 +970,7 @@ export function Voice() {
                   model={model}
                   busy={busy}
                   switching={busy === "model" && switchingTo === model.id}
+                  download={voice.downloads?.find((d) => d.id === `model:${model.id}`)}
                   refused={refused[`model:${model.id}`]}
                   onFetch={() => act(`model:${model.id}`, "fetch_speech_model", { id: model.id })}
                   onForget={() => act(`model:${model.id}`, "forget_speech_model", { id: model.id })}
@@ -1032,6 +1070,7 @@ function ModelRow({
   model,
   busy,
   switching,
+  download,
   refused,
   onFetch,
   onForget,
@@ -1039,6 +1078,7 @@ function ModelRow({
   model: SpeechModel;
   busy: string | null;
   switching: boolean;
+  download?: Download;
   refused: string | undefined;
   onFetch: () => void;
   onForget: () => void;
@@ -1109,6 +1149,7 @@ function ModelRow({
           </Button>
         )}
       </div>
+      <DownloadBar download={download} />
       {model.state.state === "damaged" && (
         <Problem>
           The file on disk is {megabytes(model.state.bytes)} and this model is {megabytes(model.state.expected)},
