@@ -346,6 +346,12 @@ impl Engine {
         feed.sessions().await.map_err(|error| error.message)
     }
 
+    /// What the session this machine talks to already holds.
+    pub async fn history(&self) -> Result<crate::view::HistoryView, String> {
+        let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
+        feed.history().await.map_err(|error| error.message)
+    }
+
     /// Talk to another session from now on, and remember it for the next launch.
     pub async fn choose_session(&self, session: String) -> Result<(), String> {
         let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };

@@ -281,6 +281,7 @@ pub fn run(
             bridge::record_wake_take,
             bridge::clear_wake_word,
             bridge::conversation_sessions,
+            bridge::conversation_history,
             bridge::choose_conversation_session,
             bridge::new_conversation_session,
         ])

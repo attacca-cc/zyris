@@ -76,6 +76,28 @@ afterEach(() => {
 });
 
 describe("the Conversation screen", () => {
+  it("opens on the messages the session already holds, before anything said now", async () => {
+    invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "conversation_history"
+        ? Promise.resolve({
+            session: "s1",
+            lines: [
+              { who: "you", text: "들리니?" },
+              { who: "agent", text: "네, 잘 들려요." },
+            ],
+          })
+        : answering(command, args),
+    );
+    await open();
+    await screen.findByText("들리니?");
+    await steps({ step: "sent", text: "지금 말한 것" });
+
+    const said = Array.from(document.querySelectorAll("[data-turn]")).map((turn) => turn.textContent ?? "");
+    expect(said[0]).toMatch(/들리니\?/);
+    expect(said[1]).toMatch(/네, 잘 들려요\./);
+    expect(said[said.length - 1]).toMatch(/지금 말한 것/);
+  });
+
   it("invites a first message and names the key", async () => {
     await open();
     expect(screen.getByText("Start a conversation")).toBeTruthy();

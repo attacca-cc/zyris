@@ -514,6 +514,15 @@ pub async fn conversation_sessions(
     voice.sessions().await
 }
 
+/// The messages already in the session this machine talks to, for the Conversation screen to
+/// open on and to show again after switching session.
+#[tauri::command]
+pub async fn conversation_history(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<zyris_voice::view::HistoryView, String> {
+    voice.history().await
+}
+
 /// Talk to another session from now on, and at the next launch.
 #[tauri::command]
 pub async fn choose_conversation_session(

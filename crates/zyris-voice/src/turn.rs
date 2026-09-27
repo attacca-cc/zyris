@@ -58,7 +58,7 @@ use zyris_attacca::{
 
 use crate::speak::{Filter, Kind};
 use crate::split::{Fragment, Splitter, IDLE_FLUSH};
-use crate::view::{AgentEntry, ProjectEntry, SessionEntry, SessionsView};
+use crate::view::{AgentEntry, HistoryLine, HistoryView, ProjectEntry, SessionEntry, SessionsView};
 
 /// How long a connection gets to announce `attacca_api` before this gives up on it.
 ///
@@ -132,6 +132,13 @@ pub trait TurnApi: Send + Sync + 'static {
 
     /// The account's sessions, in every project.
     async fn list_sessions(&self) -> zyris::Result<Vec<SessionEntry>>;
+
+    /// A session's timeline, oldest first. Empty unless implemented: the doubles in the tests
+    /// below have no history to tell.
+    async fn session_history(&self, session_id: String) -> zyris::Result<Vec<ZSessionEvent>> {
+        let _ = session_id;
+        Ok(Vec::new())
+    }
 }
 
 #[zyris::async_trait]
@@ -237,6 +244,10 @@ impl TurnApi for AttaccaApiClient {
             })
             .collect())
     }
+
+    async fn session_history(&self, session_id: String) -> zyris::Result<Vec<ZSessionEvent>> {
+        AttaccaApi::session_history(self, session_id, zyris_attacca::ZHistoryQuery { after: None, limit: None }).await
+    }
 }
 
 /// What comes out of a turn.
@@ -275,6 +286,45 @@ fn reported_summary(payload: &serde_json::Value) -> Option<String> {
         .then(|| payload.get("arguments")?.get("summary")?.as_str().map(str::to_string))
         .flatten()
         .filter(|summary| !summary.trim().is_empty())
+}
+
+/// How many messages of a session the Conversation screen opens with. The newest are kept.
+const HISTORY_LINES: usize = 200;
+
+/// What a session's timeline says, as the messages a person would recognise: theirs, and the
+/// agent's answers. A turn the agent answered only through a `report_result` tool call — a
+/// session run as a job — shows that summary, as the live feed reads it aloud.
+fn history_lines(events: &[ZSessionEvent]) -> Vec<HistoryLine> {
+    let mut lines = Vec::new();
+    let mut answered = true;
+    for event in events {
+        let content = || {
+            event.payload.get("content").and_then(|c| c.as_str()).map(str::trim).filter(|c| !c.is_empty())
+        };
+        match event.kind.as_str() {
+            "chat_user" => {
+                if let Some(text) = content() {
+                    lines.push(HistoryLine { who: "you", text: text.to_string() });
+                    answered = false;
+                }
+            }
+            "chat_agent" => {
+                if let Some(text) = content() {
+                    lines.push(HistoryLine { who: "agent", text: text.to_string() });
+                    answered = true;
+                }
+            }
+            "tool_call" if !answered => {
+                if let Some(summary) = reported_summary(&event.payload) {
+                    lines.push(HistoryLine { who: "agent", text: summary });
+                    answered = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let skip = lines.len().saturating_sub(HISTORY_LINES);
+    lines.split_off(skip)
 }
 
 /// The agent a voice session is made with when `voice.json` names no other: the one written for
@@ -499,6 +549,15 @@ impl Feed {
                  choose from",
             )
         })
+    }
+
+    /// The messages of the session this machine talks to. No session yet is no history.
+    pub async fn history(&self) -> zyris::Result<HistoryView> {
+        let Some(session) = self.session_id() else {
+            return Ok(HistoryView { session: None, lines: Vec::new() });
+        };
+        let events = self.api()?.session_history(session.clone()).await?;
+        Ok(HistoryView { session: Some(session), lines: history_lines(&events) })
     }
 
     /// Everything the Conversation screen needs to choose a session, read off the account.
@@ -1042,6 +1101,34 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    fn event(kind: &str, payload: serde_json::Value) -> ZSessionEvent {
+        ZSessionEvent { id: None, seq: 0, cursor: 0, kind: kind.into(), payload, created_at: None }
+    }
+
+    /// The history shows what was said, and a job's report where the agent wrote no answer.
+    #[test]
+    fn history_keeps_the_messages_and_a_report_that_stood_in_for_an_answer() {
+        let events = vec![
+            event("chat_user", serde_json::json!({"content": "들리니?"})),
+            event("thinking", serde_json::json!({"content": "simple"})),
+            event("chat_agent", serde_json::json!({"content": "네, 잘 들려요."})),
+            event("chat_user", serde_json::json!({"content": "비교해줘"})),
+            event("work_summary", serde_json::json!({"content": "비교하는 중"})),
+            event("tool_call", serde_json::json!({"name": "report_result", "arguments": {"summary": "3070이 빨라요."}})),
+            event("tool_call", serde_json::json!({"name": "report_result", "arguments": {"summary": "twice"}})),
+        ];
+        let said: Vec<_> = history_lines(&events).into_iter().map(|l| (l.who, l.text)).collect();
+        assert_eq!(
+            said,
+            vec![
+                ("you", "들리니?".to_string()),
+                ("agent", "네, 잘 들려요.".to_string()),
+                ("you", "비교해줘".to_string()),
+                ("agent", "3070이 빨라요.".to_string()),
+            ]
+        );
+    }
 
     /// Several agents are a choice this does not make — unless one of them is the Voice agent,
     /// which is the one written for being read aloud. A name in the settings still wins.

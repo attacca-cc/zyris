@@ -6,7 +6,7 @@ import { subscribeLevels, subscribeTrace, type Trace } from "./state";
 import type { VoiceScreen } from "./Voice";
 import { Backdrop, type Mode } from "./conversation/Backdrop";
 import { Composer, StatusLine, type Phase } from "./conversation/Composer";
-import { fold, type Action, type Turn } from "./conversation/fold";
+import { fold, fromHistory, type Action, type HistoryLine, type Turn } from "./conversation/fold";
 import { perceived } from "./conversation/levels";
 import { Thread } from "./conversation/Thread";
 
@@ -46,6 +46,23 @@ export function Conversation({ hidden }: { hidden: boolean }) {
 
   const dispatch = useCallback((action: Action) => setTurns((turns) => fold(turns, action)), []);
 
+  // What the session already holds, put in front of anything said since the screen opened. An
+  // answer for a session the picker has since left is dropped by its ticket. Read again the next
+  // time the screen is shown if it could not be read — before the machine has connected, say.
+  const historyTicket = useRef(0);
+  const historyRead = useRef(false);
+  const readHistory = useCallback(() => {
+    const ticket = ++historyTicket.current;
+    invoke<{ session: string | null; lines: HistoryLine[] }>("conversation_history")
+      .then((history) => {
+        if (ticket !== historyTicket.current) return;
+        historyRead.current = true;
+        const earlier = fromHistory(history?.lines ?? []);
+        if (earlier.length > 0) setTurns((live) => [...earlier, ...live]);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     let stops: (() => void)[] = [];
     let gone = false;
@@ -82,7 +99,8 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   }, []);
   useEffect(() => {
     if (!hidden) readVoice();
-  }, [hidden, readVoice]);
+    if (!hidden && !historyRead.current) readHistory();
+  }, [hidden, readVoice, readHistory]);
 
   const phase = phaseOf(turns, speaking);
   const recording = phase === "recording" || keyDown;
@@ -117,6 +135,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
         onSwitched={() => {
           setTurns([]);
           setSpeaking(false);
+          readHistory();
         }}
       />
 

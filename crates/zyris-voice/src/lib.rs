@@ -514,6 +514,15 @@ impl Voice {
         Err(NOT_COMPILED_IN.to_string())
     }
 
+    /// The messages already in the session this machine talks to. `Err` is a sentence.
+    pub async fn history(&self) -> Result<view::HistoryView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.history().await;
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
     /// Talk to another session from now on, and at the next launch.
     pub async fn choose_session(&self, session: String) -> Result<view::SessionsView, String> {
         #[cfg(feature = "voice")]

@@ -302,6 +302,25 @@ pub struct SessionEntry {
     pub running: bool,
 }
 
+/// What the session this machine talks to already holds, for the Conversation screen to open
+/// on. Only what was said: reasoning, tool calls and progress notes are left out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryView {
+    /// The session it was read from, so the window can drop an answer for one it has left.
+    pub session: Option<String>,
+    pub lines: Vec<HistoryLine>,
+}
+
+/// One message in a session's history.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryLine {
+    /// `you` or `agent`, the words the Conversation screen already uses.
+    pub who: &'static str,
+    pub text: String,
+}
+
 /// One agent a new session can be created against.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

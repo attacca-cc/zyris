@@ -61,6 +61,16 @@ export type AgentTurn = {
 
 export type Turn = YouTurn | AgentTurn | { who: "problem"; reason: string };
 
+// A session's earlier messages, as turns that are over: sent, and answered in plain white.
+export type HistoryLine = { who: "you" | "agent"; text: string };
+export function fromHistory(lines: HistoryLine[]): Turn[] {
+  return lines.map((line) =>
+    line.who === "you"
+      ? { ...newYou("sent", line.text) }
+      : { ...newAgent(false), text: line.text, writing: false, settled: true },
+  );
+}
+
 // A trace step, or something this window did itself: a typed message goes on screen before the
 // bridge says it was sent, so the person sees it at once.
 export type Action =
