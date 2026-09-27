@@ -6,7 +6,7 @@ function Card({ className, ...props }: React.ComponentProps<"section">) {
     <section
       data-slot="card"
       className={cn(
-        "flex flex-col gap-4 rounded-xl border bg-card px-5 py-5 text-card-foreground",
+        "flex flex-col gap-4 rounded-xl border bg-card px-5 py-5 max-sm:px-4 text-card-foreground",
         className,
       )}
       {...props}
@@ -16,7 +16,7 @@ function Card({ className, ...props }: React.ComponentProps<"section">) {
 
 function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    <div data-slot="card-header" className={cn("flex items-start gap-3", className)} {...props} />
+    <div data-slot="card-header" className={cn("action-row items-start gap-3", className)} {...props} />
   );
 }
 

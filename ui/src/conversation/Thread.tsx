@@ -31,7 +31,7 @@ function Yours({ turn }: { turn: YouTurn }) {
       {(words !== "" || turn.state !== "lost") && (
         <div
           className={cn(
-            "max-w-[72%] rounded-[1rem] rounded-br-[0.375rem] border bg-[#1d1814]/85 px-3.5 py-2 text-[0.9375rem] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]",
+            "max-w-[72%] max-sm:max-w-[85%] rounded-[1rem] rounded-br-[0.375rem] border bg-[#1d1814]/85 px-3.5 py-2 text-[0.9375rem] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]",
             turn.state === "sent" ? "text-heading" : "text-muted-foreground",
             transcribing && "italic",
             turn.state === "lost" && "line-through decoration-subtle/60",
@@ -110,7 +110,7 @@ export function Thread({ turns, agentName }: { turns: Turn[]; agentName: string 
 
   return (
     <div ref={scroller} className="relative min-h-0 flex-1 overflow-y-auto">
-      <ol className="mx-auto m-0 flex max-w-[45rem] list-none flex-col gap-5 px-6 pt-6 pb-4">
+      <ol className="mx-auto m-0 flex max-w-[45rem] list-none flex-col gap-5 px-6 pt-6 pb-4 max-sm:px-4">
         {turns.map((turn, at) =>
           turn.who === "you" ? (
             <Yours key={at} turn={turn} />

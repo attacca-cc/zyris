@@ -16,7 +16,7 @@
         "title": "Zyris",
         "width": 1000,
         "height": 700,
-        "minWidth": 640,
+        "minWidth": 360,
         "minHeight": 480,
         "resizable": true,
         "visible": false

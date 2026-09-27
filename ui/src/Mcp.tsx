@@ -258,17 +258,19 @@ export function Mcp({ state }: { state: State }) {
                           {commandLine(server)}
                         </span>
                       </div>
-                      <Badge variant={variant}>{label}</Badge>
-                      {/* No switch for a server that can never be announced: starting it fails for
-                          the same reason every time, and the fix is the rename below. */}
-                      {server.capability !== null && (
-                        <Switch
-                          aria-label={`Turn ${rowName(server)} ${running ? "off" : "on"}`}
-                          checked={running}
-                          disabled={inFlight}
-                          onCheckedChange={() => toggle(server)}
-                        />
-                      )}
+                      <div className="flex items-center gap-3">
+                        <Badge variant={variant}>{label}</Badge>
+                        {/* No switch for a server that can never be announced: starting it fails for
+                            the same reason every time, and the fix is the rename below. */}
+                        {server.capability !== null && (
+                          <Switch
+                            aria-label={`Turn ${rowName(server)} ${running ? "off" : "on"}`}
+                            checked={running}
+                            disabled={inFlight}
+                            onCheckedChange={() => toggle(server)}
+                          />
+                        )}
+                      </div>
                     </CardHeader>
 
                     <div className="flex flex-col gap-2 pl-12">

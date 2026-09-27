@@ -1004,7 +1004,7 @@ function ModelRow({
         model.chosen ? "border-primary/70 bg-primary/5" : "border-sidebar-border bg-inset",
       )}
     >
-      <div className="flex items-center gap-3">
+      <div className="action-row items-center gap-3">
         {/* Only a model on disk can be chosen; the chosen one stays marked even when it is not. */}
         <RadioGroupItem value={model.id} aria-label={model.name} disabled={!ready && !model.chosen} />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">

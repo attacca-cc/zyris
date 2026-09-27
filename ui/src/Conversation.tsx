@@ -135,7 +135,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
           <Thread turns={turns} agentName={agentName ?? "Agent"} />
         )}
 
-        <div className="relative flex shrink-0 flex-col gap-2 px-6 pb-4.5">
+        <div className="relative flex shrink-0 flex-col gap-2 px-6 pb-4.5 max-sm:px-3 max-sm:pb-3">
           <div className="mx-auto flex w-full max-w-[45rem] flex-col gap-2">
             <StatusLine
               phase={phase}
