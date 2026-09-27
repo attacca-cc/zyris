@@ -372,6 +372,9 @@ export type Trace =
   | { step: "sent"; text: string }
   | { step: "sendFailed"; reason: string }
   | { step: "delta"; kind: string; text: string }
+  // What the agent says it is doing (a progress note or a reasoning title), and a tool it called.
+  | { step: "working"; title: string }
+  | { step: "tool"; name: string }
   | { step: "fragment"; text: string }
   | { step: "synthesised"; text: string; seconds: number; tookMs: number }
   | { step: "queued"; text: string; atSample: number; samples: number }

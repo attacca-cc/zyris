@@ -135,8 +135,14 @@ impl Answers {
                 });
                 return;
             }
-            // Nothing the speaker does anything with.
-            TurnEvent::Event { .. } | TurnEvent::Lost { .. } => return,
+            // What the agent is doing, for the window; nothing the speaker reads.
+            TurnEvent::Event { event, .. } => {
+                if let Some(step) = progress(event) {
+                    self.trace(step);
+                }
+                return;
+            }
+            TurnEvent::Lost { .. } => return,
         }
         if let Some(attached) = self.lock().as_ref() {
             // No receiver means the speaker's `run` has ended; there is nobody to tell.
@@ -156,6 +162,20 @@ impl Answers {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Attached>> {
         self.speaker.lock().expect("the attached speaker is not poisoned")
+    }
+}
+
+/// A durable event as the progress it shows: a note or a reasoning title, or a tool call. A
+/// `report_result` call is the answer itself, not progress, and is left to the feed.
+fn progress(event: &zyris_attacca::ZSessionEvent) -> Option<Trace> {
+    let text = |key: &str| {
+        event.payload.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    };
+    match event.kind.as_str() {
+        "work_summary" => text("content").map(|title| Trace::Working { title }),
+        "thinking" => text("title").map(|title| Trace::Working { title }),
+        "tool_call" => text("name").filter(|name| name != "report_result").map(|name| Trace::Tool { name }),
+        _ => None,
     }
 }
 
@@ -338,5 +358,26 @@ mod tests {
         }
         assert!(matches!(rig.trace().await, Trace::Failed { .. }));
         assert!(rig.events.try_recv().is_err(), "said once");
+    }
+
+    /// Progress notes, reasoning titles and tool calls reach the window as they happen; the
+    /// report that is an answer, and reasoning with no title, do not.
+    #[tokio::test]
+    async fn what_the_agent_is_doing_is_traced_as_it_works() {
+        let mut rig = rig(true);
+        let event = |kind: &str, payload: serde_json::Value| TurnEvent::Event {
+            cursor: 1,
+            event: serde_json::from_value(serde_json::json!({ "seq": 1, "cursor": 1, "kind": kind, "payload": payload }))
+                .expect("the wire shape"),
+        };
+        rig.send(event("work_summary", serde_json::json!({ "content": "코드를 찾는 중" })));
+        rig.send(event("thinking", serde_json::json!({ "content": "..." })));
+        rig.send(event("thinking", serde_json::json!({ "content": "...", "title": "Planning the search" })));
+        rig.send(event("tool_call", serde_json::json!({ "name": "report_result", "arguments": {} })));
+        rig.send(event("tool_call", serde_json::json!({ "name": "shell", "arguments": {} })));
+
+        assert_eq!(rig.trace().await, Trace::Working { title: "코드를 찾는 중".into() });
+        assert_eq!(rig.trace().await, Trace::Working { title: "Planning the search".into() });
+        assert_eq!(rig.trace().await, Trace::Tool { name: "shell".into() });
     }
 }

@@ -98,6 +98,20 @@ describe("the Conversation screen", () => {
     expect(said[said.length - 1]).toMatch(/지금 말한 것/);
   });
 
+  it("says what the agent is doing while it works, and keeps the tool count after", async () => {
+    await open();
+    await steps(
+      { step: "sent", text: "찾아줘" },
+      { step: "answering", aloud: false },
+      { step: "working", title: "코드를 찾는 중" },
+      { step: "tool", name: "shell" },
+    );
+    expect(screen.getByText("코드를 찾는 중 · 1 tool")).toBeTruthy();
+    await steps({ step: "delta", kind: "Assistant", text: "찾았어요." }, { step: "answered" });
+    expect(screen.queryByText("코드를 찾는 중 · 1 tool")).toBeNull();
+    expect(screen.getByText("Used 1 tool")).toBeTruthy();
+  });
+
   it("invites a first message and names the key", async () => {
     await open();
     expect(screen.getByText("Start a conversation")).toBeTruthy();

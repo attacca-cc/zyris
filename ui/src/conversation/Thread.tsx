@@ -48,12 +48,30 @@ function Yours({ turn }: { turn: YouTurn }) {
   );
 }
 
+// One line on what the agent is doing while it works — its last note or reasoning title, and how
+// many tools it has called — so a long quiet stretch reads as work and not as a hang. Once the
+// answer is written only the count stays.
+function Activity({ turn }: { turn: AgentTurn }) {
+  const tools = turn.tools > 0 ? `${turn.tools} ${turn.tools === 1 ? "tool" : "tools"}` : null;
+  if (turn.writing && (turn.activity || tools)) {
+    return (
+      <span role="status" className="flex min-w-0 items-center gap-1.5 text-[0.78125rem] text-subtle">
+        <span aria-hidden="true" className="size-1.5 shrink-0 animate-soft-pulse rounded-full bg-primary" />
+        <span className="truncate">{[turn.activity, tools].filter(Boolean).join(" · ")}</span>
+      </span>
+    );
+  }
+  if (!turn.writing && tools) return <span className="text-[0.75rem] text-subtle">Used {tools}</span>;
+  return null;
+}
+
 function Theirs({ turn, agentName }: { turn: AgentTurn; agentName: string }) {
   const parts = spans(turn);
   const empty = parts.length === 0;
   return (
     <li className="flex max-w-[88%] flex-col gap-1" data-turn="agent">
       <span className="text-[0.78125rem] font-medium text-muted-foreground">{agentName}</span>
+      <Activity turn={turn} />
       {empty && turn.writing ? (
         <span className="flex gap-1.5 pt-2 pb-1" aria-label="Writing">
           {[0, 0.15, 0.3].map((delay) => (
