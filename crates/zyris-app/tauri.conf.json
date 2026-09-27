@@ -29,10 +29,12 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "deb",
       "rpm",
       "nsis",
+      "app",
       "dmg"
     ],
     "linux": {
@@ -41,7 +43,8 @@
           "libpipewire-0.3-0",
           "libasound2",
           "libgbm1",
-          "libayatana-appindicator3-1"
+          "libayatana-appindicator3-1",
+          "libvulkan1"
         ]
       },
       "rpm": {
@@ -49,8 +52,14 @@
           "pipewire-libs",
           "alsa-lib",
           "mesa-libgbm",
-          "libayatana-appindicator-gtk3"
+          "libayatana-appindicator-gtk3",
+          "vulkan-loader"
         ]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
       }
     },
     "icon": [
@@ -64,6 +73,17 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFMjFDRDlENTQ5NDNFM0YKUldRL1BwUlVuYzBoYmtoV0RiQjFFUWxBQzFKZkFPd2ZwTm1Sbi9PS3o1RUZrRUE4NWRNTkhCY1UK",
+      "endpoints": [
+        "https://github.com/attacca-cc/zyris/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

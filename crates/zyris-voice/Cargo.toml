@@ -237,6 +237,10 @@ gpu-stt = ["voice", "whisper-rs/vulkan"]
 # then needs `libwebgpu_dawn.so` beside it, which `copy-dylibs` puts there.
 gpu-tts = ["voice", "ort/webgpu"]
 
+# Transcription on an Apple GPU through whisper.cpp's Metal backend: the macOS counterpart of
+# `gpu-stt`, which Vulkan cannot be there. Metal ships with every Mac, so nothing extra is linked.
+metal = ["voice", "whisper-rs/metal"]
+
 # The same canceller, built from source rather than linked against a system copy — and this is
 # the one a release uses, because there is no system copy to link against: **no Debian or Ubuntu
 # ships `webrtc-audio-processing` 2.x**, so a `.deb` naming it in `Depends:` would name a

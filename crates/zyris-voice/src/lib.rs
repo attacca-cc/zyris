@@ -36,8 +36,15 @@
 
 use tokio::sync::broadcast;
 
-/// End the process, the way `std::process::exit` does — except in a build that reads answers
-/// on the GPU, where it skips the C++ exit handlers.
+/// End the process, the way `std::process::exit` does — except in a voice build, where it skips
+/// the C++ exit handlers.
+///
+/// whisper.cpp keeps its CPU backend's buffer types in a C++ static, and a sentence still being
+/// transcribed when the app quits reads it from ggml's worker threads after the exit handlers
+/// freed it: a SIGSEGV in `ggml_cpu_extra_compute_forward` on quit (a core dump from the 0.1.1
+/// `.deb`, 2026-09-28).
+///
+/// The GPU build had its own reason first:
 ///
 /// ONNX Runtime's global environment is a C++ static, and with the WebGPU provider its destructor
 /// releases the Dawn instance after Dawn has already torn itself down, which aborts with "pure
@@ -46,7 +53,7 @@ use tokio::sync::broadcast;
 /// ends with `std::process::exit`, which drops nothing on the Rust side either, so this only
 /// flushes what stdio holds and leaves.
 pub fn exit_process(code: i32) -> ! {
-    #[cfg(feature = "gpu-tts")]
+    #[cfg(feature = "voice")]
     {
         use std::io::Write;
         let _ = std::io::stdout().flush();
@@ -58,7 +65,7 @@ pub fn exit_process(code: i32) -> ! {
         // against.
         unsafe { _exit(code) }
     }
-    #[cfg(not(feature = "gpu-tts"))]
+    #[cfg(not(feature = "voice"))]
     std::process::exit(code)
 }
 

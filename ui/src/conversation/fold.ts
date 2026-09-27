@@ -174,7 +174,14 @@ export function fold(turns: Turn[], action: Action): Turn[] {
     case "transcribed":
       if (!open) return turns;
       return action.text === ""
-        ? replaceLast({ ...open, state: "lost", detail: "No speech was found." })
+        ? replaceLast({
+            ...open,
+            state: "lost",
+            // Base mistakes quiet Korean for silence where Large v3 Turbo reads it; measured on a
+            // USB microphone at 47% (-29 dBFS RMS), 2026-09-28.
+            detail:
+              "No speech was found. If you did speak, the microphone may be too quiet for this model: raise its input volume or choose a larger model.",
+          })
         : replaceLast({ ...open, state: "said", text: action.text });
     case "typed":
       return action.text.trim() === "" ? turns : [...turns, newYou("said", action.text)];

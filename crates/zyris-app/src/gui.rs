@@ -76,7 +76,7 @@ fn close_hotkey(hotkey: &std::sync::Arc<dyn Hotkey>, runtime: &tokio::runtime::H
 use crate::cli::Mode;
 use crate::confirm::Pending;
 use crate::hotkey::Hotkey;
-use crate::{bridge, hotkey, tray};
+use crate::{bridge, hotkey, tray, update};
 
 pub fn run(
     bus: EventBus,
@@ -198,6 +198,7 @@ pub fn run(
     }
 
     let app = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(bus.clone())
         .manage(runtime)
         // Clones, not the `Tools` itself: both are handles on the state `main` built, so the
@@ -284,6 +285,8 @@ pub fn run(
             bridge::conversation_history,
             bridge::choose_conversation_session,
             bridge::new_conversation_session,
+            update::check_for_update,
+            update::install_update,
         ])
         .setup(move |app| {
             #[cfg(target_os = "linux")]
@@ -463,7 +466,7 @@ pub fn run(
             lifecycle::shutdown(&bus);
             tracing::info!("stopped");
             // Tauri would call `std::process::exit` next; this does the same, minus the C++
-            // exit handlers that crash a GPU voice build. See `zyris_voice::exit_process`.
+            // exit handlers that crash a voice build. See `zyris_voice::exit_process`.
             zyris_voice::exit_process(0);
         }
         _ => {}
