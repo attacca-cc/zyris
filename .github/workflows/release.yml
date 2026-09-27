@@ -148,8 +148,12 @@ jobs:
             libgbm-dev \
             libasound2-dev \
             libclang-dev \
-            meson \
-            ninja-build
+            ninja-build \
+            python3-pip
+          # Meson from PyPI: the echo canceller's build runs `meson setup --reconfigure` on a
+          # fresh directory, which Debian 12's meson 1.0 refuses ("does not contain a valid build
+          # tree") and newer ones accept.
+          $SUDO pip3 install --break-system-packages 'meson>=1.3'
 
       - uses: pnpm/action-setup@v4
 
@@ -204,6 +208,26 @@ jobs:
             cp "/c/Windows/System32/$dll" target/vcruntime/
           done
           ls -la target/vcruntime
+
+      # **Built once before the bundle, so the Dawn DLLs exist and can be staged.** ort-sys copies
+      # them into target/release during the build, and tauri-build copies bundle resources into
+      # the same directory in the same build: naming them where they land was a copy onto
+      # itself, which Windows refuses (os error 32). The bundle build after this finds every
+      # crate built and only reruns tauri-build, which then copies from target/gpu.
+      - name: Build once and stage the GPU DLLs
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+        run: |
+          set -euo pipefail
+          pnpm --filter zyris-ui build
+          cargo build --release -p zyris-app --features ${{ matrix.features }},custom-protocol
+          mkdir -p target/gpu
+          for dll in webgpu_dawn.dll dxcompiler.dll dxil.dll; do
+            cp "target/release/$dll" target/gpu/
+          done
+          ls -la target/gpu
 
       - name: Build the bundles
         shell: bash

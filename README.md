@@ -657,7 +657,8 @@ the lines beside it put AVX2 back. A release with the voice refuses to build wit
   links ONNX Runtime's `wgpu` build instead of the CPU one, and the binary needs Dawn beside it —
   `libwebgpu_dawn.so` on Linux; `webgpu_dawn.dll`, `dxcompiler.dll` and `dxil.dll` on Windows.
   `copy-dylibs` puts them in `target/release`. **The Windows installer is built with `gpu` and
-  carries the three DLLs** (`crates/zyris-app/tauri.windows-gpu.conf.json`); the `.deb` is not
+  carries the three DLLs** (`crates/zyris-app/tauri.windows-gpu.conf.json`, staged in `target/gpu`
+  by a first build in `release.yml`, beside the Visual C++ runtime in `target/vcruntime`); the `.deb` is not
   and does not carry the `.so` yet. DirectML, which the plain Windows ONNX Runtime already has,
   was measured and not taken: 1.26 s a sentence on an RTX 3050 against 0.37 s through WebGPU. Where `pkg-config` finds a system ONNX Runtime (NixOS, say), set
   `LIBONNXRUNTIME_NO_PKG_CONFIG=1`, or the build links that CPU-only copy and synthesis quietly
