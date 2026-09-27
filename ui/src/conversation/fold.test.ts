@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Trace } from "../state";
-import { fold, type Action, type AgentTurn, type Turn, type YouTurn } from "./fold";
+import { fold, fromHistory, type Action, type AgentTurn, type Turn, type YouTurn } from "./fold";
 
 function run(...steps: Action[]): Turn[] {
   return steps.reduce<Turn[]>(fold, []);
@@ -243,5 +243,15 @@ describe("problems", () => {
       assistant("찾았어요."),
     );
     expect(agent(turns)).toMatchObject({ text: "찾아볼게요.\n\n찾았어요.", activity: "코드를 찾는 중", tools: 2 });
+  });
+
+  it("opens a session's history with an answer written in several messages as one", () => {
+    const turns = fromHistory([
+      { who: "you", text: "추천해줘" },
+      { who: "agent", text: "확인할게요." },
+      { who: "agent", text: "두 가지예요." },
+    ]);
+    expect(turns).toHaveLength(2);
+    expect((turns[1] as AgentTurn).text).toBe("확인할게요.\n\n두 가지예요.");
   });
 });

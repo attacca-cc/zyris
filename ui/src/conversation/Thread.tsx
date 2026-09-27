@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { spans, type Tone } from "./colors";
+import { Markdown } from "./Markdown";
 import type { AgentTurn, Turn, YouTurn } from "./fold";
 
 const TONE: Record<Tone, string> = {
@@ -52,17 +53,18 @@ function Yours({ turn }: { turn: YouTurn }) {
 // many tools it has called — so a long quiet stretch reads as work and not as a hang. Once the
 // answer is written only the count stays.
 function Activity({ turn }: { turn: AgentTurn }) {
+  if (!turn.writing) return null;
   const tools = turn.tools > 0 ? `${turn.tools} ${turn.tools === 1 ? "tool" : "tools"}` : null;
-  if (turn.writing && (turn.activity || tools)) {
-    return (
-      <span role="status" className="flex min-w-0 items-center gap-1.5 text-[0.78125rem] text-subtle">
-        <span aria-hidden="true" className="size-1.5 shrink-0 animate-soft-pulse rounded-full bg-primary" />
-        <span className="truncate">{[turn.activity, tools].filter(Boolean).join(" · ")}</span>
-      </span>
-    );
-  }
-  if (!turn.writing && tools) return <span className="text-[0.75rem] text-subtle">Used {tools}</span>;
-  return null;
+  // Before the agent has said what it is doing, it is thinking: said at once, so the time
+  // between sending and the first progress note does not look like nothing happening.
+  const doing = turn.activity ?? (turn.text.trim() === "" ? "Thinking" : null);
+  if (!doing && !tools) return null;
+  return (
+    <span role="status" className="flex min-w-0 items-center gap-1.5 text-[0.78125rem] text-subtle">
+      <span aria-hidden="true" className="size-1.5 shrink-0 animate-soft-pulse rounded-full bg-primary" />
+      <span className="truncate">{[doing, tools].filter(Boolean).join(" · ")}</span>
+    </span>
+  );
 }
 
 function Theirs({ turn, agentName }: { turn: AgentTurn; agentName: string }) {
@@ -83,19 +85,19 @@ function Theirs({ turn, agentName }: { turn: AgentTurn; agentName: string }) {
           ))}
         </span>
       ) : (
-        <p className="m-0 text-[0.9375rem] leading-[1.65] whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {parts.map((part, i) => (
-            <span key={i} className={TONE[part.tone]} data-tone={part.tone}>
-              {part.text}
-            </span>
-          ))}
-          {turn.writing && (
-            <span
-              aria-hidden="true"
-              className="ml-0.5 inline-block h-[1.05em] w-0.5 animate-caret bg-foreground align-[-0.2em]"
-            />
-          )}
-        </p>
+        <Markdown
+          text={parts.map((part) => part.text).join("")}
+          spans={parts}
+          toneClass={TONE}
+          trailing={
+            turn.writing && (
+              <span
+                aria-hidden="true"
+                className="ml-0.5 inline-block h-[1.05em] w-0.5 animate-caret bg-foreground align-[-0.2em]"
+              />
+            )
+          }
+        />
       )}
       {turn.interrupted && (
         <span className="text-[0.75rem] text-subtle">

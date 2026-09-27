@@ -174,7 +174,10 @@ fn progress(event: &zyris_attacca::ZSessionEvent) -> Option<Trace> {
     match event.kind.as_str() {
         "work_summary" => text("content").map(|title| Trace::Working { title }),
         "thinking" => text("title").map(|title| Trace::Working { title }),
-        "tool_call" => text("name").filter(|name| name != "report_result").map(|name| Trace::Tool { name }),
+        // A wrapper that runs other calls is not a call of its own.
+        "tool_call" => text("name")
+            .filter(|name| !matches!(name.as_str(), "report_result" | "sequential_tool_calls" | "parallel_tool_calls"))
+            .map(|name| Trace::Tool { name }),
         _ => None,
     }
 }

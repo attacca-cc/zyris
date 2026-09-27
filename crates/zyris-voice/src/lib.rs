@@ -288,6 +288,9 @@ pub enum Trace {
     /// stretch of reasoning. Shown while it works, so a long silence reads as work.
     #[serde(rename_all = "camelCase")]
     Working { title: String },
+    /// Listening was turned off. A turn that was being recorded ends here, unsent — without
+    /// this the window went on showing it as recording.
+    ListeningOff,
     /// The agent called a tool. Only the name; the window counts them.
     #[serde(rename_all = "camelCase")]
     Tool { name: String },

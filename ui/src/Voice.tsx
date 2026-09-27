@@ -644,7 +644,9 @@ export function Voice() {
           </Problem>
         )}
         {refused.listening && <Problem>{refused.listening}</Problem>}
-        {last && <Note>{heardLine(last)}</Note>}
+        {/* What the session last said is only news while it is listening: with listening off, a
+            "Recording" from before would read as still recording. */}
+        {last && listeningOn && <Note>{heardLine(last)}</Note>}
       </Section>
 
       <Section

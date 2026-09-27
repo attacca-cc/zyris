@@ -57,8 +57,8 @@ export type AgentTurn = {
   interrupted: boolean;
   // Samples of this answer's stream written to the device, or -1 before any.
   played: number;
-  // What the agent last said it was doing, and how many tools it has called, for the line that
-  // shows it is working rather than stuck.
+  // What the agent last said it was doing, and how many tools it has called since, for the line
+  // that shows it is working rather than stuck. The count is per step, as the web app shows it.
   activity: string | null;
   tools: number;
   // The agent stopped writing to work (a tool, reasoning): its next words start a paragraph.
@@ -70,11 +70,22 @@ export type Turn = YouTurn | AgentTurn | { who: "problem"; reason: string };
 // A session's earlier messages, as turns that are over: sent, and answered in plain white.
 export type HistoryLine = { who: "you" | "agent"; text: string };
 export function fromHistory(lines: HistoryLine[]): Turn[] {
-  return lines.map((line) =>
-    line.who === "you"
-      ? { ...newYou("sent", line.text) }
-      : { ...newAgent(false), text: line.text, writing: false, settled: true },
-  );
+  // An agent that wrote, worked and wrote again left several messages for one answer; they are
+  // one answer here, in paragraphs, as the live thread shows them.
+  const turns: Turn[] = [];
+  for (const line of lines) {
+    const previous = turns[turns.length - 1];
+    if (line.who === "agent" && previous?.who === "agent") {
+      turns[turns.length - 1] = { ...previous, text: `${previous.text}\n\n${line.text}` };
+    } else {
+      turns.push(
+        line.who === "you"
+          ? newYou("sent", line.text)
+          : { ...newAgent(false), text: line.text, writing: false, settled: true },
+      );
+    }
+  }
+  return turns;
 }
 
 // A trace step, or something this window did itself: a typed message goes on screen before the
@@ -179,6 +190,9 @@ export function fold(turns: Turn[], action: Action): Turn[] {
         lastIndex(turns, (t) => t.who === "you" && t.state === "said" && t.text === action.text),
         action.reason,
       );
+    case "listeningOff":
+      // A turn being recorded when listening went off was never sent.
+      return open ? replaceLast({ ...open, state: "lost", detail: "Listening was turned off." }) : turns;
     case "failed":
       // A turn of yours that never got as far as its text is what failed; anything else is said
       // as a line of its own, rather than left for the screen to go on claiming it is working.
@@ -203,7 +217,7 @@ export function fold(turns: Turn[], action: Action): Turn[] {
           }))
         : [...settleAll(turns), { ...newAgent(false), text: action.text }];
     case "working":
-      return working((a) => ({ ...a, activity: action.title }));
+      return working((a) => ({ ...a, activity: action.title, tools: 0 }));
     case "tool":
       return working((a) => ({ ...a, tools: a.tools + 1 }));
     case "answered":

@@ -1022,6 +1022,7 @@ impl Engine {
             }
             running.session.abort();
             let _ = running.session.await;
+            let _ = self.traces.send(crate::Trace::ListeningOff);
         }
     }
 
