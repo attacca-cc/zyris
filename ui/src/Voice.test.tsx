@@ -75,6 +75,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       },
       speaker: over.speaker ?? { kind: "default" },
       speakingRate: over.speakingRate ?? 1.25,
+      readAloud: over.readAloud ?? true,
       compute: over.compute ?? {
         transcribe: [
           { id: "cpu", name: "Processor — Intel Core i5" },

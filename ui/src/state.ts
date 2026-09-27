@@ -76,13 +76,14 @@ export type ToolCallRow = ToolCall & { at: string };
 // out separately and kept in step by hand. A screen that exists and is not in this list is a
 // screen with nothing to navigate to it — reachable only by an event, which for a tab is never —
 // and that failure is silent in a way nothing here would catch.
+//
+// In the order the sidebar shows them. Conversation is first because it is where a person lands.
 export const TABS = [
-  { id: "status", label: "Status" },
-  { id: "tools", label: "Tools" },
-  { id: "mcp", label: "MCP" },
-  { id: "voice", label: "Voice" },
   { id: "conversation", label: "Conversation" },
-  { id: "debug", label: "Debug" },
+  { id: "voice", label: "Voice" },
+  { id: "tools", label: "Tools" },
+  { id: "mcp", label: "MCP servers" },
+  { id: "status", label: "Status" },
   { id: "settings", label: "Settings" },
 ] as const;
 
@@ -184,7 +185,7 @@ export const initialState: State = {
 // would hurt most: a reconnect landing while somebody is halfway through moving the autostart
 // switch would take the screen out from under them.
 function pastEnrolment(screen: Screen): Screen {
-  return screen === "starting" || screen === "onboarding" ? "status" : screen;
+  return screen === "starting" || screen === "onboarding" ? "conversation" : screen;
 }
 
 // Applying the same event twice in a row must leave state exactly as applying it once did — the
@@ -376,7 +377,10 @@ export type Trace =
   | { step: "queued"; text: string; atSample: number; samples: number }
   | { step: "playing"; atSample: number }
   | { step: "dropped" }
-  | { step: "answering" }
+  // `aloud` is whether this answer will be read: reading aloud is on and a speaker is open.
+  | { step: "answering"; aloud: boolean }
+  // The agent stopped writing. Speech may go on after it.
+  | { step: "answered" }
   | { step: "spoke" }
   | { step: "interrupted"; heard: number; unheard: number }
   | { step: "failed"; reason: string };
@@ -390,6 +394,17 @@ const VOICE_TRACE_NAME = "voice-trace";
 // what happens next.
 export function subscribeTrace(onStep: (step: Trace) => void): Promise<() => void> {
   return listen<Trace>(VOICE_TRACE_NAME, (message) => onStep(message.payload));
+}
+
+// How loud the microphone (during a turn) or the speaker is. Mirrors `zyris_voice::Level`.
+// `rms` is linear amplitude in 0..1; `conversation/levels.ts` makes it a size.
+export type Level = { source: "microphone" | "speaker"; rms: number };
+
+// Has to match VOICE_LEVEL_NAME in crates/zyris-app/src/bridge.rs, which pins it with a test.
+const VOICE_LEVEL_NAME = "voice-level";
+
+export function subscribeLevels(onLevel: (level: Level) => void): Promise<() => void> {
+  return listen<Level>(VOICE_LEVEL_NAME, (message) => onLevel(message.payload));
 }
 
 // There is deliberately **no catch-up call beside this one**. A turn is four events over a second

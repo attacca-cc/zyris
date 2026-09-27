@@ -140,6 +140,8 @@ export type VoiceScreen = {
     speaker: Choice;
     // A multiple of the voice's own pace, already clamped by the Rust side.
     speakingRate: number;
+    // Whether answers are read aloud while listening is on. The Conversation screen's switch.
+    readAloud: boolean;
     compute: Compute;
     model: ModelView;
     models: SpeechModel[];

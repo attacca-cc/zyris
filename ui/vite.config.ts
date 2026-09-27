@@ -3,9 +3,12 @@
 // about the React plugin or the module resolution the components are compiled under.
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  // `@/…` is `src/…`, the alias the shadcn components are written against.
+  resolve: { alias: { "@": "/src" } },
   // Tauri serves the dev build from this port and expects it not to move.
   server: { port: 5173, strictPort: true },
   build: { outDir: "dist", emptyOutDir: true },
@@ -15,5 +18,8 @@ export default defineConfig({
     // would be testing a webview that is not running.
     environment: "jsdom",
     include: ["src/**/*.test.{ts,tsx}"],
+    // What jsdom lacks and Radix reaches for: pointer capture, scrolling an option into view,
+    // and ResizeObserver.
+    setupFiles: ["src/test/setup.ts"],
   },
 });

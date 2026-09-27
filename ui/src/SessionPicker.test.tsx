@@ -5,6 +5,7 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { SessionPicker, type SessionsView } from "./SessionPicker";
+import { choose, optionsOf, shown } from "./test/select";
 
 const ACCOUNT: SessionsView = {
   projects: [
@@ -22,10 +23,7 @@ const ACCOUNT: SessionsView = {
   problems: [],
 };
 
-function options(name: RegExp): string[] {
-  const select = screen.getByRole<HTMLSelectElement>("combobox", { name });
-  return Array.from(select.options).map((o) => o.textContent ?? "");
-}
+const options = optionsOf;
 
 afterEach(() => {
   cleanup();
@@ -37,14 +35,12 @@ describe("the session picker", () => {
     invoke.mockResolvedValue(ACCOUNT);
     render(<SessionPicker hidden={false} onSwitched={() => {}} />);
 
-    const project = await screen.findByRole<HTMLSelectElement>("combobox", { name: /^project$/i });
-    expect(project.value).toBe("p-work");
-    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: /^session$/i }).value).toBe(
-      "s-report",
-    );
+    await screen.findByRole("combobox", { name: /^project$/i });
+    expect(shown(/^project$/i)).toBe("Work");
+    expect(shown(/^session$/i)).toBe("Quarterly report — answering");
     expect(options(/^session$/i)).toEqual(["Quarterly report — answering"]);
 
-    fireEvent.change(project, { target: { value: "p-home" } });
+    choose(/^project$/i, /^Home/);
     // The one in use stays visible as the choice, marked as elsewhere, rather than the first
     // session of Home looking chosen.
     expect(options(/^session$/i)).toEqual([
@@ -59,12 +55,9 @@ describe("the session picker", () => {
     const onSwitched = vi.fn();
     render(<SessionPicker hidden={false} onSwitched={onSwitched} />);
 
-    fireEvent.change(await screen.findByRole("combobox", { name: /^project$/i }), {
-      target: { value: "p-home" },
-    });
-    fireEvent.change(screen.getByRole("combobox", { name: /^session$/i }), {
-      target: { value: "s-lunch" },
-    });
+    await screen.findByRole("combobox", { name: /^project$/i });
+    choose(/^project$/i, /^Home/);
+    choose(/^session$/i, "Lunch plans");
 
     await waitFor(() => expect(onSwitched).toHaveBeenCalledTimes(1));
     expect(invoke).toHaveBeenLastCalledWith("choose_conversation_session", { session: "s-lunch" });
@@ -100,8 +93,8 @@ describe("the session picker", () => {
     invoke.mockResolvedValueOnce(several).mockResolvedValueOnce({ ...several, current: "s-new" });
     render(<SessionPicker hidden={false} onSwitched={() => {}} />);
 
-    const agent = await screen.findByRole("combobox", { name: /agent for a new session/i });
-    fireEvent.change(agent, { target: { value: "a2" } });
+    await screen.findByRole("combobox", { name: /agent for a new session/i });
+    choose(/agent for a new session/i, "Bea");
     fireEvent.click(screen.getByRole("button", { name: /new session/i }));
 
     await waitFor(() =>
