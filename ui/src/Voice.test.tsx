@@ -22,7 +22,7 @@ const { invoke, listen, emitVoice } = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
-import { Voice, type VoiceScreen } from "./Voice";
+import { triggerOf, Voice, type VoiceScreen } from "./Voice";
 import { choose, optionsOf, shown } from "./test/select";
 
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
@@ -197,6 +197,30 @@ describe("Voice", () => {
     // And it does not tell somebody with a working key to go and edit a configuration file.
     expect(readable()).not.toMatch(/compositor/i);
     expect(readable()).not.toMatch(/bind = /);
+  });
+
+  it("changes the key to the next combination pressed, and ignores a bare letter", async () => {
+    const changed = machine({ hotkey: { state: "working", trigger: "Ctrl+Shift+K", releaseConfirmed: true } });
+    answers(machine({}), changed);
+    render(<Voice />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /change key/i }));
+    fireEvent.keyDown(window, { code: "KeyK" });
+    expect(invoke).not.toHaveBeenCalledWith("set_push_to_talk_key", expect.anything());
+    fireEvent.keyDown(window, { code: "KeyK", ctrlKey: true, shiftKey: true });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_push_to_talk_key", { trigger: "Ctrl+Shift+K" }));
+    expect((await screen.findAllByText("K")).length).toBeGreaterThan(0);
+  });
+
+  it("reads a pressed combination the way the backend parses it", () => {
+    const key = (code: string, mods: Partial<Record<"ctrlKey" | "altKey" | "shiftKey" | "metaKey", boolean>> = {}) =>
+      triggerOf({ ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, code, ...mods });
+    expect(key("Space", { ctrlKey: true, altKey: true })).toBe("Ctrl+Alt+Space");
+    expect(key("F9")).toBe("F9");
+    expect(key("Digit5", { metaKey: true })).toBe("Super+5");
+    expect(key("Space")).toBeNull();
+    expect(key("ControlLeft", { ctrlKey: true })).toBeNull();
   });
 
   it("shows the exact line to add when the desktop will only let the person bind the key", async () => {

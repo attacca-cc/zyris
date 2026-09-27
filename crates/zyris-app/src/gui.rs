@@ -129,7 +129,8 @@ pub fn run(
     // Never fails. A desktop with no way to register a global key gets a `Hotkey` that says so,
     // for the reason `zyris-tools`'s `announce.rs` gives about a machine with no display server:
     // a control that cannot work is worse than an absent one.
-    let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read()));
+    let trigger_file = bridge::TriggerFile(crate::data_dir(&instance).join(hotkey::TRIGGER_FILE));
+    let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read(), &hotkey::saved_trigger(&trigger_file.0)));
     tracing::info!(support = ?hotkey.describe(), "push-to-talk");
 
     let setup_bus = bus.clone();
@@ -241,6 +242,8 @@ pub fn run(
         // Wayland, where no application is allowed to choose the key — the exact line the person
         // has to add to their compositor configuration. The Voice screen reads it.
         .manage(hotkey)
+        // Where a key chosen on the Voice screen is kept for the next launch.
+        .manage(trigger_file)
         // Speech, as a handle on the one this process built. The Voice screen reads everything
         // through it — the device list, the model on disk, whether a microphone is open — and
         // moves the one switch that opens one.
@@ -262,6 +265,7 @@ pub fn run(
             bridge::set_mcp_server_enabled,
             bridge::voice_state,
             bridge::set_voice_listening,
+            bridge::set_push_to_talk_key,
             bridge::set_voice_device,
             bridge::set_voice_speaker,
             bridge::set_speaking_rate,

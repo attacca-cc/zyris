@@ -386,6 +386,62 @@ function Keys({ trigger }: { trigger: string }) {
   );
 }
 
+// A pressed combination as the backend reads it ("Ctrl+Shift+K"), or null while only modifiers
+// are down or the key is one a global shortcut should not take on its own.
+export function triggerOf(event: Pick<KeyboardEvent, "ctrlKey" | "altKey" | "shiftKey" | "metaKey" | "code">): string | null {
+  const code = event.code;
+  let key: string | null = null;
+  if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
+  else if (/^Digit[0-9]$/.test(code)) key = code.slice(5);
+  else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
+  else if (["Space", "Enter", "Tab", "Backquote", "Minus", "Equal", "Comma", "Period", "Slash", "Semicolon", "Quote",
+    "BracketLeft", "BracketRight", "Backslash", "Insert", "Delete", "Home", "End", "PageUp", "PageDown",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Pause", "ScrollLock"].includes(code)) key = code;
+  if (key === null) return null;
+  const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Super"].filter(
+    (m): m is string => Boolean(m),
+  );
+  // A bare letter or space as a global key would swallow it in every other program.
+  if (modifiers.length === 0 && !/^F\d+$/.test(key)) return null;
+  return [...modifiers, key].join("+");
+}
+
+// "Change" on the push-to-talk key: the next combination pressed becomes the key. Escape cancels.
+function KeyChanger({ busy, onChoose }: { busy: boolean; onChoose: (trigger: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "Escape") {
+        setRecording(false);
+        return;
+      }
+      const trigger = triggerOf(event);
+      if (trigger === null) return;
+      setRecording(false);
+      onChoose(trigger);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, onChoose]);
+  return recording ? (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-[0.8125rem] text-heading animate-soft-pulse">Press the new keys…</span>
+      <Button size="sm" variant="ghost" onClick={() => setRecording(false)}>
+        Cancel
+      </Button>
+    </div>
+  ) : (
+    <div>
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => setRecording(true)}>
+        Change key
+      </Button>
+    </div>
+  );
+}
+
 function DevicePicker({
   list,
   chosen,
@@ -641,6 +697,13 @@ export function Voice() {
             {hotkey.state === "unavailable" && (
               <Problem>{hotkey.reason} Nothing on this screen can start a turn until that changes.</Problem>
             )}
+            {(hotkey.state === "working" || (hotkey.state === "needsAKeyBound" && hotkey.line !== null)) && (
+              <KeyChanger
+                busy={busy !== null}
+                onChoose={(trigger) => act("hotkey", "set_push_to_talk_key", { trigger })}
+              />
+            )}
+            {refused.hotkey && <Problem>{refused.hotkey}</Problem>}
           </Panel>
 
           <Panel>
