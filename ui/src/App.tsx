@@ -7,6 +7,7 @@ import { Status } from "./Status";
 import { Tools } from "./Tools";
 import { Voice } from "./Voice";
 import { Conversation } from "./Conversation";
+import { UpdateNotice } from "./UpdateNotice";
 import { Sidebar } from "./components/Sidebar";
 import {
   fetchLatestEvent,
@@ -78,13 +79,18 @@ export function App() {
   // of its own, so the person can see what they were doing when an agent asked — and it cannot
   // be dismissed except by answering, because an agent's send is blocked on it and refuses
   // itself if nobody answers.
-  const question = state.question && <PeerConfirm question={state.question} dispatch={dispatch} />;
+  const overlays = (
+    <>
+      {state.question && <PeerConfirm question={state.question} dispatch={dispatch} />}
+      <UpdateNotice />
+    </>
+  );
 
   if (state.screen === "onboarding") {
     return (
       <>
         <Onboarding state={state} />
-        {question}
+        {overlays}
       </>
     );
   }
@@ -120,14 +126,14 @@ export function App() {
         {/* No props: what this screen shows is read off the machine through a command, not
             folded into core state, because nothing outside it needs the answer. */}
         {state.screen === "settings" && <Settings />}
-        {question}
+        {overlays}
       </div>
     );
   }
   return (
     <main className="flex h-full items-center justify-center">
       <p className="text-muted-foreground">Starting…</p>
-      {question}
+      {overlays}
     </main>
   );
 }

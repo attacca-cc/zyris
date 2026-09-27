@@ -17,6 +17,7 @@ mod gui;
 mod headless;
 mod hotkey;
 mod tray;
+mod update;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;

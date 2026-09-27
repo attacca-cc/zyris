@@ -260,6 +260,10 @@ jobs:
           # runners, because `windows-latest` has Strawberry Perl's pure-Perl `pkg-config.bat`
           # on PATH and it answers.
           LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+          # Signs the updater artifacts (`createUpdaterArtifacts`) so an installed Zyris accepts
+          # them; the public half is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri build --features ${{ matrix.features }} ${{ matrix.config }}
 
       - name: Report what the bundler produced
@@ -289,6 +293,8 @@ jobs:
             target/release/bundle/rpm/*.rpm
             target/release/bundle/nsis/*.exe
             target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/*.app.tar.gz
+            target/release/bundle/*/*.sig
           if-no-files-found: error
 
   release:
@@ -309,6 +315,35 @@ jobs:
       - name: Report what will be attached
         run: find bundles -type f -printf '%s\t%p\n'
 
+      # What an installed Zyris reads to learn of this release: each platform's file and its
+      # signature. The macOS archive is renamed with the version so two releases never share a
+      # name.
+      - name: Write latest.json for the updater
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for f in bundles/*/Zyris.app.tar.gz bundles/*/Zyris.app.tar.gz.sig; do
+            mv "$f" "${f/Zyris.app/Zyris_${TAG#v}_aarch64.app}"
+          done
+          entry() { # key file
+            local file sig
+            file=$(ls bundles/*/$2); sig=$(cat "$file.sig")
+            jq -n --arg sig "$sig" --arg url "https://github.com/$REPO/releases/download/$TAG/$(basename "$file")" \
+              '{signature: $sig, url: $url}' | jq --arg k "$1" '{($k): .}'
+          }
+          {
+            entry windows-x86_64-nsis '*_x64-setup.exe'
+            entry windows-x86_64 '*_x64-setup.exe'
+            entry darwin-aarch64-app '*_aarch64.app.tar.gz'
+            entry darwin-aarch64 '*_aarch64.app.tar.gz'
+            entry linux-x86_64-deb '*_amd64.deb'
+            entry linux-x86_64-rpm '*.x86_64.rpm'
+          } | jq -s --arg v "${TAG#v}" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{version: $v, pub_date: $d, notes: "See the release notes on GitHub.", platforms: add}' > latest.json
+          cat latest.json
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -316,6 +351,9 @@ jobs:
             bundles/**/*.rpm
             bundles/**/*.exe
             bundles/**/*.dmg
+            bundles/**/*.app.tar.gz
+            bundles/**/*.sig
+            latest.json
           fail_on_unmatched_files: true
           draft: false
           # The merged pull requests since the last tag, as GitHub lists them.
