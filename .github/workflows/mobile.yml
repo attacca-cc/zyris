@@ -65,6 +65,11 @@ jobs:
       - name: Generate the Android project
         run: pnpm tauri android init --ci
 
+      # The launcher icon, full-bleed: Android masks it to its own shape. `tauri icon` writes into the
+      # generated project when there is one; the desktop icons it also rewrites are not kept.
+      - name: Put the Zyris icon on the app
+        run: pnpm tauri icon crates/zyris-app/icons/app-mobile.svg
+
       # The Kotlin half of `rustls-platform-verifier`, which TLS on Android calls into (see
       # `init_tls_verifier` in mobile.rs). It ships as a Maven repository inside a crate, so the
       # Gradle project is pointed at the copy cargo downloaded.
@@ -168,6 +173,10 @@ jobs:
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM || 'SIMULATOR0' }}
         run: pnpm tauri ios init --ci
+
+      # Full-bleed, as iOS wants an opaque square it rounds itself.
+      - name: Put the Zyris icon on the app
+        run: pnpm tauri icon crates/zyris-app/icons/app-mobile.svg
 
       # **An iPhone runs only what Apple has signed for it**, and signing for the App Store needs
       # the account's team, certificate and provisioning profile. Without them the app is built

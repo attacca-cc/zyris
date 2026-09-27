@@ -55,6 +55,11 @@
         ]
       }
     },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
     "icon": [
       "icons/icon.png",
       "icons/128x128@2x.png",
