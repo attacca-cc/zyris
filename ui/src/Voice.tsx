@@ -166,6 +166,8 @@ export type VoiceScreen = {
     speakingRate: number;
     // Whether answers are read aloud while listening is on. The Conversation screen's switch.
     readAloud: boolean;
+    // A gain on the voice: 1 is as the model writes it.
+    volume: number;
     compute: Compute;
     model: ModelView;
     models: SpeechModel[];
@@ -251,6 +253,42 @@ function heardLine(event: VoiceEvent): string {
     case "interrupted":
       return "Stopped reading the answer out loud, because you started speaking.";
   }
+}
+
+// How loud answers are read. Moves freely under the finger and is sent once it is let go, so a
+// drag is one setting rather than forty. From 10% rather than 0: drawn too small, one click saved
+// 0 and every answer went silent, which reads as the voice being broken rather than turned down.
+function VolumeSlider({
+  volume,
+  disabled,
+  onCommit,
+}: {
+  volume: number;
+  disabled: boolean;
+  onCommit: (volume: number) => void;
+}) {
+  const [shown, setShown] = useState(Math.round(volume * 100));
+  useEffect(() => setShown(Math.round(volume * 100)), [volume]);
+  const commit = () => {
+    if (shown !== Math.round(volume * 100)) onCommit(shown / 100);
+  };
+  return (
+    <Field label={`Volume — ${shown}%`}>
+      <input
+        type="range"
+        className="w-full accent-primary disabled:opacity-50"
+        aria-label="How loud answers are read"
+        min={10}
+        max={200}
+        step={5}
+        value={shown}
+        disabled={disabled}
+        onChange={(event) => setShown(Number(event.target.value))}
+        onPointerUp={commit}
+        onKeyUp={commit}
+      />
+    </Field>
+  );
 }
 
 // The speeds offered, and the stored one if it is not among them — a hand-edited file must not
@@ -796,6 +834,16 @@ export function Voice() {
               </div>
             )}
             {refused.rate && <Problem>{refused.rate}</Problem>}
+            {voice.voiceModel.state === "ready" && (
+              <div className="max-w-80">
+                <VolumeSlider
+                  volume={voice.volume}
+                  disabled={idle}
+                  onCommit={(volume) => act("volume", "set_voice_volume", { volume })}
+                />
+              </div>
+            )}
+            {refused.volume && <Problem>{refused.volume}</Problem>}
           </>
         )}
       </Section>

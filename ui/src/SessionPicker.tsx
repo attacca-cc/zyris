@@ -21,6 +21,8 @@ export type SessionsView = {
     title: string | null;
     project: string | null;
     agent: string | null;
+    // Named only when the account's agent list has it.
+    agentName: string | null;
     running: boolean;
   }[];
   agents: { id: string; name: string }[];
@@ -197,6 +199,7 @@ export function SessionPicker({
             {inProject.map((s) => (
               <SelectItem key={s.id} value={s.id}>
                 {titleOf(s)}
+                {s.agentName && s.agentName !== "Voice" ? ` — ${s.agentName}` : ""}
                 {s.running ? " — answering" : ""}
               </SelectItem>
             ))}

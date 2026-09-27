@@ -629,6 +629,16 @@ impl Voice {
         }
     }
 
+    /// Choose how loud answers are read, now and at the next launch.
+    pub async fn choose_volume(&self, gain: f32) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_volume(gain).await;
+        }
+        let _ = gain;
+        self.look().await
+    }
+
     /// Choose how fast answers are read, now and at the next launch.
     pub async fn choose_speaking_rate(&self, rate: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

@@ -246,6 +246,7 @@ pub fn run(
             bridge::set_read_aloud,
             bridge::send_conversation_text,
             bridge::stop_speaking,
+            bridge::set_voice_volume,
             bridge::set_voice_compute,
             bridge::set_speech_model,
             bridge::fetch_speech_model,
