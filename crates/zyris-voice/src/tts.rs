@@ -1476,9 +1476,13 @@ mod tests {
 
     /// A directory that goes away with the test.
     fn tempdir() -> PathBuf {
+        // A counter as well as the clock: Windows' clock is coarse enough that two tests
+        // starting together would share a directory (see model.rs).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "zyris-tts-{}-{}",
+            "zyris-tts-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())

@@ -39,8 +39,11 @@ fn no_manifest_in_this_workspace_turns_the_audio_stack_on() {
     for (path, text) in &manifests {
         for entry in dependencies_on(text, CRATE) {
             found_a_dependency_on_this_crate = true;
+            // `conversation` is the one feature a manifest may name: it has no audio in it, and
+            // it is how the phone build gets a conversation (`zyris-app`'s mobile targets).
+            let only_conversation = entry.contains("features = [\"conversation\"]");
             assert!(
-                !entry.contains("features"),
+                !entry.contains("features") || only_conversation,
                 "{} depends on `{CRATE}` and names a feature: {entry}\n\nNothing in this \
                  workspace may turn `voice` (or `aec`) on from a manifest. Cargo unifies \
                  features, so this puts cpal, whisper.cpp and the rest into every \

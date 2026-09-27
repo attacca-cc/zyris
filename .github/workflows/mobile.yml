@@ -1,0 +1,221 @@
+name: Mobile
+
+# The phone apps: an Android APK and an iOS build of the same window, a typed conversation (see
+# `crates/zyris-app/src/mobile.rs`). A `v*` tag attaches them to that tag's release; a manual run
+# builds them, and attaches them to the release named in `release` when one is given. Not on pull
+# requests: a macOS build is the slowest thing CI runs, and a phone build is checked when one is
+# made.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Attach the builds to this existing release tag (leave empty to only build)"
+        required: false
+        default: ""
+
+concurrency:
+  group: mobile-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+  LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # arm64 only: every phone sold in the last several years, and a quarter of the build time.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - run: pnpm install --frozen-lockfile
+
+      # The runner image carries the SDK and several NDKs; Tauri reads NDK_HOME.
+      - name: Point Tauri at the NDK
+        run: echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      # The Gradle project is generated rather than committed: it is Tauri's template and the
+      # identifier in tauri.conf.json, nothing of ours.
+      - name: Generate the Android project
+        run: pnpm tauri android init --ci
+
+      - name: Build the APK
+        run: pnpm tauri android build --apk --target aarch64 --ci
+
+      # Signed with the release key in the repository's secrets, so every later version installs
+      # over this one. Without the key the build is still checked, and nothing is published.
+      - name: Sign
+        id: sign
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          apk=$(find crates/zyris-app/gen/android -name '*-release-unsigned.apk' | head -1)
+          echo "unsigned: $apk"
+          version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' crates/zyris-app/tauri.conf.json | head -1)
+          mkdir -p out
+          if [ -z "${KEYSTORE:-}" ]; then
+            echo "no release key in the secrets; the APK is not signed or published"
+            cp "$apk" "out/Zyris_${version}_arm64-unsigned.apk"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "$KEYSTORE" | base64 -d > release.jks
+          "$tools/zipalign" -p -f 4 "$apk" aligned.apk
+          "$tools/apksigner" sign --ks release.jks --ks-pass env:KEYSTORE_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" --out "out/Zyris_${version}_arm64.apk" aligned.apk
+          "$tools/apksigner" verify --print-certs "out/Zyris_${version}_arm64.apk" | head -3
+          rm release.jks
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zyris-android
+          path: out/*.apk
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: steps.sign.outputs.signed == 'true' && (startsWith(github.ref, 'refs/tags/v') || inputs.release != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release || github.ref_name }}
+          files: out/*.apk
+          fail_on_unmatched_files: true
+
+  ios:
+    name: ios
+    runs-on: macos-latest
+    env:
+      # Whether there is a signing team at all. Its own name, because a step that sets the
+      # team itself (the placeholder below) would change what its own `if` reads.
+      SIGNED: ${{ secrets.APPLE_DEVELOPMENT_TEAM != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios
+
+      - run: pnpm install --frozen-lockfile
+
+      # `init` refuses to write a project with no development team, even one only ever built for
+      # the simulator, which signs nothing. Without the secret it gets a placeholder that never
+      # reaches a signing step.
+      - name: Generate the Xcode project
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM || 'SIMULATOR0' }}
+        run: pnpm tauri ios init --ci
+
+      # **An iPhone runs only what Apple has signed for it**, and signing for the App Store needs
+      # the account's team, certificate and provisioning profile. Without them the app is built
+      # for devices with signing switched off, and the archive's app is packed as an unsigned IPA:
+      # a person installs it with AltStore or Sideloadly, which sign it with their own Apple ID.
+      # The export step that follows the archive needs signing and fails; the archive is what is
+      # kept.
+      - name: Build an unsigned IPA (no signing identity)
+        if: env.SIGNED != 'true'
+        run: |
+          set -euo pipefail
+          # Not through `tauri ios build`: it hands xcodebuild signing settings on the command
+          # line, which outrank anything in the project, and archiving then asks for an Apple
+          # account. The Rust library is built here, put where the project links it from, and
+          # Xcode's own step that would build it is emptied; xcodebuild then archives with
+          # signing off.
+          pnpm --filter zyris-ui build
+          cargo build --release --lib -p zyris-app --target aarch64-apple-ios --features custom-protocol
+          apple=crates/zyris-app/gen/apple
+          for configuration in release Release; do
+            mkdir -p "$apple/Externals/arm64/$configuration"
+            cp target/aarch64-apple-ios/release/libzyris_app_lib.a "$apple/Externals/arm64/$configuration/libapp.a"
+          done
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("crates/zyris-app/gen/apple/project.yml")
+          text = p.read_text()
+          text, n = re.subn(r"(script:\s*)(.*xcode-script.*)", r'\1echo "the Rust library was built before xcodebuild"', text)
+          p.write_text(text)
+          print("Build Rust Code emptied in", n, "places")
+          PY
+          (cd "$apple" && xcodegen generate)
+          scheme=$(xcodebuild -list -json -project "$apple/zyris-app.xcodeproj" | python3 -c 'import json,sys; print([s for s in json.load(sys.stdin)["project"]["schemes"] if s.endswith("_iOS")][0])')
+          xcodebuild -project "$apple/zyris-app.xcodeproj" -scheme "$scheme" -configuration release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/Zyris.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" | tail -20
+          app=$(find "$RUNNER_TEMP/Zyris.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$app"
+          version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' crates/zyris-app/tauri.conf.json | head -1)
+          mkdir -p out/Payload
+          cp -R "$app" out/Payload/
+          # The static library the executable was linked from is copied in as a resource by the
+          # template; the app does not load it, and it is most of the bundle's size.
+          rm -f out/Payload/*.app/libapp.a
+          (cd out && zip -qry "Zyris_${version}_ios-unsigned.ipa" Payload && rm -rf Payload)
+          ls -la out
+
+      - name: Build the signed IPA
+        if: env.SIGNED == 'true'
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY_PATH"
+          pnpm tauri ios build --export-method app-store-connect --ci
+          mkdir -p out && find crates/zyris-app/gen/apple -name '*.ipa' -exec cp {} out/ \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zyris-ios
+          path: out/*.ipa
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release || github.ref_name }}
+          files: out/*.ipa
+          fail_on_unmatched_files: true

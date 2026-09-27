@@ -165,6 +165,7 @@ impl Fragment {
     /// read a `Reasoning` delta aloud by mistake. This is `#[cfg(test)]`, so the rule holds for
     /// everything that is not a test in this crate and for every crate outside it.
     #[cfg(test)]
+    #[cfg_attr(not(feature = "voice"), allow(dead_code))]
     pub(crate) fn spoken(text: &str) -> Fragment {
         Fragment(text.to_string())
     }

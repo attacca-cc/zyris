@@ -623,9 +623,14 @@ mod tests {
     /// A directory that goes away with the test. `tempfile` is not a dependency of this crate
     /// and one download test is not a reason to make it one.
     fn tempdir() -> PathBuf {
+        // **A counter, not only the clock.** Windows' clock is coarse enough that two tests
+        // starting together read the same instant, got the same directory, and one test's
+        // finished download showed up as the other's leftover.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "zyris-stt-{}-{}",
+            "zyris-stt-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
