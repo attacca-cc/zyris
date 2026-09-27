@@ -33,6 +33,9 @@ env:
   # should be. `.cargo/config.toml` names the AVX2 set for every build in this workspace, this
   # one included, and `crates/zyris-voice/build.rs` refuses a release without it.
   GGML_NATIVE: "OFF"
+  # whisper.cpp uses std::filesystem, which Apple's libc++ offers from macOS 10.15, and the
+  # compilers default lower. Every Apple Silicon Mac runs 11 or later. Read only by Apple targets.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 permissions:
   contents: read
