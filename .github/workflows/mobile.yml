@@ -79,7 +79,7 @@ jobs:
           manifest=$(cargo metadata --format-version 1 --filter-platform aarch64-linux-android \
             | jq -r '.packages[] | select(.name == "rustls-platform-verifier-android") | .manifest_path')
           maven="$(dirname "$manifest")/maven"
-          version=$(ls "$maven/rustls/rustls-platform-verifier")
+          version=$(ls "$maven/rustls/rustls-platform-verifier" | grep -E "^[0-9.]+$" | sort -V | tail -1)
           app=crates/zyris-app/gen/android/app
           cat >> "$app/build.gradle.kts" <<EOF
 
