@@ -190,18 +190,20 @@ jobs:
       # **The C++ runtime the installer has to carry.** whisper.cpp and ONNX Runtime are C++ built
       # against the DLL runtime, so zyris.exe imports MSVCP140.dll and MSVCP140_1.dll, which a
       # fresh Windows does not have until something installs the Visual C++ redistributable.
-      # 0.0.2's installer carried neither. Copied from the runner's System32 next to the build,
+      # 0.0.2's installer carried neither. Copied from the runner's System32 into target/vcruntime,
       # where tauri.windows-gpu.conf.json picks them up; Microsoft allows this app-local copy.
       - name: Put the Visual C++ runtime beside the build
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p target/release
+          # A folder of their own: tauri-build copies resources into target/release, and a
+          # source already there is a copy onto itself, which Windows refuses (os error 32).
+          mkdir -p target/vcruntime
           for dll in msvcp140.dll msvcp140_1.dll vcruntime140.dll vcruntime140_1.dll; do
-            cp "/c/Windows/System32/$dll" target/release/
+            cp "/c/Windows/System32/$dll" target/vcruntime/
           done
-          ls -la target/release/*.dll
+          ls -la target/vcruntime
 
       - name: Build the bundles
         shell: bash
