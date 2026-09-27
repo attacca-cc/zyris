@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Trace } from "../state";
-import { fold, type Action, type AgentTurn, type Turn, type YouTurn } from "./fold";
+import { fold, fromHistory, type Action, type AgentTurn, type Turn, type YouTurn } from "./fold";
 
 function run(...steps: Action[]): Turn[] {
   return steps.reduce<Turn[]>(fold, []);
@@ -154,7 +154,16 @@ describe("what the agent says", () => {
   });
 
   it("is settled once speech ends or is cut off, or the next answer begins", () => {
-    expect(agent(run({ step: "answering", aloud: true }, { step: "spoke" })).settled).toBe(true);
+    expect(
+      agent(
+        run(
+          { step: "answering", aloud: true },
+          { step: "fragment", text: "Hi." },
+          { step: "queued", text: "Hi.", atSample: 0, samples: 10 },
+          { step: "spoke" },
+        ),
+      ).settled,
+    ).toBe(true);
     expect(
       agent(run({ step: "answering", aloud: true }, { step: "interrupted", heard: 1, unheard: 2 })),
     ).toMatchObject({ settled: true, interrupted: true });
@@ -202,5 +211,47 @@ describe("problems", () => {
   it("ends a turn of yours that was still being transcribed", () => {
     const turns = run({ step: "recording", started: true }, { step: "failed", reason: "no mic" });
     expect(you(turns)).toMatchObject({ state: "lost", detail: "no mic" });
+  });
+
+  it("colours the rest of an earlier answer as it plays, after a new one has begun", () => {
+    const turns = run(
+      { step: "answering", aloud: true },
+      assistant("One. Two."),
+      { step: "fragment", text: "One." },
+      { step: "queued", text: "One.", atSample: 0, samples: 10 },
+      { step: "fragment", text: "Two." },
+      { step: "queued", text: "Two.", atSample: 10, samples: 10 },
+      { step: "answered" },
+      { step: "answering", aloud: true },
+      { step: "playing", atSample: 12 },
+    );
+    const answers = turns.filter((t): t is AgentTurn => t.who === "agent");
+    expect(answers[0].played).toBe(12);
+    expect(answers[1].played).toBe(12);
+    // The newest has nothing queued yet, so the old answer going quiet does not close it.
+    const later = fold(turns, { step: "spoke" }).filter((t): t is AgentTurn => t.who === "agent");
+    expect(later.map((a) => a.settled)).toEqual([true, false]);
+  });
+
+  it("starts a paragraph where the agent stopped to work, and says what it is doing", () => {
+    const turns = run(
+      { step: "answering", aloud: false },
+      assistant("찾아볼게요."),
+      { step: "working", title: "코드를 찾는 중" },
+      { step: "tool", name: "shell" },
+      { step: "tool", name: "shell" },
+      assistant("찾았어요."),
+    );
+    expect(agent(turns)).toMatchObject({ text: "찾아볼게요.\n\n찾았어요.", activity: "코드를 찾는 중", tools: 2 });
+  });
+
+  it("opens a session's history with an answer written in several messages as one", () => {
+    const turns = fromHistory([
+      { who: "you", text: "추천해줘" },
+      { who: "agent", text: "확인할게요." },
+      { who: "agent", text: "두 가지예요." },
+    ]);
+    expect(turns).toHaveLength(2);
+    expect((turns[1] as AgentTurn).text).toBe("확인할게요.\n\n두 가지예요.");
   });
 });

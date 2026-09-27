@@ -11,13 +11,14 @@
 //! before `tauri::App::run` takes it over — see `gui::run`. Built anywhere else the registration
 //! succeeds and no event arrives, which is the same silent failure this module exists to avoid.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
-use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use tokio::sync::broadcast;
 
-use super::{Closing, Hotkey, HotkeyEvent, HotkeySupport, OnePerHold, TRIGGER};
+use super::{Closing, Hotkey, HotkeyEvent, HotkeySupport, OnePerHold};
 
 /// The manager, and the one platform where it needs help crossing a thread.
 ///
@@ -40,7 +41,11 @@ unsafe impl Sync for Manager {}
 /// A key grabbed from an X11 session or from Windows.
 pub struct GrabbedHotkey {
     manager: Manager,
-    hotkey: HotKey,
+    /// The key held now, and how it was written, which is what the window shows.
+    held: Mutex<(HotKey, String)>,
+    /// The id the event handler below answers to. Separate from `held` because the handler runs
+    /// on `global-hotkey`'s thread and must not wait on a lock a rebind holds.
+    id: Arc<AtomicU32>,
     /// An `Arc` because the process-global event handler below outlives this value: nothing in
     /// `global-hotkey` takes a handler back, so the closure has to be able to survive the
     /// `GrabbedHotkey` that installed it.
@@ -57,19 +62,20 @@ impl GrabbedHotkey {
     ///
     /// **It does not fail on a Wayland session with Xwayland running**, which is why nothing
     /// here is allowed to decide the backend. See the module documentation on `hotkey/mod.rs`.
-    pub fn grab() -> anyhow::Result<GrabbedHotkey> {
+    pub fn grab(trigger: &str) -> anyhow::Result<GrabbedHotkey> {
         let manager = GlobalHotKeyManager::new()?;
-        let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+        let hotkey: HotKey = trigger.parse()?;
         manager.register(hotkey)?;
 
         let events = Arc::new(OnePerHold::new());
         let published = events.clone();
-        let id = hotkey.id();
+        let id = Arc::new(AtomicU32::new(hotkey.id()));
+        let wanted = id.clone();
         // One process-global slot, claimed here. This is why the Tauri plugin must not also be
         // registered: it claims the same slot in its own `setup` and whichever ran last wins,
         // silently.
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            if event.id != id {
+            if event.id != wanted.load(Ordering::SeqCst) {
                 return;
             }
             match event.state {
@@ -78,8 +84,8 @@ impl GrabbedHotkey {
             };
         }));
 
-        tracing::info!(trigger = TRIGGER, "push-to-talk key registered with the session");
-        Ok(GrabbedHotkey { manager: Manager(manager), hotkey, events })
+        tracing::info!(trigger, "push-to-talk key registered with the session");
+        Ok(GrabbedHotkey { manager: Manager(manager), held: Mutex::new((hotkey, trigger.to_string())), id, events })
     }
 }
 
@@ -87,7 +93,8 @@ impl Hotkey for GrabbedHotkey {
     fn describe(&self) -> HotkeySupport {
         // `true`: `global-hotkey` delivers `HotKeyState::Released` on both backends this file
         // is — X11 through `Event::KeyRelease`, Windows through its polling thread.
-        HotkeySupport::Working { trigger: TRIGGER.to_string(), release_confirmed: true }
+        let trigger = self.held.lock().expect("held is never poisoned").1.clone();
+        HotkeySupport::Working { trigger, release_confirmed: true }
     }
 
     fn events(&self) -> broadcast::Receiver<HotkeyEvent> {
@@ -98,8 +105,32 @@ impl Hotkey for GrabbedHotkey {
     /// grab and a Windows `RegisterHotKey` both belong to a connection and a window that die with
     /// this process, so nothing is left behind whether this runs or not. The portal's
     /// registration outlives the process, which is why [`Hotkey::close`] exists at all.
+    /// The old key is let go only once the new one is taken, so a combination another program
+    /// owns leaves the old one working rather than none. On Windows this has to run on the main
+    /// thread, for the reason the module documentation gives; `bridge.rs` sends it there.
+    fn rebind(&self, trigger: &str) -> Result<(), String> {
+        let hotkey: HotKey = trigger.parse().map_err(|error| format!("{trigger} is not a key Zyris can read: {error}"))?;
+        let mut held = self.held.lock().expect("held is never poisoned");
+        if hotkey == held.0 {
+            held.1 = trigger.to_string();
+            return Ok(());
+        }
+        self.manager
+            .0
+            .register(hotkey)
+            .map_err(|error| format!("{trigger} could not be registered — another program may hold it: {error}"))?;
+        self.id.store(hotkey.id(), Ordering::SeqCst);
+        if let Err(error) = self.manager.0.unregister(held.0) {
+            tracing::debug!(%error, "could not let go of the previous push-to-talk key");
+        }
+        *held = (hotkey, trigger.to_string());
+        tracing::info!(trigger, "push-to-talk key changed");
+        Ok(())
+    }
+
     fn close(&self) -> Closing<'_> {
-        if let Err(error) = self.manager.0.unregister(self.hotkey) {
+        let hotkey = self.held.lock().expect("held is never poisoned").0;
+        if let Err(error) = self.manager.0.unregister(hotkey) {
             tracing::debug!(%error, "could not hand the push-to-talk key back; it dies with this process anyway");
         }
         Box::pin(std::future::ready(()))
@@ -133,6 +164,7 @@ impl Hotkey for GrabbedHotkey {
 #[cfg(test)]
 mod windows_tests {
     use super::*;
+    use global_hotkey::hotkey::{Code, Modifiers};
 
     /// A hand-run test needs the message pump a Tauri app would otherwise provide: `WM_HOTKEY`
     /// reaches `global-hotkey`'s window only through `DispatchMessage`, and a `#[test]` has no

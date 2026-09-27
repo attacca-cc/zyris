@@ -30,7 +30,7 @@ use tokio::sync::{broadcast, oneshot};
 
 use super::{
     Closing, Env, Hotkey, HotkeyEvent, HotkeySupport, OnePerHold, SHORTCUT_DESCRIPTION,
-    SHORTCUT_ID, TRIGGER, compositor_line,
+    SHORTCUT_ID, compositor_line,
 };
 
 /// What this asks the portal for, in the portal's own spelling. Ignored by every implementation
@@ -41,7 +41,11 @@ pub struct PortalHotkey {
     /// Answered from what the portal said at registration, once. Nothing re-asks: the compositor
     /// never tells the portal what key it bound, so this cannot become more accurate by being
     /// looked at again.
-    support: HotkeySupport,
+    support: Mutex<HotkeySupport>,
+    /// What the desktop calls itself, for rewording the advice when the key changes.
+    desktop: String,
+    /// The key the advice names, which on Hyprland is also the one bound live.
+    trigger: Mutex<String>,
     events: Arc<OnePerHold>,
     session: Session<GlobalShortcuts>,
     /// Ends the listening task. `Option` because it is spent on the first
@@ -57,7 +61,7 @@ impl PortalHotkey {
     /// the two signal streams have to be subscribed **before** `BindShortcuts` returns. A signal
     /// that fired between the bind and a later subscribe would be lost, and the first thing a
     /// person does after adding the compositor line is press the key.
-    pub async fn open(env: &Env) -> ashpd::Result<PortalHotkey> {
+    pub async fn open(env: &Env, wanted: &str) -> ashpd::Result<PortalHotkey> {
         let portal = GlobalShortcuts::new().await?;
         let version = portal.version();
         let session = portal.create_session(Default::default()).await?;
@@ -84,24 +88,7 @@ impl PortalHotkey {
 
         let desktop = env.desktop_name();
         let support = if trigger.is_empty() {
-            let line = compositor_line(&desktop, SHORTCUT_ID);
-            HotkeySupport::NeedsAKeyBound {
-                how: match &line {
-                    Some(_) => format!(
-                        "{desktop} does not let an application choose the key, so Zyris cannot \
-                         bind {TRIGGER} for you. Add this line to your compositor configuration \
-                         if you have not already, and reload it."
-                    ),
-                    None => format!(
-                        "{desktop} does not let an application choose the key. Bind one to the \
-                         global shortcut named {SHORTCUT_ID} in your desktop's keyboard \
-                         settings; Zyris cannot tell whether you have."
-                    ),
-                },
-                shortcut_id: SHORTCUT_ID.to_string(),
-                desktop,
-                line,
-            }
+            needs_a_key_bound(&desktop, wanted)
         } else {
             // `false`: the portal's `Deactivated` has never been seen to arrive, and a trigger
             // being reported says nothing about it. See `HotkeySupport::Working`.
@@ -144,13 +131,80 @@ impl PortalHotkey {
             bound = !matches!(support, HotkeySupport::NeedsAKeyBound { .. }),
             "registered the push-to-talk shortcut with the GlobalShortcuts portal"
         );
-        Ok(PortalHotkey { support, events, session, stop: Mutex::new(Some(stop)) })
+        Ok(PortalHotkey {
+            support: Mutex::new(support),
+            desktop,
+            trigger: Mutex::new(wanted.to_string()),
+            events,
+            session,
+            stop: Mutex::new(Some(stop)),
+        })
     }
+}
+
+/// The advice for a portal that bound no key: the line to add, worded for `trigger`.
+fn needs_a_key_bound(desktop: &str, trigger: &str) -> HotkeySupport {
+    let line = compositor_line(desktop, SHORTCUT_ID, trigger);
+    HotkeySupport::NeedsAKeyBound {
+        how: match &line {
+            Some(_) => format!("To use {trigger}, add this line to your {desktop} configuration:"),
+            None => format!(
+                "Bind a key to the global shortcut {SHORTCUT_ID} in {desktop}'s keyboard settings."
+            ),
+        },
+        shortcut_id: SHORTCUT_ID.to_string(),
+        desktop: desktop.to_string(),
+        line,
+    }
+}
+
+/// Bind the shortcut to `trigger` in the running Hyprland, and let go of `old`. Lasts until
+/// Hyprland reloads its configuration, which is why the advice still carries the line.
+fn hyprland_rebind(old: &str, trigger: &str) -> Result<(), String> {
+    let keyword = |args: &[&str]| -> Result<(), String> {
+        let out = std::process::Command::new("hyprctl")
+            .arg("keyword")
+            .args(args)
+            .output()
+            .map_err(|error| format!("could not run hyprctl: {error}"))?;
+        let said = String::from_utf8_lossy(&out.stdout);
+        if out.status.success() && said.trim() == "ok" {
+            Ok(())
+        } else {
+            Err(format!("hyprctl refused it: {}", said.trim()))
+        }
+    };
+    let new = super::hyprland_keys(trigger).ok_or_else(|| format!("{trigger} has no Hyprland spelling"))?;
+    keyword(&["bind", &format!("{new}, global, :{SHORTCUT_ID}")])?;
+    if let Some(old) = super::hyprland_keys(old).filter(|old| *old != new) {
+        // Best effort: an old key that was never bound is not a failure of the new one.
+        let _ = keyword(&["unbind", &old]);
+    }
+    Ok(())
 }
 
 impl Hotkey for PortalHotkey {
     fn describe(&self) -> HotkeySupport {
-        self.support.clone()
+        self.support.lock().expect("support is never poisoned").clone()
+    }
+
+    /// The portal cannot bind a key. What changes is the line the advice gives, and on Hyprland
+    /// the running compositor's binding too, so the new key works before anyone edits a file.
+    fn rebind(&self, trigger: &str) -> Result<(), String> {
+        trigger
+            .parse::<global_hotkey::hotkey::HotKey>()
+            .map_err(|error| format!("{trigger} is not a key Zyris can read: {error}"))?;
+        let mut support = self.support.lock().expect("support is never poisoned");
+        if !matches!(*support, HotkeySupport::NeedsAKeyBound { .. }) {
+            return Err("this desktop chose the key itself; change it in its keyboard settings".into());
+        }
+        let mut held = self.trigger.lock().expect("trigger is never poisoned");
+        if self.desktop.eq_ignore_ascii_case("hyprland") {
+            hyprland_rebind(&held, trigger)?;
+        }
+        *held = trigger.to_string();
+        *support = needs_a_key_bound(&self.desktop, trigger);
+        Ok(())
     }
 
     fn events(&self) -> broadcast::Receiver<HotkeyEvent> {
@@ -211,7 +265,7 @@ mod tests {
     #[ignore = "needs a live xdg-desktop-portal on the session bus"]
     async fn the_portal_path_registers_and_says_what_is_owed() {
         let env = Env::read();
-        let hotkey = PortalHotkey::open(&env).await.expect("a GlobalShortcuts portal");
+        let hotkey = PortalHotkey::open(&env, super::super::TRIGGER).await.expect("a GlobalShortcuts portal");
         match hotkey.describe() {
             HotkeySupport::Working { trigger, release_confirmed } => {
                 assert!(!trigger.is_empty(), "a working hotkey names the key to press");

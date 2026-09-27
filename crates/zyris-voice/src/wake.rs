@@ -67,12 +67,9 @@ use crate::vad::{Ended, Endpointer, Listening};
 /// the claim that must not drift: what the phrase does, when it is listened for, when new takes
 /// count, and that it is a close match rather than a certain one.
 pub const WHAT_THE_TAKES_DO: &str =
-    "Say \"Hey Zyris\" — or the phrase set as wakePhrase in voice.json — while listening is on \
-     and nothing is being read aloud, and Zyris starts a turn as if you had pressed the key; or \
-     say your request straight after it, in one breath, and it is sent as it is. The phrase has to \
-     start what you say, and speech recognition can mishear it and miss you. These recordings \
-     turn the wake word on and check that it hears you say it, from the next time listening is \
-     turned on.";
+    "\"Hey Zyris\" starts a turn while listening is on and nothing is being read aloud; say your \
+     request after it in one breath. It can mishear and miss you. Takes count from the next time \
+     listening is turned on.";
 
 /// The phrase, as the words it is.
 ///

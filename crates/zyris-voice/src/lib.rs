@@ -284,6 +284,16 @@ pub enum Trace {
     /// A delta from the agent, as the screen would have it. Every delta, reasoning included.
     #[serde(rename_all = "camelCase")]
     Delta { kind: String, text: String },
+    /// What the agent says it is doing: a progress note (`work_summary`) or the title of a
+    /// stretch of reasoning. Shown while it works, so a long silence reads as work.
+    #[serde(rename_all = "camelCase")]
+    Working { title: String },
+    /// Listening was turned off. A turn that was being recorded ends here, unsent — without
+    /// this the window went on showing it as recording.
+    ListeningOff,
+    /// The agent called a tool. Only the name; the window counts them.
+    #[serde(rename_all = "camelCase")]
+    Tool { name: String },
     /// What the splitter cut out of the deltas to be spoken. **Not the same text as
     /// [`Trace::Delta`]**: the filter drops code fences, asides, URLs and markdown, so a
     /// fragment is what is left after all of that.
@@ -510,6 +520,15 @@ impl Voice {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
             return engine.sessions().await;
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// The messages already in the session this machine talks to. `Err` is a sentence.
+    pub async fn history(&self) -> Result<view::HistoryView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.history().await;
         }
         Err(NOT_COMPILED_IN.to_string())
     }

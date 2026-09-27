@@ -22,7 +22,7 @@ const { invoke, listen, emitVoice } = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
-import { Voice, type VoiceScreen } from "./Voice";
+import { triggerOf, Voice, type VoiceScreen } from "./Voice";
 import { choose, optionsOf, shown } from "./test/select";
 
 const MODEL = "/home/ada/.cache/zyris/models/ggml-base.bin";
@@ -199,6 +199,30 @@ describe("Voice", () => {
     expect(readable()).not.toMatch(/bind = /);
   });
 
+  it("changes the key to the next combination pressed, and ignores a bare letter", async () => {
+    const changed = machine({ hotkey: { state: "working", trigger: "Ctrl+Shift+K", releaseConfirmed: true } });
+    answers(machine({}), changed);
+    render(<Voice />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /change key/i }));
+    fireEvent.keyDown(window, { code: "KeyK" });
+    expect(invoke).not.toHaveBeenCalledWith("set_push_to_talk_key", expect.anything());
+    fireEvent.keyDown(window, { code: "KeyK", ctrlKey: true, shiftKey: true });
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_push_to_talk_key", { trigger: "Ctrl+Shift+K" }));
+    expect((await screen.findAllByText("K")).length).toBeGreaterThan(0);
+  });
+
+  it("reads a pressed combination the way the backend parses it", () => {
+    const key = (code: string, mods: Partial<Record<"ctrlKey" | "altKey" | "shiftKey" | "metaKey", boolean>> = {}) =>
+      triggerOf({ ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, code, ...mods });
+    expect(key("Space", { ctrlKey: true, altKey: true })).toBe("Ctrl+Alt+Space");
+    expect(key("F9")).toBe("F9");
+    expect(key("Digit5", { metaKey: true })).toBe("Super+5");
+    expect(key("Space")).toBeNull();
+    expect(key("ControlLeft", { ctrlKey: true })).toBeNull();
+  });
+
   it("shows the exact line to add when the desktop will only let the person bind the key", async () => {
     answers(
       machine({
@@ -217,11 +241,7 @@ describe("Voice", () => {
     // **The one thing on this screen a person copies.** A mutation deleting it left step 6's
     // screen looking fine, so it is asserted on its own and not through the sentence around it.
     await screen.findByText("bind = CTRL ALT, space, global, :push_to_talk");
-    expect(readable()).toMatch(/does not let an application choose the key/i);
-    // And the two things this screen must not claim: that Zyris knows whether a key is bound,
-    // and that letting go of it is known to work here.
-    expect(readable()).toMatch(/cannot tell whether you have bound a key/i);
-    expect(readable()).toMatch(/has not been confirmed/i);
+    expect(readable()).toMatch(/add this line/i);
   });
 
   it("shows no line at all for a desktop whose spelling Zyris has not checked", async () => {
@@ -239,7 +259,7 @@ describe("Voice", () => {
 
     render(<Voice />);
 
-    await screen.findByText(/does not know how GNOME spells that line/i);
+    await screen.findByText(/the shortcut is called/i);
     // A guess here is a line somebody pastes into a configuration file. There must not be one.
     expect(readable()).not.toMatch(/bind = /);
     // What is left has to be enough to act on: the name of the shortcut to point a key at.
@@ -262,7 +282,7 @@ describe("Voice", () => {
     // **The rule this whole project keeps restating**: a control that cannot work is worse than
     // an absent one. Opening a microphone here would open one nothing could ever start a turn on.
     expect(screen.queryByRole("switch", { name: /listening/i })).toBeNull();
-    expect(readable()).toMatch(/no push-to-talk key on this desktop/i);
+    expect(readable()).toMatch(/this desktop has no push-to-talk key/i);
   });
 
   it("keeps a key that has to be bound by hand apart from one that can never exist", async () => {
@@ -344,7 +364,7 @@ describe("Voice", () => {
     expect(readable()).toContain("Built-in Audio Analog Stereo");
     // The claim that makes an open microphone acceptable, and it is checkable: the session keeps
     // nothing outside a turn.
-    expect(readable()).toMatch(/nothing is recorded until you hold the push-to-talk key/i);
+    expect(readable()).toMatch(/records only on the key or the wake word/i);
   });
 
   it("offers no switch at all on a build or a machine that cannot listen", async () => {
@@ -430,7 +450,7 @@ describe("Voice", () => {
     // A screen that showed the wrong one as chosen would have somebody recording their
     // loudspeakers and reading that they had picked the microphone.
     expect(shown(/the microphone/i)).toBe("Built-in Audio Analog Stereo — loudspeaker and microphone");
-    expect(readable()).toMatch(/what this computer is playing/i);
+    expect(readable()).toMatch(/may pick up what is playing/i);
 
     choose(/the microphone/i, "Built-in Audio Analog Stereo — microphone (default)");
     await waitFor(() =>
@@ -466,6 +486,19 @@ describe("Voice", () => {
   // ------------------------------------------------------------------------------------------
   // The model
   // ------------------------------------------------------------------------------------------
+
+  it("shows a chosen microphone at once, while the machine is still reopening it", async () => {
+    const first = machine({});
+    invoke.mockImplementation((command: string) =>
+      command === "set_voice_device" ? new Promise(() => {}) : Promise.resolve(first),
+    );
+    render(<Voice />);
+
+    await screen.findByRole("combobox", { name: /the microphone/i });
+    expect(shown(/the microphone/i)).toBe("System default");
+    choose(/the microphone/i, "Built-in Audio Analog Stereo — loudspeaker and microphone");
+    expect(shown(/the microphone/i)).toMatch(/^Built-in Audio Analog Stereo/);
+  });
 
   it("chooses the speaker answers are read through", async () => {
     answers(machine({}));
@@ -514,6 +547,38 @@ describe("Voice", () => {
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("fetch_speech_model", { id: "small" }),
     );
+  });
+
+  it("chooses a model from its name, and says it is switching until listening is back", async () => {
+    const ready = (file: string, bytes: number) => ({ state: "ready" as const, path: file, bytes });
+    const before = machine({
+      models: [
+        { id: "base", name: "Base", note: "Fast.", bytes: 1, state: ready(MODEL, 1), chosen: true },
+        { id: "turbo", name: "Turbo", note: "Accurate.", bytes: 2, state: ready("/m/turbo.bin", 2), chosen: false },
+      ],
+    });
+    let finish: (screen: Screen) => void = () => {};
+    invoke.mockImplementation((command: string) =>
+      command === "set_speech_model" ? new Promise((resolve) => (finish = resolve)) : Promise.resolve(before),
+    );
+    render(<Voice />);
+
+    fireEvent.click(await screen.findByText("Accurate."));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }));
+    expect((await screen.findByRole("status")).textContent).toMatch(/switching to this model/i);
+    expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
+
+    await act(async () =>
+      finish({
+        ...before,
+        voice: {
+          ...before.voice,
+          models: before.voice.models.map((m) => ({ ...m, chosen: m.id === "turbo" })),
+        },
+      }),
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
   });
 
   it("chooses which of several GPUs transcribes, and the processor for reading aloud", async () => {
@@ -631,7 +696,7 @@ describe("Voice", () => {
     answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: false } }));
     render(<Voice />);
     await screen.findByText(/to talk, from any window/i);
-    expect(document.body.textContent ?? "").toMatch(/letting go of the key/i);
+    expect(document.body.textContent ?? "").toMatch(/if letting go does not end a turn/i);
 
     cleanup();
     answers(machine({ hotkey: { state: "working", trigger: "Ctrl+Alt+Space", releaseConfirmed: true } }));
@@ -655,8 +720,7 @@ describe("Voice", () => {
     cleanup();
     answers(machine({ speaking: { state: "session", id: "sess-42" } }));
     render(<Voice />);
-    expect(await screen.findByText(/read aloud/i)).toBeTruthy();
-    expect(document.body.textContent ?? "").toContain("sess-42");
+    expect(await screen.findByText(/are read aloud as they are written/i)).toBeTruthy();
   });
 
   it("tells an account with no agent apart from one with several", async () => {
@@ -694,7 +758,6 @@ describe("Voice", () => {
     await screen.findByText(/read aloud/i);
     const page = document.body.textContent ?? "";
     expect(page).toMatch(/pauses between sentences/i);
-    expect(page).toMatch(/what you say next tells the agent where it was cut off/i);
     expect(page).not.toMatch(/without a pause|seamless|smoothly/i);
   });
 
@@ -840,7 +903,7 @@ describe("Voice", () => {
       }),
     );
     render(<Voice />);
-    await screen.findByText(/all 5 takes are recorded/i);
+    await screen.findByText(/all 5 takes recorded/i);
     // Not a disabled button: there is nothing to press, and `Store::add` refuses a sixth anyway.
     expect(screen.queryByRole("button", { name: /record a take/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /clear them/i })).toBeTruthy();

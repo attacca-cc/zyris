@@ -76,6 +76,63 @@ afterEach(() => {
 });
 
 describe("the Conversation screen", () => {
+  it("opens on the messages the session already holds, before anything said now", async () => {
+    invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "conversation_history"
+        ? Promise.resolve({
+            session: "s1",
+            lines: [
+              { who: "you", text: "들리니?" },
+              { who: "agent", text: "네, 잘 들려요." },
+            ],
+          })
+        : answering(command, args),
+    );
+    await open();
+    await screen.findByText("들리니?");
+    await steps({ step: "sent", text: "지금 말한 것" });
+
+    const said = Array.from(document.querySelectorAll("[data-turn]")).map((turn) => turn.textContent ?? "");
+    expect(said[0]).toMatch(/들리니\?/);
+    expect(said[1]).toMatch(/네, 잘 들려요\./);
+    expect(said[said.length - 1]).toMatch(/지금 말한 것/);
+  });
+
+  it("says the agent is thinking at once, then what it is doing, with the tools of that step", async () => {
+    await open();
+    await steps({ step: "sent", text: "찾아줘" }, { step: "answering", aloud: false });
+    expect(screen.getByText("Thinking")).toBeTruthy();
+    await steps({ step: "working", title: "코드를 찾는 중" }, { step: "tool", name: "shell" }, { step: "tool", name: "shell" });
+    expect(screen.getByText("코드를 찾는 중 · 2 tools")).toBeTruthy();
+    // A new step counts afresh, as the web app does.
+    await steps({ step: "working", title: "보고서를 쓰는 중" }, { step: "tool", name: "docs" });
+    expect(screen.getByText("보고서를 쓰는 중 · 1 tool")).toBeTruthy();
+    await steps({ step: "delta", kind: "Assistant", text: "찾았어요." }, { step: "answered" });
+    expect(screen.queryByText(/보고서를 쓰는 중/)).toBeNull();
+  });
+
+  it("draws an answer's markdown, keeping each sentence's colour", async () => {
+    await open();
+    await steps(
+      { step: "answering", aloud: true },
+      { step: "delta", kind: "Assistant", text: "**Two** things:\n\n- first `one`\n- second" },
+      { step: "fragment", text: "Two things:" },
+      { step: "synthesised", text: "Two things:", seconds: 1, tookMs: 1 },
+    );
+    const answer = document.querySelector('[data-turn="agent"]')!;
+    expect(answer.textContent).not.toContain("**");
+    expect(answer.textContent).not.toContain("`");
+    expect(answer.querySelectorAll("li")).toHaveLength(2);
+    expect(Array.from(answer.querySelectorAll(".font-semibold")).map((b) => b.textContent)).toEqual(["Two"]);
+    expect((Array.from(answer.querySelectorAll("[data-tone]")) as HTMLElement[]).find((e) => e.textContent === "Two")?.dataset.tone).toBe("voiced");
+  });
+
+  it("ends a turn that was being recorded when listening is turned off", async () => {
+    await open();
+    await steps({ step: "recording", started: true }, { step: "listeningOff" });
+    expect(document.querySelector('[data-turn="you"]')?.getAttribute("data-state")).toBe("lost");
+  });
+
   it("invites a first message and names the key", async () => {
     await open();
     expect(screen.getByText("Start a conversation")).toBeTruthy();

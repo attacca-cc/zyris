@@ -78,11 +78,9 @@ pub fn build(app: &AppHandle, runtime: &tokio::runtime::Handle) -> tauri::Result
     });
 
     TrayIconBuilder::with_id("main")
-        .icon(
-            app.default_window_icon()
-                .expect("tauri.conf.json declares a bundle icon")
-                .clone(),
-        )
+        // The mark alone on a clear background, drawn heavier than the app icon's so it holds at
+        // tray size; `icons/tray.svg` is the source.
+        .icon(tauri::include_image!("icons/tray.png"))
         .tooltip("Zyris")
         .menu(&menu)
         // On Windows and macOS this keeps the menu off the left click, so left click can open

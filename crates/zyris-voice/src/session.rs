@@ -1602,9 +1602,9 @@ impl Speaking {
 
     /// Publish where the speaker has actually got to, until it has nothing left.
     ///
-    /// **Only while something is queued**, and started by the first fragment of an answer
-    /// rather than run for the life of the session: a machine that is not speaking would
-    /// otherwise put ten messages a second onto the stream saying the same number.
+    /// **Only while an answer is being read**, and started by the first fragment of it rather
+    /// than run for the life of the session: a machine that is not speaking would otherwise put
+    /// ten messages a second onto the stream saying the same number.
     ///
     /// It reads [`Play::played`] — samples written to the device — and not a clock. A position
     /// counted from a timer would drift against whatever the device buffers and, worse, would
@@ -1617,7 +1617,11 @@ impl Speaking {
                     return;
                 }
                 self.trace(crate::Trace::Playing { at_sample: self.out.played() });
-                if self.out.pending() == 0 {
+                // **Until the answer's ledger is cleared, not until the queue is empty.** Synthesis
+                // runs slower than speech, so the queue runs dry between sentences; stopping
+                // there left every later sentence with no position at all, and the window showed
+                // them as never played. `drained` clears the ledger once the last one is out.
+                if self.state.lock().expect("the speaking state is not poisoned").ledger.is_empty() {
                     return;
                 }
                 tokio::time::sleep(PLAYBACK_POLL).await;
@@ -3621,8 +3625,8 @@ mod barge_in {
     async fn a_key_pressed_part_way_through_an_answer_stops_it_and_says_where() {
         let mut rig = rig(Voicebox::plain());
         rig.say("Yes.").await; // 4 characters, 4000 samples
-        rig.say("Here it is.").await; // 11 characters, 11000 samples
-        rig.play(6000);
+        rig.say("Here it is.").await; // 11 characters, 11000 samples, after the pause
+        rig.play(6000 + gap_samples());
 
         let interruption = rig.speaking.stop().expect("the speaker had not finished");
 
@@ -3636,7 +3640,7 @@ mod barge_in {
 
         // And the speaker really is stopped: the discard happens in the callback.
         rig.play(6000);
-        assert_eq!(rig.speaker.played(), 6000, "nothing more reached the device");
+        assert_eq!(rig.speaker.played(), (6000 + gap_samples()) as u64, "nothing more reached the device");
         assert_eq!(rig.speaker.pending(), 0, "and nothing is still waiting");
 
         assert_eq!(
@@ -3645,6 +3649,32 @@ mod barge_in {
             "and the ledger went with it: a second press must not report the same sentence cut \
              off twice, into a turn that has already been cancelled once"
         );
+    }
+
+    /// A sentence queued after the speaker ran dry still gets its position traced. Synthesis
+    /// is slower than speech, so the queue empties between sentences; the watcher used to stop
+    /// there, and the window left every later sentence grey as if it had never been played.
+    #[tokio::test]
+    async fn a_sentence_queued_after_the_queue_ran_dry_is_still_followed() {
+        let mut rig = rig(Voicebox::plain());
+        let (traces, mut seen) = broadcast::channel(512);
+        let speaking = rig.speaking.clone().tracing(traces);
+        rig.speaking = speaking;
+        rig.say("Yes.").await; // 4000 samples
+        rig.play(4000);
+        tokio::time::sleep(PLAYBACK_POLL * 3).await; // the queue is empty; the answer is not over
+        rig.say("Here it is.").await; // starts at 4000 plus the pause between sentences
+        rig.play(20_000);
+
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let step = tokio::time::timeout_at(deadline, seen.recv()).await.expect("a position past the second sentence");
+            if let Ok(crate::Trace::Playing { at_sample }) = step {
+                if at_sample > 4000 + gap_samples() as u64 {
+                    break;
+                }
+            }
+        }
     }
 
     /// A key pressed between answers interrupts nothing, and **must not post a message**.

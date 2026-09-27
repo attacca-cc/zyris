@@ -57,9 +57,36 @@ export type AgentTurn = {
   interrupted: boolean;
   // Samples of this answer's stream written to the device, or -1 before any.
   played: number;
+  // What the agent last said it was doing, and how many tools it has called since, for the line
+  // that shows it is working rather than stuck. The count is per step, as the web app shows it.
+  activity: string | null;
+  tools: number;
+  // The agent stopped writing to work (a tool, reasoning): its next words start a paragraph.
+  breakNext: boolean;
 };
 
 export type Turn = YouTurn | AgentTurn | { who: "problem"; reason: string };
+
+// A session's earlier messages, as turns that are over: sent, and answered in plain white.
+export type HistoryLine = { who: "you" | "agent"; text: string };
+export function fromHistory(lines: HistoryLine[]): Turn[] {
+  // An agent that wrote, worked and wrote again left several messages for one answer; they are
+  // one answer here, in paragraphs, as the live thread shows them.
+  const turns: Turn[] = [];
+  for (const line of lines) {
+    const previous = turns[turns.length - 1];
+    if (line.who === "agent" && previous?.who === "agent") {
+      turns[turns.length - 1] = { ...previous, text: `${previous.text}\n\n${line.text}` };
+    } else {
+      turns.push(
+        line.who === "you"
+          ? newYou("sent", line.text)
+          : { ...newAgent(false), text: line.text, writing: false, settled: true },
+      );
+    }
+  }
+  return turns;
+}
 
 // A trace step, or something this window did itself: a typed message goes on screen before the
 // bridge says it was sent, so the person sees it at once.
@@ -78,6 +105,9 @@ function newAgent(aloud: boolean): AgentTurn {
     settled: false,
     interrupted: false,
     played: -1,
+    activity: null,
+    tools: 0,
+    breakNext: false,
   };
 }
 
@@ -120,6 +150,10 @@ export function fold(turns: Turn[], action: Action): Turn[] {
     if (index < 0) return turns;
     return updateAgent((a) => ({ ...a, sentences: a.sentences.map((s, i) => (i === index ? change(s) : s)) }));
   };
+  // Progress belongs to the answer being written. Anything that is not its words means the next
+  // words it writes start a new paragraph.
+  const working = (change: (turn: AgentTurn) => AgentTurn): Turn[] =>
+    agent && agent.writing ? updateAgent((a) => ({ ...change(a), breakNext: a.text.trim() !== "" })) : turns;
   const lose = (index: number, reason: string): Turn[] =>
     index < 0
       ? [...turns, { who: "problem", reason }]
@@ -156,6 +190,9 @@ export function fold(turns: Turn[], action: Action): Turn[] {
         lastIndex(turns, (t) => t.who === "you" && t.state === "said" && t.text === action.text),
         action.reason,
       );
+    case "listeningOff":
+      // A turn being recorded when listening went off was never sent.
+      return open ? replaceLast({ ...open, state: "lost", detail: "Listening was turned off." }) : turns;
     case "failed":
       // A turn of yours that never got as far as its text is what failed; anything else is said
       // as a line of its own, rather than left for the screen to go on claiming it is working.
@@ -170,11 +207,19 @@ export function fold(turns: Turn[], action: Action): Turn[] {
       }
       return [...settleAll(turns), newAgent(action.aloud)];
     case "delta":
-      // Reasoning is the agent working, not its answer.
-      if (action.kind !== "Assistant") return turns;
+      // Reasoning is the agent working, not its answer — but words after it start afresh.
+      if (action.kind !== "Assistant") return working((a) => a);
       return agent && !agent.settled
-        ? updateAgent((a) => ({ ...a, text: a.text + action.text }))
+        ? updateAgent((a) => ({
+            ...a,
+            text: a.breakNext && a.text.trim() !== "" ? `${a.text.trimEnd()}\n\n${action.text.trimStart()}` : a.text + action.text,
+            breakNext: false,
+          }))
         : [...settleAll(turns), { ...newAgent(false), text: action.text }];
+    case "working":
+      return working((a) => ({ ...a, activity: action.title, tools: 0 }));
+    case "tool":
+      return working((a) => ({ ...a, tools: a.tools + 1 }));
     case "answered":
       return updateAgent((a) => ({ ...a, writing: false }));
     case "fragment": {
@@ -198,12 +243,30 @@ export function fold(turns: Turn[], action: Action): Turn[] {
         }
         return a;
       });
+    // **Every answer still being read, not only the newest.** A question asked while the last
+    // answer is still playing opens a new answer, and the rest of the old one goes on sounding;
+    // moving only the newest left the old one's last sentences grey for good. The position is the
+    // speaker's own count of samples, so a sentence queued later is never reached early.
     case "playing":
-      return updateAgent((a) => ({ ...a, played: Math.max(a.played, action.atSample) }));
+      return turns.map((t) =>
+        t.who === "agent" && t.aloud && !t.interrupted ? { ...t, played: Math.max(t.played, action.atSample) } : t,
+      );
     case "spoke":
-      return updateAgent((a) => ({ ...a, settled: true }));
+      // The speaker ran dry. An answer still being written with nothing of its own queued yet is
+      // not what went quiet: settling it would file its next sentence as a new answer.
+      return turns.map((t) =>
+        t.who === "agent" && (!t.writing || t.sentences.some((s) => s.at !== null)) ? { ...t, settled: true } : t,
+      );
     case "interrupted":
-      return updateAgent((a) => ({ ...a, interrupted: true, settled: true }));
+      // Whichever answers still had audio waiting, and the newest if it was still going: that is
+      // what the key cut off.
+      return turns.map((t, i) =>
+        t.who === "agent" &&
+        ((i === agentAt && !t.settled) ||
+          t.sentences.some((s) => !s.dropped && (s.at === null || s.at + (s.samples ?? 0) > t.played)))
+          ? { ...t, interrupted: true, settled: true }
+          : t,
+      );
     default:
       return turns;
   }

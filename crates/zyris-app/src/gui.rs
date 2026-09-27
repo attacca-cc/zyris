@@ -34,6 +34,28 @@ use zyris_tools::{Servers, Tools, Transfers};
 /// the one somebody forgot. Blocking, because both callers are on the main thread with the event
 /// loop already finished or never started — there is nothing left to keep responsive, and the wait
 /// is what makes the stop mean anything.
+/// GTK draws the title bar on Linux, in the desktop theme's colours and a bold title that sit
+/// badly over the window's near-black. This makes it thin and dark to match; the buttons and
+/// dragging stay GTK's, so tiling and window rules keep working.
+#[cfg(target_os = "linux")]
+fn quiet_title_bar() {
+    use gtk::prelude::CssProviderExt;
+    let css = gtk::CssProvider::new();
+    let style = b"headerbar { min-height: 28px; padding: 0 6px; background: #0f0c0a; \
+                  border: none; border-bottom: 1px solid #1d1814; box-shadow: none; } \
+                  headerbar .title { font-weight: normal; font-size: 12px; color: #7d756e; } \
+                  headerbar button { min-height: 20px; min-width: 20px; padding: 2px; \
+                  color: #7d756e; background: none; border: none; box-shadow: none; } \
+                  headerbar button:hover { color: #e8e2dc; background: #1d1814; }";
+    if let Err(error) = css.load_from_data(style) {
+        tracing::warn!(%error, "could not style the title bar");
+        return;
+    }
+    if let Some(screen) = gtk::gdk::Screen::default() {
+        gtk::StyleContext::add_provider_for_screen(&screen, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    }
+}
+
 fn stop_mcp_servers(servers: &Servers, runtime: &tokio::runtime::Handle) {
     runtime.block_on(servers.stop_all());
 }
@@ -107,7 +129,8 @@ pub fn run(
     // Never fails. A desktop with no way to register a global key gets a `Hotkey` that says so,
     // for the reason `zyris-tools`'s `announce.rs` gives about a machine with no display server:
     // a control that cannot work is worse than an absent one.
-    let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read()));
+    let trigger_file = bridge::TriggerFile(crate::data_dir(&instance).join(hotkey::TRIGGER_FILE));
+    let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read(), &hotkey::saved_trigger(&trigger_file.0)));
     tracing::info!(support = ?hotkey.describe(), "push-to-talk");
 
     let setup_bus = bus.clone();
@@ -219,6 +242,8 @@ pub fn run(
         // Wayland, where no application is allowed to choose the key — the exact line the person
         // has to add to their compositor configuration. The Voice screen reads it.
         .manage(hotkey)
+        // Where a key chosen on the Voice screen is kept for the next launch.
+        .manage(trigger_file)
         // Speech, as a handle on the one this process built. The Voice screen reads everything
         // through it — the device list, the model on disk, whether a microphone is open — and
         // moves the one switch that opens one.
@@ -240,6 +265,7 @@ pub fn run(
             bridge::set_mcp_server_enabled,
             bridge::voice_state,
             bridge::set_voice_listening,
+            bridge::set_push_to_talk_key,
             bridge::set_voice_device,
             bridge::set_voice_speaker,
             bridge::set_speaking_rate,
@@ -255,10 +281,14 @@ pub fn run(
             bridge::record_wake_take,
             bridge::clear_wake_word,
             bridge::conversation_sessions,
+            bridge::conversation_history,
             bridge::choose_conversation_session,
             bridge::new_conversation_session,
         ])
         .setup(move |app| {
+            #[cfg(target_os = "linux")]
+            quiet_title_bar();
+
             // Taken here, after the single-instance plugin above has already had first refusal:
             // a second GUI launch has to reach that plugin — which focuses the running window
             // and lets this process exit — rather than being turned away before Tauri even

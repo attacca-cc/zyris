@@ -32,7 +32,7 @@ export function Page({ children, wide = false }: { children: React.ReactNode; wi
     <main className="min-w-0 flex-1 overflow-y-auto">
       <div
         className={cn(
-          "mx-auto flex flex-col gap-4 px-8 py-10 max-[820px]:px-5",
+          "mx-auto flex flex-col gap-4 px-8 py-10 max-[820px]:px-5 max-sm:px-4 max-sm:py-6",
           wide ? "max-w-[54rem]" : "max-w-[47.5rem]",
         )}
       >

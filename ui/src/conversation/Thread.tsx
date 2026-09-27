@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { spans, type Tone } from "./colors";
+import { Markdown } from "./Markdown";
 import type { AgentTurn, Turn, YouTurn } from "./fold";
 
 const TONE: Record<Tone, string> = {
@@ -31,7 +32,7 @@ function Yours({ turn }: { turn: YouTurn }) {
       {(words !== "" || turn.state !== "lost") && (
         <div
           className={cn(
-            "max-w-[72%] rounded-[1rem] rounded-br-[0.375rem] border bg-[#1d1814]/85 px-3.5 py-2 text-[0.9375rem] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]",
+            "max-w-[72%] max-sm:max-w-[85%] rounded-[1rem] rounded-br-[0.375rem] border bg-[#1d1814]/85 px-3.5 py-2 text-[0.9375rem] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]",
             turn.state === "sent" ? "text-heading" : "text-muted-foreground",
             transcribing && "italic",
             turn.state === "lost" && "line-through decoration-subtle/60",
@@ -48,12 +49,31 @@ function Yours({ turn }: { turn: YouTurn }) {
   );
 }
 
+// One line on what the agent is doing while it works — its last note or reasoning title, and how
+// many tools it has called — so a long quiet stretch reads as work and not as a hang. Once the
+// answer is written only the count stays.
+function Activity({ turn }: { turn: AgentTurn }) {
+  if (!turn.writing) return null;
+  const tools = turn.tools > 0 ? `${turn.tools} ${turn.tools === 1 ? "tool" : "tools"}` : null;
+  // Before the agent has said what it is doing, it is thinking: said at once, so the time
+  // between sending and the first progress note does not look like nothing happening.
+  const doing = turn.activity ?? (turn.text.trim() === "" ? "Thinking" : null);
+  if (!doing && !tools) return null;
+  return (
+    <span role="status" className="flex min-w-0 items-center gap-1.5 text-[0.78125rem] text-subtle">
+      <span aria-hidden="true" className="size-1.5 shrink-0 animate-soft-pulse rounded-full bg-primary" />
+      <span className="truncate">{[doing, tools].filter(Boolean).join(" · ")}</span>
+    </span>
+  );
+}
+
 function Theirs({ turn, agentName }: { turn: AgentTurn; agentName: string }) {
   const parts = spans(turn);
   const empty = parts.length === 0;
   return (
     <li className="flex max-w-[88%] flex-col gap-1" data-turn="agent">
       <span className="text-[0.78125rem] font-medium text-muted-foreground">{agentName}</span>
+      <Activity turn={turn} />
       {empty && turn.writing ? (
         <span className="flex gap-1.5 pt-2 pb-1" aria-label="Writing">
           {[0, 0.15, 0.3].map((delay) => (
@@ -65,19 +85,19 @@ function Theirs({ turn, agentName }: { turn: AgentTurn; agentName: string }) {
           ))}
         </span>
       ) : (
-        <p className="m-0 text-[0.9375rem] leading-[1.65] whitespace-pre-wrap [overflow-wrap:anywhere]">
-          {parts.map((part, i) => (
-            <span key={i} className={TONE[part.tone]} data-tone={part.tone}>
-              {part.text}
-            </span>
-          ))}
-          {turn.writing && (
-            <span
-              aria-hidden="true"
-              className="ml-0.5 inline-block h-[1.05em] w-0.5 animate-caret bg-foreground align-[-0.2em]"
-            />
-          )}
-        </p>
+        <Markdown
+          text={parts.map((part) => part.text).join("")}
+          spans={parts}
+          toneClass={TONE}
+          trailing={
+            turn.writing && (
+              <span
+                aria-hidden="true"
+                className="ml-0.5 inline-block h-[1.05em] w-0.5 animate-caret bg-foreground align-[-0.2em]"
+              />
+            )
+          }
+        />
       )}
       {turn.interrupted && (
         <span className="text-[0.75rem] text-subtle">
@@ -110,7 +130,7 @@ export function Thread({ turns, agentName }: { turns: Turn[]; agentName: string 
 
   return (
     <div ref={scroller} className="relative min-h-0 flex-1 overflow-y-auto">
-      <ol className="mx-auto m-0 flex max-w-[45rem] list-none flex-col gap-5 px-6 pt-6 pb-4">
+      <ol className="mx-auto m-0 flex max-w-[45rem] list-none flex-col gap-5 px-6 pt-6 pb-4 max-sm:px-4">
         {turns.map((turn, at) =>
           turn.who === "you" ? (
             <Yours key={at} turn={turn} />

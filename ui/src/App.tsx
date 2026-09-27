@@ -98,7 +98,7 @@ export function App() {
   // anywhere. `pastEnrolment` in state.ts names the two it claims for the same reason.
   if (state.screen !== "starting") {
     return (
-      <div className="flex h-full overflow-hidden">
+      <div className="flex h-full overflow-hidden max-sm:flex-col-reverse">
         <Sidebar
           screen={state.screen}
           state={state}

@@ -8,6 +8,7 @@ import {
   DownloadIcon,
   InfoIcon,
   KeyboardIcon,
+  LoaderCircleIcon,
   MicIcon,
   SpeakerIcon,
   Trash2Icon,
@@ -207,9 +208,9 @@ function whatItIs(device: InputDevice): string {
     case "input":
       return "a microphone";
     case "output":
-      return "a loudspeaker — recording it captures what this computer is playing, not what you say";
+      return "a loudspeaker: it records what is playing, not your voice";
     case "duplex":
-      return "a loudspeaker and a microphone in one — recording it may capture what this computer is playing";
+      return "a speaker with a microphone: it may pick up what is playing";
     case "unknown":
       return "the sound system will not say which it is without opening it";
   }
@@ -386,6 +387,62 @@ function Keys({ trigger }: { trigger: string }) {
   );
 }
 
+// A pressed combination as the backend reads it ("Ctrl+Shift+K"), or null while only modifiers
+// are down or the key is one a global shortcut should not take on its own.
+export function triggerOf(event: Pick<KeyboardEvent, "ctrlKey" | "altKey" | "shiftKey" | "metaKey" | "code">): string | null {
+  const code = event.code;
+  let key: string | null = null;
+  if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
+  else if (/^Digit[0-9]$/.test(code)) key = code.slice(5);
+  else if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
+  else if (["Space", "Enter", "Tab", "Backquote", "Minus", "Equal", "Comma", "Period", "Slash", "Semicolon", "Quote",
+    "BracketLeft", "BracketRight", "Backslash", "Insert", "Delete", "Home", "End", "PageUp", "PageDown",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Pause", "ScrollLock"].includes(code)) key = code;
+  if (key === null) return null;
+  const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift", event.metaKey && "Super"].filter(
+    (m): m is string => Boolean(m),
+  );
+  // A bare letter or space as a global key would swallow it in every other program.
+  if (modifiers.length === 0 && !/^F\d+$/.test(key)) return null;
+  return [...modifiers, key].join("+");
+}
+
+// "Change" on the push-to-talk key: the next combination pressed becomes the key. Escape cancels.
+function KeyChanger({ busy, onChoose }: { busy: boolean; onChoose: (trigger: string) => void }) {
+  const [recording, setRecording] = useState(false);
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "Escape") {
+        setRecording(false);
+        return;
+      }
+      const trigger = triggerOf(event);
+      if (trigger === null) return;
+      setRecording(false);
+      onChoose(trigger);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording, onChoose]);
+  return recording ? (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-[0.8125rem] text-heading animate-soft-pulse">Press the new keys…</span>
+      <Button size="sm" variant="ghost" onClick={() => setRecording(false)}>
+        Cancel
+      </Button>
+    </div>
+  ) : (
+    <div>
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => setRecording(true)}>
+        Change key
+      </Button>
+    </div>
+  );
+}
+
 function DevicePicker({
   list,
   chosen,
@@ -451,6 +508,9 @@ export function Voice() {
   const [problem, setProblem] = useState<string | null>(null);
   // Which control is waiting on the Rust side, so it cannot be pressed twice.
   const [busy, setBusy] = useState<string | null>(null);
+  // The model asked for, while listening restarts on it. Loading a large model onto a graphics
+  // card takes seconds, and the list should say which one is on its way rather than look stuck.
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
   // What each control was refused, beside that control.
   const [refused, setRefused] = useState<Record<string, string>>({});
   const [last, setLast] = useState<VoiceEvent | null>(null);
@@ -536,7 +596,7 @@ export function Voice() {
     <Page>
       <PageHeader
         title="Voice"
-        description="Talk to your agent and hear it answer. What you say is turned into text on this computer — the audio is not sent anywhere."
+        description="Talk to your agent and hear it answer."
       />
 
       {problem && <Problem>{problem}</Problem>}
@@ -550,14 +610,14 @@ export function Voice() {
             : voice.listening.state === "on"
               ? (
                   <>
-                    The microphone <Mono>{voice.listening.device}</Mono> is open. Nothing is recorded
-                    until you hold the push-to-talk key or say the wake word.
+                    <Mono>{voice.listening.device}</Mono> is open. It records only on the key or the
+                    wake word.
                   </>
                 )
               : voice.listening.state === "starting"
                 ? voice.listening.detail
                 : voice.listening.state === "off"
-                  ? "Nothing is listening. Zyris opens no microphone until you turn this on."
+                  ? "Off. No microphone is open."
                   : undefined
         }
         action={
@@ -580,18 +640,19 @@ export function Voice() {
         {canHear && voice.listening.state === "failed" && <Problem>{voice.listening.reason}</Problem>}
         {canHear && !aKeyCouldWork && (
           <Problem>
-            There is no push-to-talk key on this desktop, so a microphone opened here could never be
-            asked to record anything. See below.
+            This desktop has no push-to-talk key, so nothing could start a recording. See below.
           </Problem>
         )}
         {refused.listening && <Problem>{refused.listening}</Problem>}
-        {last && <Note>{heardLine(last)}</Note>}
+        {/* What the session last said is only news while it is listening: with listening off, a
+            "Recording" from before would read as still recording. */}
+        {last && listeningOn && <Note>{heardLine(last)}</Note>}
       </Section>
 
       <Section
         icon={<KeyboardIcon />}
         title="How to start talking"
-        description="Either one starts a turn. Pressing the key while the agent speaks interrupts it."
+        description="Either starts a turn. The key also interrupts an answer."
       >
         <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
           <Panel>
@@ -603,11 +664,7 @@ export function Voice() {
                 </p>
                 {/* The caveat belongs to the backend, not to whether a key is bound. */}
                 {!hotkey.releaseConfirmed && (
-                  <Note>
-                    It has not been confirmed that letting go of the key reaches Zyris on this kind of
-                    desktop. If a turn does not end when you let go, Zyris ends it and throws the
-                    recording away.
-                  </Note>
+                  <Note>If letting go does not end a turn, Zyris ends it and drops the recording.</Note>
                 )}
               </>
             )}
@@ -619,28 +676,24 @@ export function Voice() {
                     <pre className="m-0 overflow-x-auto rounded-md border bg-background px-3 py-2 font-mono text-xs text-heading">
                       {hotkey.line}
                     </pre>
-                    <Note>
-                      That is the line for {hotkey.desktop}. The shortcut it points at is called{" "}
-                      <Mono>{hotkey.shortcutId}</Mono>.
-                    </Note>
                   </>
                 ) : (
                   <Note>
-                    Zyris does not know how {hotkey.desktop} spells that line, so it shows none. Bind a
-                    key to the global shortcut named <Mono>{hotkey.shortcutId}</Mono> in your desktop's
-                    keyboard settings.
+                    The shortcut is called <Mono>{hotkey.shortcutId}</Mono>.
                   </Note>
                 )}
-                <Note>
-                  Zyris cannot tell whether you have bound a key — your desktop does not say. It also
-                  has not been confirmed that letting go of the key reaches Zyris here; if a turn does
-                  not end when you let go, Zyris ends it and throws the recording away.
-                </Note>
               </>
             )}
             {hotkey.state === "unavailable" && (
               <Problem>{hotkey.reason} Nothing on this screen can start a turn until that changes.</Problem>
             )}
+            {(hotkey.state === "working" || (hotkey.state === "needsAKeyBound" && hotkey.line !== null)) && (
+              <KeyChanger
+                busy={busy !== null}
+                onChoose={(trigger) => act("hotkey", "set_push_to_talk_key", { trigger })}
+              />
+            )}
+            {refused.hotkey && <Problem>{refused.hotkey}</Problem>}
           </Panel>
 
           <Panel>
@@ -652,13 +705,10 @@ export function Voice() {
                 {/* The sentence that must not drift, carried from the Rust side. */}
                 <Note className="text-foreground">{voice.wake.note}</Note>
                 {voice.wake.state.state === "unreadable" && (
-                  <Problem>
-                    Zyris could not read what has been recorded, so it cannot say how much of the wake
-                    word is there. {voice.wake.state.reason}
-                  </Problem>
+                  <Problem>The recordings could not be read. {voice.wake.state.reason}</Problem>
                 )}
                 {voice.wake.state.state === "nothing" && (
-                  <Note>Nothing has been recorded. {voice.wake.wanted} takes are wanted.</Note>
+                  <Note>No recordings yet; {voice.wake.wanted} are needed.</Note>
                 )}
                 {voice.wake.state.state === "partial" && (
                   <Takes recorded={voice.wake.state.recorded} wanted={voice.wake.wanted}>
@@ -667,8 +717,7 @@ export function Voice() {
                 )}
                 {voice.wake.state.state === "complete" && (
                   <Takes recorded={voice.wake.state.recorded} wanted={voice.wake.wanted}>
-                    All {voice.wake.state.recorded} takes are recorded. To record again, clear these
-                    first.
+                    All {voice.wake.state.recorded} takes recorded.
                   </Takes>
                 )}
                 <div className="flex flex-wrap gap-2">
@@ -687,10 +736,7 @@ export function Voice() {
                 {refused.wake && <Problem>{refused.wake}</Problem>}
                 {refused.wakeClear && <Problem>{refused.wakeClear}</Problem>}
                 {canHear && (
-                  <Note>
-                    Recording starts when you press the button and stops when you stop speaking, or
-                    after {voice.wake.seconds} seconds.
-                  </Note>
+                  <Note>Each take stops when you stop speaking, or after {voice.wake.seconds} seconds.</Note>
                 )}
               </>
             )}
@@ -701,7 +747,7 @@ export function Voice() {
       <Section
         icon={<SpeakerIcon />}
         title="Microphone and speaker"
-        description="Changing either reopens the microphone and the speaker together."
+        description="Changing either reopens both."
       >
         <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
           <Field label="Microphone">
@@ -800,10 +846,7 @@ export function Voice() {
                 anything is read aloud. */}
             {voice.voiceModel.state === "ready" ? (
               <Note>
-                While listening is on, answers from session <Mono>{voice.speaking.id}</Mono> are read
-                aloud as they are written — with pauses between sentences, since speaking runs behind
-                writing. Pressing the key stops it, and what you say next tells the agent where it was
-                cut off.
+                While listening is on, answers are read aloud as they are written, with pauses between sentences.
               </Note>
             ) : (
               <Note>
@@ -851,7 +894,7 @@ export function Voice() {
       <Section
         icon={<AudioLinesIcon />}
         title="Speech recognition"
-        description="A larger model understands you better and is slower. Each is downloaded once."
+        description="Larger is more accurate and slower."
       >
         {voice.model.state === "notHere" && <Problem>{voice.model.reason}</Problem>}
         {voice.model.state === "nowhere" && (
@@ -876,9 +919,12 @@ export function Voice() {
           <>
             <RadioGroup
               aria-label="Speech model"
-              value={voice.models.find((m) => m.chosen)?.id ?? ""}
+              value={(busy === "model" && switchingTo) || (voice.models.find((m) => m.chosen)?.id ?? "")}
               disabled={idle}
-              onValueChange={(id) => act("model", "set_speech_model", { id })}
+              onValueChange={(id) => {
+                setSwitchingTo(id);
+                act("model", "set_speech_model", { id });
+              }}
               className="gap-2"
             >
               {voice.models.map((model) => (
@@ -886,6 +932,7 @@ export function Voice() {
                   key={model.id}
                   model={model}
                   busy={busy}
+                  switching={busy === "model" && switchingTo === model.id}
                   refused={refused[`model:${model.id}`]}
                   onFetch={() => act(`model:${model.id}`, "fetch_speech_model", { id: model.id })}
                   onForget={() => act(`model:${model.id}`, "forget_speech_model", { id: model.id })}
@@ -901,14 +948,14 @@ export function Voice() {
           <Note>This takes a few minutes on a slow connection. Nothing is kept until the whole file has arrived and been checked.</Note>
         )}
         {refused.model && <Problem>{refused.model}</Problem>}
-        <Note>Choosing one takes effect at once if listening is on, and deleting the one in use turns listening off.</Note>
+        <Note>Deleting the one in use turns listening off.</Note>
       </Section>
 
       {canHear && (
         <Section
           icon={<CpuIcon />}
           title="Performance"
-          description="A graphics card is several times faster than the processor. Changing this reloads the model."
+          description="A graphics card is several times faster."
         >
           <div className="grid grid-cols-2 gap-3 max-[900px]:grid-cols-1">
             <Field label="Transcribing what you say">
@@ -960,8 +1007,7 @@ export function Voice() {
 
       <p className="m-0 flex items-start gap-2 rounded-lg border border-sidebar-border px-3.5 py-3 text-[0.8125rem] text-muted-foreground">
         <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        What you say is sent to the agent in this computer's Attacca session as text. No recording is
-        kept once it has been turned into text.
+        Speech is turned into text on this computer; only the text is sent, and no audio is kept.
       </p>
     </Page>
   );
@@ -985,12 +1031,14 @@ function Takes({ recorded, wanted, children }: { recorded: number; wanted: numbe
 function ModelRow({
   model,
   busy,
+  switching,
   refused,
   onFetch,
   onForget,
 }: {
   model: SpeechModel;
   busy: string | null;
+  switching: boolean;
   refused: string | undefined;
   onFetch: () => void;
   onForget: () => void;
@@ -1001,19 +1049,35 @@ function ModelRow({
     <div
       className={cn(
         "flex flex-col gap-2 rounded-lg border px-3.5 py-3",
-        model.chosen ? "border-primary/70 bg-primary/5" : "border-sidebar-border bg-inset",
+        model.chosen || switching ? "border-primary/70 bg-primary/5" : "border-sidebar-border bg-inset",
       )}
     >
-      <div className="flex items-center gap-3">
+      <div className="action-row items-center gap-3">
         {/* Only a model on disk can be chosen; the chosen one stays marked even when it is not. */}
-        <RadioGroupItem value={model.id} aria-label={model.name} disabled={!ready && !model.chosen} />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <RadioGroupItem
+          id={`model-${model.id}`}
+          value={model.id}
+          aria-label={model.name}
+          disabled={!ready && !model.chosen}
+        />
+        {/* A label for the radio, so the name and the note choose the model too, not only the
+            small circle beside them. */}
+        <label
+          htmlFor={`model-${model.id}`}
+          className={cn("flex min-w-0 flex-1 flex-col gap-0.5", ready && !model.chosen && "cursor-pointer")}
+        >
           <span className="text-sm font-medium text-heading">
             {model.name} <span className="font-normal text-muted-foreground">· {megabytes(model.bytes)}</span>
           </span>
           <span className="text-[0.78125rem] text-muted-foreground">{model.note}</span>
-        </div>
-        {ready && model.chosen && (
+        </label>
+        {switching && (
+          <span role="status" className="inline-flex items-center gap-1.5 text-xs text-primary">
+            <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden="true" />
+            Switching to this model…
+          </span>
+        )}
+        {ready && model.chosen && !switching && (
           <span className="inline-flex items-center gap-1 text-xs text-[#a9c99a]">
             <CheckIcon className="size-3.5" aria-hidden="true" />
             In use

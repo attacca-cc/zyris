@@ -320,6 +320,40 @@ pub async fn set_voice_listening(
     Ok(voice_screen(voice.set_listening(listening).await, &hotkey))
 }
 
+/// The file the chosen push-to-talk key is kept in. A type of its own so Tauri's state can tell
+/// it from any other path.
+pub struct TriggerFile(pub std::path::PathBuf);
+
+/// Use `trigger` ("Ctrl+Shift+K") as the push-to-talk key, now and at the next launch.
+///
+/// **On the main thread**: on Windows `RegisterHotKey` only reaches the message window when it is
+/// called from the thread that owns it — see `hotkey/x11.rs`. Saved only once the key is taken,
+/// so a combination another program holds is refused and the old key goes on working.
+#[tauri::command]
+pub async fn set_push_to_talk_key(
+    trigger: String,
+    app: tauri::AppHandle,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+    file: State<'_, TriggerFile>,
+) -> Result<VoiceScreen, String> {
+    let (done, answer) = tokio::sync::oneshot::channel();
+    let key = hotkey.inner().clone();
+    let wanted = trigger.clone();
+    app.run_on_main_thread(move || {
+        let _ = done.send(key.rebind(&wanted));
+    })
+    .map_err(|error| error.to_string())?;
+    answer.await.map_err(|_| "the window closed before the key was changed".to_string())??;
+    if let Some(dir) = file.0.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(error) = std::fs::write(&file.0, format!("{trigger}\n")) {
+        tracing::warn!(%error, path = %file.0.display(), "could not save the push-to-talk key");
+    }
+    Ok(voice_screen(voice.look().await, &hotkey))
+}
+
 /// Choose which microphone to open, now and at the next launch.
 #[tauri::command]
 pub async fn set_voice_device(
@@ -478,6 +512,15 @@ pub async fn conversation_sessions(
     voice: State<'_, Arc<zyris_voice::Voice>>,
 ) -> Result<zyris_voice::view::SessionsView, String> {
     voice.sessions().await
+}
+
+/// The messages already in the session this machine talks to, for the Conversation screen to
+/// open on and to show again after switching session.
+#[tauri::command]
+pub async fn conversation_history(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<zyris_voice::view::HistoryView, String> {
+    voice.history().await
 }
 
 /// Talk to another session from now on, and at the next launch.

@@ -1,8 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-/* Bundled rather than fetched: the window's CSP allows only 'self'. */
-@import "pretendard/dist/web/variable/pretendardvariable.css";
-@import "@fontsource-variable/space-grotesk";
+/* The fonts are registered in fonts.ts, not here; it says why. */
 
 /* The zyris.attacca.cc palette — `src/app/globals.css` in ridanit-ruma/zyris-attacca-cc — as
    shadcn's token names, so the components read the same names they are written against. There
@@ -158,5 +156,19 @@
   .animate-soft-pulse,
   .animate-spin {
     animation: none;
+  }
+}
+
+/* A row of icon, text and actions that stays one line when it fits. When it does not, the actions
+   wrap under the text instead of squeezing it to a word a line, and keep to the right. The text is
+   the child marked flex-1. */
+@utility action-row {
+  display: flex;
+  flex-wrap: wrap;
+  & > .flex-1 {
+    min-width: min(100%, 11rem);
+  }
+  & > .flex-1 + * {
+    margin-left: auto;
   }
 }

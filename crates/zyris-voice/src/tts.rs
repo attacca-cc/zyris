@@ -886,6 +886,7 @@ impl Tts {
         // much of that is speech. Keeping the rest would pad every fragment with up to 69 ms of
         // whatever the model put in an unasked-for frame.
         wav.truncate(samples.min(wav.len()));
+        let mut wav = trim(wav);
         louder(&mut wav, self.volume);
         Ok(Utterance { samples: wav, unvoiced: spoken.unvoiced })
     }
@@ -909,7 +910,7 @@ impl Tts {
         let seconds = *seconds.first().ok_or_else(|| Fault::Onnx {
             detail: "the duration predictor returned no number".into(),
         })?;
-        Ok(seconds / self.speed)
+        Ok(faster(seconds, self.speed))
     }
 
     fn encode_text(
@@ -1090,9 +1091,60 @@ fn noise(count: usize, seed: u64) -> Vec<f32> {
     out
 }
 
+/// The fragment with the model's lead-in and tail cut down to [`crate::split::KEPT_LEAD_IN`] and
+/// [`crate::split::KEPT_TAIL`]. They are 0.3–0.6 s each, so two sentences in a row had most of a
+/// second of silence between them; the pause between fragments is put back, at its own length,
+/// by the speaker (`session::gap_samples`). A fragment with nothing above the threshold is kept
+/// whole rather than emptied.
+fn trim(wav: Vec<f32>) -> Vec<f32> {
+    let peak = wav.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+    let floor = (peak * 0.02).max(0.002);
+    let (Some(first), Some(last)) = (wav.iter().position(|x| x.abs() > floor), wav.iter().rposition(|x| x.abs() > floor))
+    else {
+        return wav;
+    };
+    let samples = |d: std::time::Duration| (d.as_secs_f32() * SAMPLE_RATE as f32) as usize;
+    let start = first.saturating_sub(samples(crate::split::KEPT_LEAD_IN));
+    let end = (last + 1 + samples(crate::split::KEPT_TAIL)).min(wav.len());
+    wav[start..end].to_vec()
+}
+
+/// A predicted length at `speed`, with the silence the model pads every fragment with left out
+/// of the speeding up.
+///
+/// **Dividing the whole length dropped the last word.** About 0.7 s of every prediction is the
+/// lead-in and the tail ([`crate::split::MODEL_LEAD_IN`], [`crate::split::MODEL_TAIL`]), and the
+/// model keeps making them whatever length it is given — so at 1.4× the words had to fit in far
+/// less than 1/1.4 of their time, and the end of the sentence went. Read back through whisper on
+/// 2026-09-27: at 1.0 all seven test sentences came back whole; at 1.4 every one lost its end
+/// ("잘 되네요." → "자요").
+fn faster(seconds: f32, speed: f32) -> f32 {
+    let pads = (crate::split::MODEL_LEAD_IN + crate::split::MODEL_TAIL).as_secs_f32();
+    if seconds <= pads {
+        return seconds;
+    }
+    pads + (seconds - pads) / speed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_words_are_sped_up_and_the_pads_are_trimmed() {
+        let pads = (crate::split::MODEL_LEAD_IN + crate::split::MODEL_TAIL).as_secs_f32();
+        assert!((faster(pads + 1.4, 1.4) - (pads + 1.0)).abs() < 1e-5);
+        assert_eq!(faster(0.5, 1.4), 0.5, "a prediction shorter than the pads is left alone");
+
+        let rate = SAMPLE_RATE as usize;
+        let mut wav = vec![0.0f32; rate / 2];
+        wav.extend(vec![0.5f32; rate]);
+        wav.extend(vec![0.0f32; rate / 2]);
+        let kept = trim(wav);
+        let expected = rate + (0.040 * SAMPLE_RATE as f32) as usize + (0.090 * SAMPLE_RATE as f32) as usize;
+        assert_eq!(kept.len(), expected);
+        assert_eq!(trim(vec![0.0; 100]).len(), 100, "silence alone is not emptied");
+    }
 
     #[test]
     fn volume_scales_and_clips_at_full_scale() {

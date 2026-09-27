@@ -16,6 +16,9 @@ function turn(text: string, sentences: Sentence[], change: Partial<AgentTurn> = 
     settled: false,
     interrupted: false,
     played: -1,
+    activity: null,
+    tools: 0,
+    breakNext: false,
     ...change,
   };
 }

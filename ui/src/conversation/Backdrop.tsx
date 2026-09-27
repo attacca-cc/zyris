@@ -31,13 +31,24 @@ const DOT_STRENGTH = { idle: 0.09, active: 0.22 };
 const BAR_ALPHA = 0.06;
 
 // Drawn behind the conversation, reacting to `level` — a ref, so that twenty-five updates a
-// second do not re-render anything. One animation loop; it stops while the window is hidden, and
-// under reduced motion the picture is drawn once per change of mode and left still.
+// second do not re-render anything. One animation loop at about 30 frames a second; it stops
+// while the window or the Conversation screen is hidden, and under reduced motion the picture is
+// drawn once per change of mode and left still.
+//
+// **Cheap per frame on purpose.** WebKitGTK paints a canvas in software, and a fill per dot — five
+// hundred a frame — held the main thread long enough that every dropdown in the window opened
+// late. The dots are drawn in a few shades, one path and one fill per shade.
+const SHADES = 8;
+const FRAME_MS = 1000 / 30;
+
 export function Backdrop({
   mode,
   level,
+  paused = false,
 }: {
   mode: Mode;
+  // The Conversation screen is not showing: nothing to draw.
+  paused?: boolean;
   // The latest perceived level, 0..1, for whichever source the mode is about.
   level: React.RefObject<number>;
 }) {
@@ -47,6 +58,9 @@ export function Backdrop({
   // Draws one frame now; set by the loop below. Under reduced motion there is no loop, so a
   // change of mode calls this to draw the new picture.
   const redraw = useRef<(() => void) | null>(null);
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
+  const wake = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const element = canvas.current;
@@ -61,8 +75,14 @@ export function Backdrop({
     let frame = 0;
     let last = performance.now();
     const started = last;
+    const shades: { x: number; y: number; r: number }[][] = Array.from({ length: SHADES }, () => []);
+    const running = () => !reduced && !document.hidden && !pausedRef.current;
 
     const draw = (now: number) => {
+      if (now - last < FRAME_MS - 2 && running()) {
+        frame = requestAnimationFrame(draw);
+        return;
+      }
       const seconds = Math.min(0.1, (now - last) / 1000);
       last = now;
       const t = (now - started) / 1000;
@@ -104,6 +124,7 @@ export function Backdrop({
         const strength =
           (DOT_STRENGTH.idle + (DOT_STRENGTH.active - DOT_STRENGTH.idle) * active) * (1 - mix);
         const [cs, ss, ct, st] = [Math.cos(spin), Math.sin(spin), Math.cos(tilt), Math.sin(tilt)];
+        for (const shade of shades) shade.length = 0;
         for (const p of POINTS) {
           const x1 = p.x * cs + p.z * ss;
           const z1 = -p.x * ss + p.z * cs;
@@ -112,15 +133,27 @@ export function Backdrop({
           const wobble = reduced ? 1 : 1 + orbLevel * 0.28 * Math.sin(p.phase + t * 6 + p.y * 4.2);
           const r = radius * wobble;
           const depth = (z2 + 1) / 2;
+          shades[Math.min(SHADES - 1, Math.floor(depth * SHADES))].push({
+            x: cx + x1 * r,
+            y: cy + y1 * r,
+            r: 0.8 + 1.8 * depth,
+          });
+        }
+        shades.forEach((dots, i) => {
+          if (dots.length === 0) return;
+          const depth = (i + 0.5) / SHADES;
           const alpha = (0.15 + 0.85 * depth) * strength;
           const red = Math.round(201 + 31 * depth);
           const green = Math.round(115 + 85 * depth);
           const blue = Math.round(77 + 73 * depth);
           context.fillStyle = `rgba(${red},${green},${blue},${alpha.toFixed(3)})`;
           context.beginPath();
-          context.arc(cx + x1 * r, cy + y1 * r, 0.8 + 1.8 * depth, 0, Math.PI * 2);
+          for (const dot of dots) {
+            context.moveTo(dot.x + dot.r, dot.y);
+            context.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
+          }
           context.fill();
-        }
+        });
       }
 
       if (mix > 0.02) {
@@ -139,21 +172,26 @@ export function Backdrop({
         }
       }
 
-      if (!reduced && !document.hidden) frame = requestAnimationFrame(draw);
+      if (running()) frame = requestAnimationFrame(draw);
     };
 
     const resume = () => {
       cancelAnimationFrame(frame);
-      if (!document.hidden) {
-        last = performance.now();
+      if (running()) {
+        last = performance.now() - FRAME_MS;
         frame = requestAnimationFrame(draw);
       }
     };
-    redraw.current = () => draw(performance.now());
+    wake.current = resume;
+    redraw.current = () => {
+      last = performance.now() - FRAME_MS;
+      draw(performance.now());
+    };
     document.addEventListener("visibilitychange", resume);
     frame = requestAnimationFrame(draw);
     return () => {
       redraw.current = null;
+      wake.current = null;
       cancelAnimationFrame(frame);
       document.removeEventListener("visibilitychange", resume);
     };
@@ -162,6 +200,10 @@ export function Backdrop({
   useEffect(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) redraw.current?.();
   }, [mode]);
+
+  useEffect(() => {
+    if (!paused) wake.current?.();
+  }, [paused]);
 
   return (
     <canvas

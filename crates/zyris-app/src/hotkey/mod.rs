@@ -92,13 +92,26 @@ pub const SHORTCUT_ID: &str = "push_to_talk";
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub const SHORTCUT_DESCRIPTION: &str = "Hold to talk to Zyris";
 
-/// The key this asks for where it is allowed to ask: Ctrl+Alt+Space.
+/// The key this asks for until someone chooses another: Ctrl+Alt+Space.
 ///
 /// Only X11 and Windows honour it. The GlobalShortcuts portal ignores `preferred_trigger`
 /// entirely — measured against `xdg-desktop-portal-hyprland` 1.3.12, where the returned
 /// `trigger_description` is empty and the string does not appear in the portal binary — which is
 /// the whole reason [`HotkeySupport::NeedsAKeyBound`] exists.
 pub const TRIGGER: &str = "Ctrl+Alt+Space";
+
+/// The name of the file, in the instance's data directory, that holds the chosen key: one line,
+/// written the way [`TRIGGER`] is.
+pub const TRIGGER_FILE: &str = "push-to-talk-key";
+
+/// The key chosen last time, or [`TRIGGER`] when none was or the file cannot be read.
+pub fn saved_trigger(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| text.parse::<global_hotkey::hotkey::HotKey>().is_ok())
+        .unwrap_or_else(|| TRIGGER.to_string())
+}
 
 /// How many key events a subscriber may fall behind before it loses the oldest.
 ///
@@ -186,6 +199,12 @@ pub trait Hotkey: Send + Sync + 'static {
 
     /// A new subscription to the key. Each caller gets its own; none of them consumes another's.
     fn events(&self) -> broadcast::Receiver<HotkeyEvent>;
+
+    /// Use `trigger` ("Ctrl+Alt+Space") from now on, or say why not. The caller saves it.
+    fn rebind(&self, trigger: &str) -> Result<(), String> {
+        let _ = trigger;
+        Err("there is no push-to-talk key on this desktop to change".into())
+    }
 
     /// Give the registration back before the process ends.
     ///
@@ -299,11 +318,36 @@ fn var(name: &str) -> Option<String> {
 /// shortcut as `:push_to_talk` (2026-09-15). A Flatpak build would have one and this would have
 /// to grow it.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn compositor_line(desktop: &str, shortcut_id: &str) -> Option<String> {
+pub fn compositor_line(desktop: &str, shortcut_id: &str, trigger: &str) -> Option<String> {
     match desktop.to_ascii_lowercase().as_str() {
-        "hyprland" => Some(format!("bind = CTRL ALT, space, global, :{shortcut_id}")),
+        "hyprland" => Some(format!("bind = {}, global, :{shortcut_id}", hyprland_keys(trigger)?)),
         _ => None,
     }
+}
+
+/// "Ctrl+Alt+Space" as Hyprland writes it: "CTRL ALT, space". `None` for a key with no
+/// modifier-and-key shape, rather than a guess somebody pastes into their configuration.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn hyprland_keys(trigger: &str) -> Option<String> {
+    let parts: Vec<&str> = trigger.split('+').map(str::trim).collect();
+    let (key, modifiers) = parts.split_last()?;
+    let modifiers = modifiers
+        .iter()
+        .map(|m| match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => Some("CTRL"),
+            "alt" | "option" => Some("ALT"),
+            "shift" => Some("SHIFT"),
+            "super" | "meta" | "cmd" | "command" => Some("SUPER"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let key = match key.to_ascii_lowercase().as_str() {
+        "" => return None,
+        // Function keys are keysyms in capitals; everything else here is lower case.
+        k if k.starts_with('f') && k[1..].parse::<u8>().is_ok() => key.to_ascii_uppercase(),
+        k => k.to_string(),
+    };
+    Some(format!("{}, {key}", modifiers.join(" ")))
 }
 
 /// Publishes at most one [`HotkeyEvent::Pressed`] per hold, and at most one
@@ -376,19 +420,19 @@ impl Default for OnePerHold {
 ///
 /// Never fails. A machine with no way to register a hotkey gets [`NoHotkey`], which says so —
 /// the same shape `announce.rs` uses for a host with no display server, and for the same reason.
-pub async fn start(env: &Env) -> Arc<dyn Hotkey> {
+pub async fn start(env: &Env, trigger: &str) -> Arc<dyn Hotkey> {
     match Desktop::of(env) {
         Desktop::Headless => Arc::new(NoHotkey::because(
             "this process is not in a desktop session, so there is no key for anyone to press",
         )),
-        Desktop::Windows | Desktop::X11 => match GrabbedHotkey::grab() {
+        Desktop::Windows | Desktop::X11 => match GrabbedHotkey::grab(trigger) {
             Ok(hotkey) => Arc::new(hotkey),
             Err(error) => Arc::new(NoHotkey::because(format!(
-                "{TRIGGER} could not be registered with this session: {error}"
+                "{trigger} could not be registered with this session: {error}"
             ))),
         },
         #[cfg(target_os = "linux")]
-        Desktop::Wayland => match PortalHotkey::open(env).await {
+        Desktop::Wayland => match PortalHotkey::open(env, trigger).await {
             Ok(hotkey) => Arc::new(hotkey),
             Err(error) => Arc::new(NoHotkey::because(format!(
                 "this Wayland desktop has no working GlobalShortcuts portal, so no application \
@@ -496,19 +540,42 @@ mod tests {
     /// plausible guess in this field is a line somebody pastes into a configuration file.
     #[test]
     fn a_compositor_line_is_offered_only_where_its_spelling_is_known() {
-        let line = compositor_line("Hyprland", SHORTCUT_ID).expect("Hyprland is known");
+        let line = compositor_line("Hyprland", SHORTCUT_ID, TRIGGER).expect("Hyprland is known");
         assert!(line.contains(&format!(":{SHORTCUT_ID}")), "{line}");
-        assert_eq!(compositor_line("hyprland", SHORTCUT_ID), Some(line));
-        assert_eq!(compositor_line("XFCE", SHORTCUT_ID), None);
-        assert_eq!(compositor_line("sway", SHORTCUT_ID), None);
+        assert_eq!(compositor_line("hyprland", SHORTCUT_ID, TRIGGER), Some(line));
+        assert_eq!(compositor_line("XFCE", SHORTCUT_ID, TRIGGER), None);
+        assert_eq!(compositor_line("sway", SHORTCUT_ID, TRIGGER), None);
     }
 
     /// The line has to name the id the portal was actually given. These are two constants in two
     /// files and nothing else would notice them drifting apart.
     #[test]
     fn the_line_points_at_the_shortcut_this_program_registers() {
-        let line = compositor_line("Hyprland", SHORTCUT_ID).unwrap();
+        let line = compositor_line("Hyprland", SHORTCUT_ID, TRIGGER).unwrap();
         assert_eq!(line, "bind = CTRL ALT, space, global, :push_to_talk");
+    }
+
+    /// A chosen key is written the way Hyprland reads it, and one it could not read is refused
+    /// rather than guessed at.
+    #[test]
+    fn a_chosen_key_is_spelled_for_hyprland() {
+        assert_eq!(hyprland_keys("Ctrl+Shift+K").as_deref(), Some("CTRL SHIFT, k"));
+        assert_eq!(hyprland_keys("Super+F9").as_deref(), Some("SUPER, F9"));
+        assert_eq!(hyprland_keys("F8").as_deref(), Some(", F8"));
+        assert_eq!(hyprland_keys("Hyper+K"), None);
+    }
+
+    #[test]
+    fn a_saved_key_that_does_not_parse_falls_back_to_the_default() {
+        let dir = std::env::temp_dir().join(format!("zyris-ptt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(TRIGGER_FILE);
+        assert_eq!(saved_trigger(&path), TRIGGER);
+        std::fs::write(&path, "Ctrl+Shift+K\n").unwrap();
+        assert_eq!(saved_trigger(&path), "Ctrl+Shift+K");
+        std::fs::write(&path, "not a key").unwrap();
+        assert_eq!(saved_trigger(&path), TRIGGER);
+        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(SHORTCUT_ID, "push_to_talk");
     }
 
@@ -578,7 +645,7 @@ mod tests {
     /// will never yield while looking exactly like one that will.
     #[tokio::test]
     async fn a_session_that_is_not_a_desktop_says_so_instead_of_looking_registered() {
-        let hotkey = start(&Env::default()).await;
+        let hotkey = start(&Env::default(), TRIGGER).await;
         match hotkey.describe() {
             HotkeySupport::Unavailable { reason } => {
                 assert!(reason.contains("desktop session"), "{reason}");

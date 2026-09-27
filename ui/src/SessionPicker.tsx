@@ -163,7 +163,7 @@ export function SessionPicker({
 
   return (
     <div className="border-b border-[#1d1814] bg-background">
-      <div className="flex min-h-14 flex-wrap items-center gap-2 px-6 py-2.5">
+      <div className="flex min-h-14 flex-wrap items-center gap-2 px-6 py-2.5 max-sm:px-3">
         {byProject && (
           <>
             <Select value={project ?? undefined} disabled={busy} onValueChange={setProject}>
@@ -187,7 +187,7 @@ export function SessionPicker({
           disabled={busy}
           onValueChange={(session) => act("choose_conversation_session", { session })}
         >
-          <SelectTrigger size="sm" aria-label="Session" className="w-auto max-w-80 min-w-44 bg-transparent font-medium">
+          <SelectTrigger size="sm" aria-label="Session" className="w-auto max-w-80 min-w-44 bg-transparent font-medium max-sm:max-w-none max-sm:flex-1">
             <SelectValue placeholder="No session yet" />
           </SelectTrigger>
           <SelectContent>
@@ -211,7 +211,7 @@ export function SessionPicker({
           </Badge>
         )}
 
-        <div className="flex-1" />
+        <div className="flex-1 max-sm:hidden" />
 
         {view.agents.length > 1 && (
           <Select value={agent ?? undefined} disabled={busy} onValueChange={setAgent}>
@@ -250,11 +250,11 @@ export function SessionPicker({
           }
         >
           <PlusIcon />
-          New session
+          <span className="max-sm:sr-only">New session</span>
         </Button>
       </div>
       {(notes.length > 0 || problem) && (
-        <div className="flex flex-col gap-0.5 px-6 pb-2.5">
+        <div className="flex flex-col gap-0.5 px-6 pb-2.5 max-sm:px-3">
           {notes.map((line) => (
             <p key={line} className="m-0 text-xs text-muted-foreground">
               {line}

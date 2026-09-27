@@ -6,7 +6,7 @@ import { subscribeLevels, subscribeTrace, type Trace } from "./state";
 import type { VoiceScreen } from "./Voice";
 import { Backdrop, type Mode } from "./conversation/Backdrop";
 import { Composer, StatusLine, type Phase } from "./conversation/Composer";
-import { fold, type Action, type Turn } from "./conversation/fold";
+import { fold, fromHistory, type Action, type HistoryLine, type Turn } from "./conversation/fold";
 import { perceived } from "./conversation/levels";
 import { Thread } from "./conversation/Thread";
 
@@ -46,6 +46,23 @@ export function Conversation({ hidden }: { hidden: boolean }) {
 
   const dispatch = useCallback((action: Action) => setTurns((turns) => fold(turns, action)), []);
 
+  // What the session already holds, put in front of anything said since the screen opened. An
+  // answer for a session the picker has since left is dropped by its ticket. Read again the next
+  // time the screen is shown if it could not be read — before the machine has connected, say.
+  const historyTicket = useRef(0);
+  const historyRead = useRef(false);
+  const readHistory = useCallback(() => {
+    const ticket = ++historyTicket.current;
+    invoke<{ session: string | null; lines: HistoryLine[] }>("conversation_history")
+      .then((history) => {
+        if (ticket !== historyTicket.current) return;
+        historyRead.current = true;
+        const earlier = fromHistory(history?.lines ?? []);
+        if (earlier.length > 0) setTurns((live) => [...earlier, ...live]);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     let stops: (() => void)[] = [];
     let gone = false;
@@ -82,7 +99,8 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   }, []);
   useEffect(() => {
     if (!hidden) readVoice();
-  }, [hidden, readVoice]);
+    if (!hidden && !historyRead.current) readHistory();
+  }, [hidden, readVoice, readHistory]);
 
   const phase = phaseOf(turns, speaking);
   const recording = phase === "recording" || keyDown;
@@ -117,11 +135,12 @@ export function Conversation({ hidden }: { hidden: boolean }) {
         onSwitched={() => {
           setTurns([]);
           setSpeaking(false);
+          readHistory();
         }}
       />
 
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <Backdrop mode={mode.current} level={level} />
+        <Backdrop mode={mode.current} level={level} paused={hidden} />
 
         {turns.length === 0 ? (
           <div className="relative flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
@@ -135,7 +154,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
           <Thread turns={turns} agentName={agentName ?? "Agent"} />
         )}
 
-        <div className="relative flex shrink-0 flex-col gap-2 px-6 pb-4.5">
+        <div className="relative flex shrink-0 flex-col gap-2 px-6 pb-4.5 max-sm:px-3 max-sm:pb-3">
           <div className="mx-auto flex w-full max-w-[45rem] flex-col gap-2">
             <StatusLine
               phase={phase}
