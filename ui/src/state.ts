@@ -89,6 +89,12 @@ export const TABS = [
 
 export type Tab = (typeof TABS)[number]["id"];
 
+// **The phone app shows what a phone can do**: the conversation and the connection. The rest —
+// speech settings, the tools and MCP servers a computer announces, autostart — belongs to the
+// desktop app, and its commands are not in the phone build at all.
+export const PHONE = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+export const SHOWN_TABS = PHONE ? TABS.filter((tab) => tab.id === "conversation" || tab.id === "status") : TABS;
+
 export type Screen = "starting" | "onboarding" | Tab;
 
 // What the window can be told. Core events arrive from the bus; `navigate` is the one thing a

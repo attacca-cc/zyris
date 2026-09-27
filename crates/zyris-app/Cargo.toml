@@ -10,35 +10,53 @@ repository.workspace = true
 name = "zyris"
 path = "src/main.rs"
 
+# The phone app (`src/mobile.rs`), which Tauri's Android and iOS builds load as a library. Empty
+# on a desktop build: the desktop app is the binary above.
+[lib]
+name = "zyris_app_lib"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [dependencies]
-zyris-autostart = { path = "../zyris-autostart" }
-# The local MCP servers: which ones this instance has configured, and starting them. Here rather
-# than in `zyris-tools` because starting one is asynchronous and can fail, and a capability list
-# is neither.
-zyris-mcp = { path = "../zyris-mcp" }
 zyris-runtime = { path = "../zyris-runtime" }
-zyris-tools = { path = "../zyris-tools" }
 # Speech. **Present on every build, and the feature below is the only thing that changes.**
 # With `voice` off this crate still exports `VoiceEvent` and a stream that has already ended,
 # so nothing in `zyris-app` has to ask which build it is in — see `zyris_voice`'s module
 # documentation, and the test that fails if a `#[cfg(feature = ..)]` ever appears here.
 zyris-voice = { path = "../zyris-voice" }
 anyhow = { workspace = true }
-clap = { workspace = true }
 directories = { workspace = true }
-# The push-to-talk key on X11 and on Windows. Present on every platform: the crate carries a
-# no-op backend for the ones it does not implement, and `hotkey::start` never reaches it on a
-# Wayland session anyway.
-global-hotkey = { workspace = true }
-open = { workspace = true }
 serde = { workspace = true }
 tauri = { workspace = true }
-tauri-plugin-single-instance = { workspace = true }
 # `time` and `sync` are `confirm.rs`: a question waits on a `oneshot` and answers itself when the
 # deadline fires. `signal` is headless's shutdown, `rt-multi-thread` the runtime `main` builds.
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Everything that acts on the computer the app runs on, or needs a desktop session: the tools and
+# MCP servers a node announces, autostart, the push-to-talk key, one window per machine, the CLI.
+# None of it builds for a phone or would mean anything there.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+zyris-autostart = { path = "../zyris-autostart" }
+# The local MCP servers: which ones this instance has configured, and starting them. Here rather
+# than in `zyris-tools` because starting one is asynchronous and can fail, and a capability list
+# is neither.
+zyris-mcp = { path = "../zyris-mcp" }
+zyris-tools = { path = "../zyris-tools" }
+clap = { workspace = true }
+# The push-to-talk key on X11 and on Windows. The crate carries a no-op backend for the ones it
+# does not implement, and `hotkey::start` never reaches it on a Wayland session anyway.
+global-hotkey = { workspace = true }
+open = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
+
+# The phone app: a conversation with no audio yet (`zyris-voice`'s `conversation`), and the
+# browser for the enrolment link.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+zyris-voice = { path = "../zyris-voice", features = ["conversation"] }
+serde_json = { workspace = true }
+tauri-plugin-opener = "2"
 
 # The Wayland half of the push-to-talk key. Linux only, because the GlobalShortcuts portal is:
 # `ashpd` speaks D-Bus to `xdg-desktop-portal`, which exists nowhere else. Windows takes the

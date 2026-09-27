@@ -137,7 +137,7 @@ impl Answers {
             }
             // What the agent is doing, for the window; nothing the speaker reads.
             TurnEvent::Event { event, .. } => {
-                if let Some(step) = progress(event) {
+                if let Some(step) = crate::chat::progress(event) {
                     self.trace(step);
                 }
                 return;
@@ -165,22 +165,6 @@ impl Answers {
     }
 }
 
-/// A durable event as the progress it shows: a note or a reasoning title, or a tool call. A
-/// `report_result` call is the answer itself, not progress, and is left to the feed.
-fn progress(event: &zyris_attacca::ZSessionEvent) -> Option<Trace> {
-    let text = |key: &str| {
-        event.payload.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
-    };
-    match event.kind.as_str() {
-        "work_summary" => text("content").map(|title| Trace::Working { title }),
-        "thinking" => text("title").map(|title| Trace::Working { title }),
-        // A wrapper that runs other calls is not a call of its own.
-        "tool_call" => text("name")
-            .filter(|name| !matches!(name.as_str(), "report_result" | "sequential_tool_calls" | "parallel_tool_calls"))
-            .map(|name| Trace::Tool { name }),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {

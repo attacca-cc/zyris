@@ -92,11 +92,11 @@ pub mod stt;
 pub mod tts;
 
 // What is read aloud and what is not, and the two texts that are not the same text.
-#[cfg(feature = "voice")]
+#[cfg(feature = "conversation")]
 pub mod speak;
 
 // Where one fragment ends and the next begins, argued from what synthesis actually costs.
-#[cfg(feature = "voice")]
+#[cfg(feature = "conversation")]
 pub mod split;
 
 // The speaker: the output stream, the queue in front of it, and the tap that keeps what was
@@ -106,8 +106,12 @@ pub mod playback;
 
 // The live turn feed: `turn_events`, the cursor a reconnect resumes from, and the deltas on
 // their way to the filter. The only module here that speaks to Attacca.
-#[cfg(feature = "voice")]
+#[cfg(feature = "conversation")]
 pub mod turn;
+
+// A conversation with no audio at all, for the builds that have none: the phones.
+#[cfg(feature = "conversation")]
+pub mod chat;
 
 // The recordings the tests measure against, and the one reader for them.
 #[cfg(all(test, feature = "voice"))]
@@ -408,6 +412,9 @@ pub struct Voice {
     /// [`start`] built, because `run::Engine::new` cannot fail and opens nothing.
     #[cfg(feature = "voice")]
     engine: Option<std::sync::Arc<run::Engine>>,
+    /// A conversation with no audio, on a build that has none (the phones). See [`chat`].
+    #[cfg(all(feature = "conversation", not(feature = "voice")))]
+    chat: Option<std::sync::Arc<chat::Chat>>,
 }
 
 impl Voice {
@@ -421,6 +428,8 @@ impl Voice {
             support: VoiceSupport::Unavailable { reason: reason.into() },
             #[cfg(feature = "voice")]
             engine: None,
+            #[cfg(all(feature = "conversation", not(feature = "voice")))]
+            chat: None,
         }
     }
 
@@ -446,6 +455,10 @@ impl Voice {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
             return engine.traces();
+        }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            return chat.traces();
         }
         match &self.traces {
             Some(tx) => tx.subscribe(),
@@ -511,6 +524,10 @@ impl Voice {
         if let Some(engine) = &self.engine {
             engine.on_connect(connection.clone()).await;
         }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            chat.on_connect(connection.clone()).await;
+        }
         let _ = connection;
     }
 
@@ -521,6 +538,10 @@ impl Voice {
         if let Some(engine) = &self.engine {
             return engine.sessions().await;
         }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            return chat.sessions().await;
+        }
         Err(NOT_COMPILED_IN.to_string())
     }
 
@@ -529,6 +550,10 @@ impl Voice {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
             return engine.history().await;
+        }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            return chat.history().await;
         }
         Err(NOT_COMPILED_IN.to_string())
     }
@@ -539,6 +564,11 @@ impl Voice {
         if let Some(engine) = &self.engine {
             engine.choose_session(session).await?;
             return engine.sessions().await;
+        }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            chat.choose_session(session).await?;
+            return chat.sessions().await;
         }
         let _ = session;
         Err(NOT_COMPILED_IN.to_string())
@@ -555,6 +585,11 @@ impl Voice {
         if let Some(engine) = &self.engine {
             engine.new_session(project, agent).await?;
             return engine.sessions().await;
+        }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            chat.new_session(project, agent).await?;
+            return chat.sessions().await;
         }
         let _ = (project, agent);
         Err(NOT_COMPILED_IN.to_string())
@@ -635,6 +670,10 @@ impl Voice {
         #[cfg(feature = "voice")]
         if let Some(engine) = &self.engine {
             return engine.send_text(text).await;
+        }
+        #[cfg(all(feature = "conversation", not(feature = "voice")))]
+        if let Some(chat) = &self.chat {
+            return chat.send_text(text).await;
         }
         let _ = text;
         Err(NOT_COMPILED_IN.to_string())
@@ -759,10 +798,20 @@ impl Voice {
 /// This is the whole of what `zyris-app` calls. The two arms below are the only place in the
 /// workspace that reads the feature.
 pub fn start(dir: Option<&std::path::Path>) -> Voice {
-    #[cfg(not(feature = "voice"))]
+    #[cfg(not(any(feature = "voice", feature = "conversation")))]
     {
         let _ = dir;
         Voice::disabled(NOT_COMPILED_IN)
+    }
+    #[cfg(all(feature = "conversation", not(feature = "voice")))]
+    {
+        Voice {
+            events: None,
+            traces: None,
+            // Typing works; listening does not, and the sentence is the no-audio build's own.
+            support: VoiceSupport::Unavailable { reason: NOT_COMPILED_IN.to_string() },
+            chat: Some(chat::Chat::new(dir)),
+        }
     }
     #[cfg(feature = "voice")]
     {
@@ -834,6 +883,8 @@ mod tests {
             support: VoiceSupport::Ready,
             #[cfg(feature = "voice")]
             engine: None,
+            #[cfg(all(feature = "conversation", not(feature = "voice")))]
+            chat: None,
         };
 
         let mut first = voice.events();

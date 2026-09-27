@@ -168,7 +168,19 @@ default = []
 # `tokio/rt` is in here rather than in the base dependency for the same reason everything else
 # is: `spawn_blocking` is what keeps `state.full()` off the runtime, and a build with no whisper
 # has nothing to send there.
+# A conversation with no audio: the turn feed, the text filter and splitter, and a driver that
+# turns the feed into the traces the Conversation screen reads (`chat.rs`). Pure Rust over the
+# connection, so it is what the phone builds take while whisper and Supertonic do not build there.
+conversation = [
+    "dep:zyris-attacca",
+    "dep:futures-util",
+    "dep:serde_json",
+    "dep:tracing",
+    "tokio/rt",
+]
+
 voice = [
+    "conversation",
     "dep:cpal",
     "dep:rubato",
     "dep:earshot",

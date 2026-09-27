@@ -7,7 +7,7 @@ import {
   WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { TABS, type Screen, type State, type Tab } from "@/state";
+import { SHOWN_TABS, type Screen, type State, type Tab } from "@/state";
 import { cn } from "@/lib/utils";
 import { Mark, Wordmark } from "./Wordmark";
 
@@ -37,8 +37,8 @@ export function Sidebar({
   state: State;
   onNavigate: (to: Tab) => void;
 }) {
-  const main = TABS.filter((tab) => tab.id !== "settings");
-  const settings = TABS.find((tab) => tab.id === "settings");
+  const main = SHOWN_TABS.filter((tab) => tab.id !== "settings");
+  const settings = SHOWN_TABS.find((tab) => tab.id === "settings");
   return (
     <nav
       aria-label="Screens"
