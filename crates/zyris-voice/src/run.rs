@@ -42,6 +42,7 @@ use crate::capture::{
     APM_FRAME, Capture, Captured, Choice, Chunker, VAD_FRAME, read_delay,
 };
 use crate::playback::{Playback, Render, Speaker};
+use crate::answers::Answers;
 use crate::session::{Session, Speaking, Stopped};
 use crate::turn::Feed;
 use crate::vad::{Endpointer, Listening};
@@ -99,6 +100,9 @@ pub struct Settings {
     /// [`DEFAULT_SPEAKING_RATE`]. Clamped to the range [`crate::tts::Tts::set_speed`] allows.
     #[serde(default)]
     pub speaking_rate: Option<f32>,
+    /// How loud answers are read, as a gain on the voice: 1.0 is as the model writes it.
+    #[serde(default)]
+    pub volume: Option<f32>,
     /// Where speech is transcribed: `cpu` or `gpu:N`, as [`stt::Device::id`] writes it. `None`
     /// is [`stt::default_device`].
     #[serde(default)]
@@ -106,6 +110,10 @@ pub struct Settings {
     /// Where answers are read: `cpu` or `gpu`. `None` is the GPU in a build that has one.
     #[serde(default)]
     pub speak_on: Option<String>,
+    /// Whether answers are read aloud while listening is on. **`None` is on**, so that every
+    /// file written before this switch existed goes on reading answers aloud exactly as it did.
+    #[serde(default)]
+    pub read_aloud: Option<bool>,
 }
 
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
@@ -164,6 +172,45 @@ fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
 /// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
 pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
 
+/// Send what somebody typed, with `note` in front of it, and trace the outcome.
+///
+/// Apart from [`Engine::send_text`] so that a test can hand it a conversation that is not a feed.
+async fn send_typed(
+    conversation: &dyn crate::session::Says,
+    traces: &broadcast::Sender<crate::Trace>,
+    note: Option<String>,
+    text: String,
+) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("there is nothing to send".to_string());
+    }
+    let message = match note {
+        Some(note) => format!("{note}\n\n{text}"),
+        None => text.clone(),
+    };
+    match conversation.say(message).await {
+        Ok(()) => {
+            let _ = traces.send(crate::Trace::Sent { text });
+            Ok(())
+        }
+        Err(reason) => {
+            let _ = traces.send(crate::Trace::SendFailed { reason: reason.clone() });
+            Err(format!("the message did not reach Attacca: {reason}"))
+        }
+    }
+}
+
+/// Whether `settings` has answers read aloud. See [`Settings::read_aloud`].
+fn read_aloud(settings: &Settings) -> bool {
+    settings.read_aloud.unwrap_or(true)
+}
+
+/// The volume `settings` asks for, clamped the way the voice will clamp it.
+fn volume(settings: &Settings) -> f32 {
+    settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.1, 2.0)
+}
+
 /// The rate `settings` asks for, clamped the way the voice will clamp it.
 fn speaking_rate(settings: &Settings) -> f32 {
     settings.speaking_rate.filter(|r| r.is_finite()).unwrap_or(DEFAULT_SPEAKING_RATE).clamp(0.5, 2.0)
@@ -208,6 +255,15 @@ pub struct Engine {
     voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
     takes_checked: std::sync::atomic::AtomicBool,
+    /// The one reader of the answer stream, whether or not anything is listening. See
+    /// [`crate::answers`].
+    answers: Arc<Answers>,
+    /// How loud the microphone and the speaker are. Its own channel rather than more traces: 25
+    /// numbers a second per source would crowd the trace stream the Conversation screen reads.
+    levels: broadcast::Sender<crate::Level>,
+    /// Whether that reader has been started. It is started by the first connection rather than
+    /// here, because `new` is not async and may run before the runtime does.
+    answers_started: std::sync::atomic::AtomicBool,
 }
 
 struct Live {
@@ -249,10 +305,12 @@ impl Engine {
             Some(session) => Feed::continuing(session, settings.agent.clone()),
             None => Feed::making_one(settings.agent.clone()),
         };
+        let traces = broadcast::channel(TRACE_CAPACITY).0;
+        let answers = Answers::new(traces.clone(), events.clone(), read_aloud(&settings));
         Engine {
             settings_path,
             events,
-            traces: broadcast::channel(TRACE_CAPACITY).0,
+            traces,
             keys: broadcast::channel(KEY_CAPACITY).0,
             feed: Some(feed),
             shown: std::sync::Mutex::new(settings.clone()),
@@ -260,6 +318,9 @@ impl Engine {
             loaded: std::sync::Mutex::new(Vec::new()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
+            answers,
+            levels: broadcast::channel(LEVEL_CAPACITY).0,
+            answers_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -270,6 +331,11 @@ impl Engine {
     /// waited for somebody to turn listening on would miss every delta written before they did.
     pub async fn on_connect(&self, connection: zyris::Connection) {
         let Some(feed) = &self.feed else { return };
+        // Subscribed before the feed connects, so that nothing it publishes on this connection
+        // is sent to a channel with nobody reading it yet.
+        if !self.answers_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tokio::spawn(self.answers.clone().run(feed.events()));
+        }
         feed.on_connect(connection).await;
         self.remember_the_session(feed).await;
     }
@@ -348,6 +414,11 @@ impl Engine {
         self.traces.subscribe()
     }
 
+    /// A new subscription to the levels. See [`crate::meter`].
+    pub fn levels(&self) -> broadcast::Receiver<crate::Level> {
+        self.levels.subscribe()
+    }
+
     /// The push-to-talk key went down or came up.
     ///
     /// Accepted whether or not anything is listening: `broadcast::send` fails only when nobody
@@ -407,6 +478,8 @@ impl Engine {
             },
             speaker: settings.speaker.clone(),
             speaking_rate: speaking_rate(settings),
+            read_aloud: read_aloud(settings),
+            volume: volume(settings),
             compute: compute_view(settings),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
@@ -512,6 +585,53 @@ impl Engine {
         self.store(&live.settings);
         if let Some((_, tts)) = lock(&self.voice).as_ref() {
             lock(tts).set_speed(rate);
+        }
+    }
+
+    /// Send a typed message to the session, as though it had been said.
+    ///
+    /// **The same message a spoken turn would send**: a note an interruption left goes in front
+    /// of it, once. It does not interrupt anything itself — a cancel sent now could land after
+    /// the message and cancel the answer to it; the Stop button is how speech is cut off.
+    pub async fn send_text(&self, text: String) -> Result<(), String> {
+        let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
+        let note = self.answers.speaking().and_then(|speaking| speaking.take_note());
+        send_typed(feed.as_ref(), &self.traces, note, text).await
+    }
+
+    /// Stop reading the answer, exactly as pressing the push-to-talk key would: the rest is not
+    /// read, the answer is cancelled, and the next message says where it was cut off.
+    pub fn stop_speaking(&self) {
+        if let Some(speaking) = self.answers.speaking() {
+            speaking.interrupt();
+        }
+    }
+
+    /// Read answers aloud or not, now and at the next launch.
+    ///
+    /// Switching off while an answer is being read stops it where it is: somebody who reaches for
+    /// this switch wants the room quiet, not the rest of the sentence. Nothing is cancelled and no
+    /// note is left for the next message — the agent was not interrupted, only not listened to.
+    pub async fn set_read_aloud(&self, on: bool) {
+        let mut live = self.live.lock().await;
+        live.settings.read_aloud = Some(on);
+        self.store(&live.settings);
+        drop(live);
+        self.answers.set_read_aloud(on);
+        if !on && let Some(speaking) = self.answers.speaking() {
+            speaking.hush();
+        }
+    }
+
+    /// Choose how loud answers are read. Takes effect from the next sentence, like the rate.
+    pub async fn choose_volume(&self, gain: f32) {
+        let mut live = self.live.lock().await;
+        live.settings.volume = Some(gain);
+        let gain = volume(&live.settings);
+        live.settings.volume = Some(gain);
+        self.store(&live.settings);
+        if let Some((_, tts)) = lock(&self.voice).as_ref() {
+            lock(tts).set_volume(gain);
         }
     }
 
@@ -761,6 +881,7 @@ impl Engine {
             session = session.conversation(feed.clone());
         }
         session = session.tracing(self.traces.clone());
+        session = session.metering(self.levels.clone());
         session = session.expecting(settings.vocabulary.as_deref().unwrap_or(DEFAULT_VOCABULARY));
         if let Some(phrase) = phrase {
             session = session.listening_for(phrase);
@@ -850,13 +971,16 @@ impl Engine {
             }
         };
         lock(&tts).set_speed(speaking_rate(settings));
+        lock(&tts).set_volume(volume(settings));
 
         let (speaker, tap, rate, stop) = open_speaker_on_a_thread(settings.speaker.clone()).await?;
 
         let mut tasks = Vec::new();
         // The render side of the echo canceller. Started before anything can be queued, so that
         // the first thing ever played is also the first thing the canceller is told about.
-        let render = Render::new(apm.clone(), rate).map_err(|problem| problem.reason)?;
+        let render = Render::new(apm.clone(), rate)
+            .map_err(|problem| problem.reason)?
+            .metering(self.levels.clone());
         tasks.push(tokio::spawn(render.run(tap)));
         tasks.push(tokio::spawn(declare_stream_delay(
             apm,
@@ -871,12 +995,15 @@ impl Engine {
             self.events.clone(),
         );
         let speaking = speaking.tracing(self.traces.clone());
-        tasks.push(tokio::spawn(speaking.clone().run(feed.events())));
+        // Fed by `Answers` rather than straight off the feed, so that what the agent writes is
+        // shown whether or not this speaker exists.
+        tasks.push(tokio::spawn(speaking.clone().run(self.answers.attach(speaking.clone()))));
         Ok((speaking, stop, tasks))
     }
 
     /// Stop whatever is listening. Safe to call when nothing is.
     async fn halt(&self, live: &mut Live) {
+        self.answers.detach();
         if let Some(running) = live.running.take() {
             // Dropping the sender would do it too; sending says which of the two happened to
             // anybody reading the thread.
@@ -939,6 +1066,10 @@ const KEY_CAPACITY: usize = 32;
 /// ten sentences is fifty, and the middle of the pipeline is exactly what somebody watching it
 /// is looking for. A lag here costs nothing but a gap in a log.
 const TRACE_CAPACITY: usize = 512;
+
+/// How many levels a window may fall behind by. Shallow on purpose: a level is out of date in
+/// forty milliseconds, and one that lagged is better dropped than delivered.
+const LEVEL_CAPACITY: usize = 64;
 
 /// Why listening cannot start, said in terms of the model.
 fn no_model(state: &stt::ModelState) -> String {
@@ -1389,6 +1520,86 @@ mod tests {
             .block_on(async { engine.live.lock().await.settings.clone() });
 
         assert!(!live.listen, "a machine nobody has asked opens no microphone");
+    }
+
+    /// **Every file written before the switch existed goes on reading aloud.** A plain `bool`
+    /// with `#[serde(default)]` would have read as off from all of them.
+    #[test]
+    fn a_settings_file_without_the_switch_reads_answers_aloud() {
+        let dir = tempdir();
+        let path = dir.join(SETTINGS_FILE);
+        std::fs::write(&path, r#"{"listen":true}"#).expect("write the settings");
+        let settings = read_settings(&path);
+        assert_eq!(settings.read_aloud, None);
+        assert!(read_aloud(&settings));
+        assert!(!read_aloud(&Settings { read_aloud: Some(false), ..Default::default() }));
+    }
+
+    /// The switch is written down and read back, and the view says what it is.
+    #[tokio::test]
+    async fn reading_aloud_is_remembered_and_shown() {
+        let dir = tempdir();
+        let engine = Engine::new(Some(&dir), broadcast::channel(4).0);
+        assert!(engine.look().await.read_aloud, "on until somebody says otherwise");
+        engine.set_read_aloud(false).await;
+        assert!(!engine.look().await.read_aloud);
+        assert!(!engine.answers.read_aloud(), "and the reader was told");
+        assert_eq!(read_settings(&dir.join(SETTINGS_FILE)).read_aloud, Some(false));
+    }
+
+    /// What reached the conversation, for the typed-message tests.
+    #[derive(Default)]
+    struct Heard {
+        said: std::sync::Mutex<Vec<String>>,
+        refuse: Option<String>,
+    }
+
+    #[zyris::async_trait]
+    impl crate::session::Says for Heard {
+        async fn cancel(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn say(&self, message: String) -> Result<(), String> {
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            self.said.lock().expect("not poisoned").push(message);
+            Ok(())
+        }
+    }
+
+    /// A typed message carries an interruption's note exactly as a spoken one does, and the
+    /// window is told the words without it.
+    #[tokio::test]
+    async fn a_typed_message_is_sent_with_the_note_in_front_and_traced_without_it() {
+        let heard = Heard::default();
+        let (traces, mut seen) = broadcast::channel(4);
+        send_typed(&heard, &traces, Some("You stopped me.".into()), "  Go on.  ".into())
+            .await
+            .expect("sent");
+        assert_eq!(*heard.said.lock().unwrap(), vec!["You stopped me.\n\nGo on.".to_string()]);
+        assert_eq!(seen.try_recv().unwrap(), crate::Trace::Sent { text: "Go on.".into() });
+    }
+
+    #[tokio::test]
+    async fn an_empty_message_is_not_sent() {
+        let heard = Heard::default();
+        let (traces, mut seen) = broadcast::channel(4);
+        assert!(send_typed(&heard, &traces, None, "   ".into()).await.is_err());
+        assert!(heard.said.lock().unwrap().is_empty());
+        assert!(seen.try_recv().is_err(), "nothing to trace");
+    }
+
+    #[tokio::test]
+    async fn a_message_that_did_not_arrive_says_so() {
+        let heard = Heard { refuse: Some("the connection is down".into()), ..Default::default() };
+        let (traces, mut seen) = broadcast::channel(4);
+        let error = send_typed(&heard, &traces, None, "Hello".into()).await.unwrap_err();
+        assert!(error.contains("the connection is down"), "{error}");
+        assert_eq!(
+            seen.try_recv().unwrap(),
+            crate::Trace::SendFailed { reason: "the connection is down".into() }
+        );
     }
 
     /// A start holds `live` for as long as its models take to load; the screen must not wait on

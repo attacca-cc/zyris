@@ -2,6 +2,12 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
+import { InfoIcon, PowerIcon, TriangleAlertIcon } from "lucide-react";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { IconTile, Note, Problem } from "@/components/IconTile";
+import { Page, PageHeader } from "@/components/PageHeader";
 
 // What the `autostart_state` and `set_autostart` commands answer with: `AutostartView` in
 // crates/zyris-app/src/bridge.rs, serialized camelCase, with `zyris_autostart::State` inside
@@ -112,85 +118,107 @@ export function Settings() {
       .finally(() => setBusy(false));
   }
 
+  // The version this build says it is, from `tauri.conf.json` by way of the app itself.
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getVersion()
+      .then((answer) => {
+        if (!cancelled && typeof answer === "string") setVersion(answer);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const reason = autostart ? unsupportedReason(autostart.state) : null;
   const on = autostart?.state === "enabled";
 
   return (
-    <main className="screen">
-      <h1>Settings</h1>
-      <p className="lead">What this computer does when nobody has Zyris open.</p>
+    <Page>
+      <PageHeader title="Settings" description="What Zyris does when nobody has it open." />
 
-      <section>
-        <h2>Start with this computer</h2>
-
-        {autostart === null ? (
-          <p className={problem ? "problem" : "muted"}>
-            {problem ?? "Reading whether Zyris starts with this computer."}
-          </p>
-        ) : reason !== null ? (
-          // Never a switch that will not move with nothing beside it. The reason is the whole
-          // of what a person can act on here.
-          <div className="panel">
-            <p className="switch-state">
-              <span className="dot dot-off" aria-hidden="true" />
-              Zyris cannot start itself on this computer.
-            </p>
-            <p className="muted note">{reason}</p>
+      <Card className="gap-0 overflow-hidden p-0">
+        <CardHeader className="items-center px-5 py-5">
+          <IconTile>
+            <PowerIcon />
+          </IconTile>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <CardTitle>Start with this computer</CardTitle>
+            <CardDescription>
+              {autostart === null
+                ? "Reading whether Zyris starts with this computer."
+                : reason !== null
+                  ? "Zyris cannot start itself on this computer."
+                  : on
+                    ? "On. Zyris starts when you sign in, and reconnects on its own."
+                    : "Off. Zyris runs only when you start it yourself."}
+            </CardDescription>
           </div>
-        ) : (
-          <div className="panel">
-            <div className="switch-row">
-              <p className="switch-state">
-                <span className={on ? "dot dot-on" : "dot dot-off"} aria-hidden="true" />
-                {on
-                  ? "On. Zyris starts when you sign in, and reconnects on its own."
-                  : "Off. Zyris runs only when you start it yourself."}
-              </p>
-              <button type="button" className="button" onClick={() => toggle(!on)} disabled={busy}>
-                {on ? "Turn off" : "Turn on"}
-              </button>
-            </div>
+          {autostart !== null && reason === null && (
+            <Switch aria-label="Start with this computer" checked={on} disabled={busy} onCheckedChange={toggle} />
+          )}
+        </CardHeader>
 
-            {/* Named, because somebody who wants to undo this without Zyris in front of them
-                has to know what to go and look for. */}
-            {autostart.mechanism && (
-              <p className="muted note">
-                {on
-                  ? `It starts through ${autostart.mechanism}.`
-                  : `Turning this on adds ${autostart.mechanism}.`}
-              </p>
-            )}
-
-            {/* Everything true of this machine that leaves the switch weaker than "on" sounds.
-                On Linux this is where a person learns that the unit needs a graphical session,
-                so a computer switched on with nobody logged in is not connected. Which
-                sentences these are is the backend's to say — this screen cannot tell what
-                platform it is on, and guessing from the mechanism string would be a second
-                place for the answer to live. */}
-            {autostart.caveats.map((caveat) => (
-              <p className="warn note" key={caveat}>
-                {caveat}
-              </p>
-            ))}
-
-            {problem && <p className="problem">{problem}</p>}
+        {autostart === null && problem && (
+          <div className="px-5 pb-4">
+            <Problem>{problem}</Problem>
+          </div>
+        )}
+        {/* Never a switch that will not move with nothing beside it: the reason is the whole of
+            what a person can act on here. */}
+        {reason !== null && (
+          <div className="px-5 pb-4">
+            <Note>{reason}</Note>
           </div>
         )}
 
         {autostart !== null && reason === null && (
-          // Two things a person would otherwise find out by being surprised: started this way
-          // there is no window on the screen, and this switch is not the one that stops agents.
-          //
-          // "Where did it go" is the question this answers, and it is the whole reason Zyris
-          // starts itself with a hidden window rather than headless: a headless Zyris has no
-          // tray icon, and launching it again reaches a process with nothing listening.
-          <p className="muted note">
-            Started this way Zyris opens no window. Its tray icon brings one up, and so does
-            starting Zyris again. It does not change what agents can reach on this computer —
-            that is the switch on the Tools screen.
-          </p>
+          <>
+            {/* Everything true of this machine that leaves the switch weaker than "on" sounds. Which
+                sentences these are is the backend's to say. */}
+            {autostart.caveats.map((caveat) => (
+              <div
+                key={caveat}
+                className="flex items-start gap-2.5 border-t border-warning/20 bg-warning/5 px-5 py-3 text-[0.8125rem] text-[#d9b36a]"
+              >
+                <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                {caveat}
+              </div>
+            ))}
+            {problem && (
+              <div className="border-t border-sidebar-border px-5 py-3">
+                <Problem>{problem}</Problem>
+              </div>
+            )}
+            <div className="flex flex-col gap-1 border-t border-sidebar-border px-5 py-3 text-xs text-subtle">
+              {/* Named, because somebody undoing this without Zyris in front of them has to know
+                  what to look for. */}
+              {autostart.mechanism && (
+                <span>{on ? `It starts through ${autostart.mechanism}.` : `Turning this on adds ${autostart.mechanism}.`}</span>
+              )}
+              {/* "Where did it go", and not the switch that stops agents. */}
+              <span>
+                Started this way Zyris opens no window — its tray icon brings one up. What agents can reach is
+                the switch on the Tools screen.
+              </span>
+            </div>
+          </>
         )}
-      </section>
-    </main>
+      </Card>
+
+      <Card>
+        <CardHeader className="items-center">
+          <IconTile>
+            <InfoIcon />
+          </IconTile>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <CardTitle>About Zyris</CardTitle>
+            <CardDescription>{version ? `Version ${version}` : "Zyris"}</CardDescription>
+          </div>
+        </CardHeader>
+      </Card>
+    </Page>
   );
 }

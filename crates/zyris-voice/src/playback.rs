@@ -361,6 +361,24 @@ impl Speaker {
     }
 }
 
+/// [`classify`], in a speaker's words where the microphone's would be wrong: "this device cannot
+/// record" was what a speaker that cannot play said.
+fn classify_output(error: &cpal::Error) -> DeviceProblem {
+    let detail = error.message().unwrap_or_default();
+    let say = |sentence: &str| {
+        if detail.is_empty() { sentence.to_owned() } else { format!("{sentence} ({detail})") }
+    };
+    match error.kind() {
+        cpal::ErrorKind::UnsupportedOperation => {
+            DeviceProblem::new(Recovery::Stop, say("this device cannot play sound"))
+        }
+        cpal::ErrorKind::UnsupportedConfig => {
+            DeviceProblem::new(Recovery::Stop, say("this speaker does not take a format Zyris can play"))
+        }
+        _ => classify(error),
+    }
+}
+
 /// Everything this machine could speak through, default and true outputs first.
 ///
 /// [`crate::capture::devices`]'s opposite number, with the same rule: an error is the host being
@@ -372,9 +390,12 @@ pub fn devices() -> Result<Vec<crate::view::InputDevice>, DeviceProblem> {
 
     let mut devices: Vec<crate::view::InputDevice> = host
         .output_devices()
-        .map_err(|error| classify(&error))?
+        .map_err(|error| classify_output(&error))?
         .filter_map(|device| {
             let id = device.id().ok()?;
+            if id.to_string() == crate::capture::OWN_STREAM {
+                return None;
+            }
             let description = device.description().ok();
             Some(crate::view::InputDevice {
                 is_default: Some(&id) == default.as_ref(),
@@ -444,15 +465,17 @@ impl Playback {
         // The probe that decides "absent" as well as the sample format to ask for. The same one
         // question, one answer rule `capture::open` follows — `default_output_device` answering
         // `Some` is not evidence that anything can be opened.
-        let native = device.default_output_config().map_err(|error| classify(&error))?;
+        let native = device.default_output_config().map_err(|error| classify_output(&error))?;
         let name = device.to_string();
         let rate = crate::tts::SAMPLE_RATE;
         let frame = render_frame(rate);
 
         let counters = Counters::new();
 
-        // Mono first: the vocoder is mono and a backend that will take it saves the spreading.
-        // A backend that insists on its own channel count gets it, and [`Fill`] spreads.
+        // **The device's own channel count first**, and [`Fill`] spreads the mono voice across
+        // it. Mono first was taken whenever a backend would accept it, and PipeWire does: it
+        // linked the one channel to the sink's front-left and nothing else, so a pair of
+        // speakers played the answer from the left only. Mono stays as the fallback.
         //
         // **The queue is built inside the attempt, not before it.** A `Fill` owns the only
         // receiving end of it, and `build_output_stream` consumes the closure the `Fill` is
@@ -461,7 +484,7 @@ impl Playback {
         // for why a wrong rate is refused rather than converted.
         let mut opened = None;
         let mut refusal = None;
-        for channels in [1u16, native.channels()] {
+        for channels in [native.channels(), 1u16] {
             let config = cpal::StreamConfig {
                 channels,
                 sample_rate: rate,
@@ -485,7 +508,7 @@ impl Playback {
         };
 
         // Output streams come back stopped.
-        stream.play().map_err(|error| classify(&error))?;
+        stream.play().map_err(|error| classify_output(&error))?;
 
         Ok((
             Playback {
@@ -529,12 +552,12 @@ impl Playback {
 
     /// Stop the device without dropping the handle. Not every backend can.
     pub fn pause(&self) -> Result<(), DeviceProblem> {
-        self.stream.pause().map_err(|error| classify(&error))
+        self.stream.pause().map_err(|error| classify_output(&error))
     }
 
     /// Start again after [`Self::pause`].
     pub fn resume(&self) -> Result<(), DeviceProblem> {
-        self.stream.play().map_err(|error| classify(&error))
+        self.stream.play().map_err(|error| classify_output(&error))
     }
 }
 
@@ -577,6 +600,9 @@ pub struct Render {
     conversion: Conversion,
     to_apm: Chunker,
     analysed: u64,
+    /// Where the loudness of what was played goes, for the window's backdrop.
+    levels: Option<tokio::sync::broadcast::Sender<crate::Level>>,
+    meter: crate::meter::Meter,
 }
 
 impl Render {
@@ -591,11 +617,25 @@ impl Render {
             conversion: Conversion::new(output_rate, 1)?,
             to_apm: Chunker::new(crate::capture::APM_FRAME),
             analysed: 0,
+            levels: None,
+            meter: crate::meter::Meter::new((output_rate / crate::LEVELS_PER_SECOND) as usize),
         })
+    }
+
+    /// Publish how loud what is played is. This is the tap — what the callback really wrote —
+    /// so the level follows the speaker and not the queue.
+    pub fn metering(mut self, levels: tokio::sync::broadcast::Sender<crate::Level>) -> Render {
+        self.levels = Some(levels);
+        self
     }
 
     /// One tap frame. Answers how many canceller frames it completed.
     pub fn feed(&mut self, played: &[f32]) -> Result<usize, crate::apm::Fault> {
+        if let Some(levels) = &self.levels
+            && let Some(rms) = self.meter.push(played)
+        {
+            let _ = levels.send(crate::Level { source: crate::Source::Speaker, rms });
+        }
         let mut frames = 0;
         let converted = self.conversion.feed(played);
         for frame in self.to_apm.push(converted) {
@@ -693,7 +733,7 @@ fn start(
             ));
         }
     }
-    .map_err(|error| classify(&error))
+    .map_err(|error| classify_output(&error))
 }
 
 #[cfg(test)]
@@ -1125,6 +1165,28 @@ mod stopping_and_the_reference {
 
         assert_eq!(first, 0, "the resampler is still filling its first chunk");
         assert_eq!(render.analysed(), 0);
+    }
+
+    /// What was played is metered as it goes past, at the speaker's own rate: a second of it is
+    /// twenty-five levels, whatever that rate is.
+    #[test]
+    fn a_second_of_the_speaker_is_twenty_five_levels() {
+        let apm = Arc::new(Apm::new().expect("a processor at the capture rate"));
+        let rate = crate::tts::SAMPLE_RATE;
+        let (levels, mut seen) = tokio::sync::broadcast::channel(64);
+        let mut render = Render::new(apm, rate).expect("44.1 kHz is ordinary").metering(levels);
+
+        let frame = render_frame(rate);
+        for i in 0..100 {
+            render.feed(&ramp(frame, i * frame)).expect("a frame the canceller accepts");
+        }
+
+        let mut measured = 0;
+        while let Ok(level) = seen.try_recv() {
+            assert_eq!(level.source, crate::Source::Speaker);
+            measured += 1;
+        }
+        assert_eq!(measured, crate::LEVELS_PER_SECOND as usize);
     }
 
     /// One second of what was played arrives as **one second of the canceller's frames**, at its

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { within, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The whole of what this screen can do to the machine, mocked at the module boundary. Through
@@ -148,9 +148,9 @@ describe("Mcp", () => {
     // The word the eye lands on first differs too. Located by class and asserted on its text: a
     // badge that read "turned off" over a paragraph saying the process fell over would be a row
     // contradicting itself, and the badge is the half most people read.
-    expect(died.querySelector(".badge")?.textContent).not.toEqual(
-      disabled.querySelector(".badge")?.textContent,
-    );
+    const badge = (row: HTMLElement) => row.querySelector('[data-slot="badge"]')?.textContent;
+    expect(badge(died)).toBeTruthy();
+    expect(badge(died)).not.toEqual(badge(disabled));
   });
 
   it("names the tools a running server promoted, and how many", async () => {
@@ -160,7 +160,8 @@ describe("Mcp", () => {
 
     const row = await screen.findByRole("listitem", { name: "desk-notes" });
     expect(row.textContent).toMatch(/3 tools/);
-    expect(row.textContent).toContain("search, append, tag");
+    // Each tool by name, one chip apiece.
+    for (const tool of ["search", "append", "tag"]) expect(within(row).getByText(tool)).toBeTruthy();
     expect(row.textContent).toContain("mcp_desk-notes");
   });
 
@@ -256,7 +257,7 @@ describe("Mcp", () => {
     answers({ servers: [server("desk-notes", { state: { state: "disabled" }, tools: [] })] });
     render(<Mcp state={showing()} />);
 
-    const button = await screen.findByRole("button", { name: /turn on/i });
+    const button = await screen.findByRole("switch", { name: /turn .* on/i });
     invoke.mockImplementation((command: string) => {
       if (command === "set_mcp_server_enabled") {
         return Promise.resolve(
@@ -287,7 +288,7 @@ describe("Mcp", () => {
     answers({ servers: [server("desk-notes")] });
     render(<Mcp state={showing()} />);
 
-    const button = await screen.findByRole("button", { name: /turn off/i });
+    const button = await screen.findByRole("switch", { name: /turn .* off/i });
     button.click();
 
     expect(invoke).toHaveBeenCalledWith("set_mcp_server_enabled", {
@@ -302,7 +303,7 @@ describe("Mcp", () => {
     answers({ servers: [server("desk-notes", { state: { state: "disabled" }, tools: [] })] });
     render(<Mcp state={showing()} />);
 
-    const button = await screen.findByRole("button", { name: /turn on/i });
+    const button = await screen.findByRole("switch", { name: /turn .* on/i });
     invoke.mockImplementation((command: string) => {
       if (command === "set_mcp_server_enabled") return Promise.reject("it would not start");
       return Promise.resolve({ path: PATH, problem: null, servers: [] });

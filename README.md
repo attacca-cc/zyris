@@ -244,13 +244,27 @@ push-to-talk key for anybody to hold.
 first time this machine connects with the voice on, Zyris makes a session for it — with the one
 agent on your account, or, if there are several, the one named under `agent` in `voice.json` in
 this computer's data directory — and keeps using it. If that chat is deleted on Attacca, the next
-connection makes a new one. The Conversation tab shows both sides as they happen.
+connection makes a new one. The Conversation tab shows both sides as they happen, and is where
+Zyris opens.
 
 **Which session it talks to is chosen at the top of the Conversation tab**: a project, then a
 session in it, or **New session** to start one there (with a choice of agent when the account has
 more than one). The choice is kept in `voice.json` like the first. Switching does not bring the
 old conversation along — the tab starts empty on the new session — because Zyris only hears a
 session's turns live, from the moment it starts listening to it.
+
+**You can type as well as talk.** The box at the foot of the Conversation tab sends a message to
+the same session, and its answer is shown whether or not listening is on. Beside it, **Read aloud**
+switches reading answers aloud on and off (it is remembered, and on by default), the microphone
+button turns listening on and off, and a **Stop** button appears while an answer is being read.
+
+The colours say how far each line has got. What you say is grey and italic while it is being
+transcribed, grey until it has been sent, and white after. Each sentence of an answer is dark red
+while it is written and has no audio yet, grey once its audio is made, white from the moment it
+starts playing, and red when it will never be read — dropped after an interruption, or taken out
+by the filter, as code blocks and links are. With reading aloud off, answers are simply white.
+Behind the conversation a faint sphere of dots moves with your voice while you talk, and four bars
+follow the speaker while the answer is read.
 
 **Korean and English are both understood and both spoken.** Whisper works out which language each
 turn is in, and the voice reads each sentence in the language its script says: Hangul as Korean,
@@ -260,7 +274,9 @@ word for word — but that is the voice being heard by whisper, not a person by 
 
 **Pressing the key while an answer is being read stops it**, and stops the agent writing it. What
 you say next is sent with a note in front of it saying how much of the answer you heard, so the
-agent knows where you cut in. Answers are read aloud only while listening is on.
+agent knows where you cut in. The **Stop** button does the same. Answers are read aloud only while
+listening is on and **Read aloud** is switched on; switching it off mid-answer stops the speaker
+without interrupting the agent.
 
 ### The push-to-talk key
 

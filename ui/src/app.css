@@ -1,379 +1,162 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+/* Bundled rather than fetched: the window's CSP allows only 'self'. */
+@import "pretendard/dist/web/variable/pretendardvariable.css";
+@import "@fontsource-variable/space-grotesk";
+
+/* The zyris.attacca.cc palette — `src/app/globals.css` in ridanit-ruma/zyris-attacca-cc — as
+   shadcn's token names, so the components read the same names they are written against. There
+   is one theme: the window is dark, like the site. */
 :root {
-  color-scheme: light dark;
-  --fg: #12151c;
-  --muted: #5d6472;
-  --bg: #f6f7f9;
-  --card: #ffffff;
-  --line: #e2e5ea;
-  --on: #1f9d5a;
-  --off: #b3b8c2;
-  --problem: #b4232b;
-  --warn: #8a5a00;
+  color-scheme: dark;
+  --radius: 0.5rem;
+
+  --background: #0f0d0a;
+  --foreground: #e8e2dc;
+  --heading: #f1ede8;
+  --card: #15110e;
+  --card-foreground: #e8e2dc;
+  --popover: #1a1512;
+  --popover-foreground: #e8e2dc;
+  --primary: #c9734d;
+  --primary-foreground: #ffffff;
+  --secondary: #221c18;
+  --secondary-foreground: #f1ede8;
+  --muted: #1d1814;
+  --muted-foreground: #9c948d;
+  --subtle: #6f675f;
+  --accent: #221c18;
+  --accent-foreground: #f1ede8;
+  --destructive: #e5534b;
+  --success: #7fb069;
+  --warning: #d9a441;
+  --border: #2a221d;
+  --input: #3a3029;
+  --ring: #c9734d;
+  --sidebar: #0b0907;
+  --sidebar-border: #231c17;
+  --inset: #120f0c;
+
+  /* How far a sentence of the agent's answer has got. See `conversation/colors.ts`. */
+  --tone-pending: #8f3a33;
+  --tone-voiced: #8a827b;
+  --tone-spoken: #f1ede8;
+  --tone-filtered: #e5534b;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fg: #e8eaee;
-    --muted: #9aa2b1;
-    --bg: #14171d;
-    --card: #1b1f27;
-    --line: #2a2f3a;
-    --off: #5d6472;
-    --problem: #ef6b73;
-    --warn: #d9a441;
+@theme inline {
+  --font-sans: "Pretendard Variable", Pretendard, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Space Grotesk Variable", "Pretendard Variable", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 6px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-heading: var(--heading);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-inset: var(--inset);
+  --color-tone-pending: var(--tone-pending);
+  --color-tone-voiced: var(--tone-voiced);
+  --color-tone-spoken: var(--tone-spoken);
+  --color-tone-filtered: var(--tone-filtered);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  /* Everything is sized in rem, so this one line scales the whole window: 16px at the 1000px the
+     window opens at, growing to 20px. A tiling window manager hands the window the whole screen,
+     and at a fixed size the interface became a small island in the middle of it. */
+  html {
+    font-size: clamp(16px, 0.5vw + 11px, 20px);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans text-sm antialiased;
+    margin: 0;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 10px;
+    border: 3px solid var(--background);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
-/* Everything below is sized in rem, so this one line scales the whole window. 16px at the
-   1000px the window opens at, growing with it to 22px: a tiling window manager hands the window
-   the whole screen, and at a fixed size the interface became a narrow column of small type in the
-   middle of it. */
-html { font-size: clamp(16px, 0.6vw + 10px, 22px); }
-
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font: 0.875rem/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+@keyframes zy-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes zy-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
 }
 
-.screen {
-  max-width: 34rem;
-  margin: 0 auto;
-  padding: 3rem 1.5rem;
+@utility animate-caret {
+  animation: zy-caret 1.1s steps(1, end) infinite;
+}
+@utility animate-soft-pulse {
+  animation: zy-pulse 1.4s ease-in-out infinite;
 }
 
-h1 { font-size: 1.35rem; margin: 0 0 0.5rem; font-weight: 620; }
-.lead { color: var(--muted); margin: 0 0 2rem; }
-.muted { color: var(--muted); }
-.problem { color: var(--problem); }
-/* A caveat, not a failure: what was asked for happened, and something about this machine
-   still leaves it weaker than it sounds. Reading as an error would overstate it; reading as a
-   note would hide it. */
-.warn { color: var(--warn); }
-.mono { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; overflow-wrap: anywhere; }
-
-.steps { padding-left: 1.2rem; margin: 0 0 1.5rem; }
-.steps li { margin-bottom: 0.75rem; }
-
-.code {
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 1.5rem;
-  letter-spacing: 0.14em;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.35rem 0.6rem;
+@media (prefers-reduced-motion: reduce) {
+  .animate-caret,
+  .animate-soft-pulse,
+  .animate-spin {
+    animation: none;
+  }
 }
-
-.link {
-  background: none;
-  border: none;
-  padding: 0;
-  color: inherit;
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-  overflow-wrap: anywhere;
-}
-
-.status-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.5rem; }
-.status-head h1 { margin: 0; }
-.dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; }
-.dot-on { background: var(--on); }
-.dot-off { background: var(--off); }
-
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1.2rem; margin: 0; }
-.facts dt { color: var(--muted); }
-.facts dd { margin: 0; min-width: 0; }
-
-/* Navigation. The tabs are `TABS` in state.ts and an equality check; see the comment in App.tsx
-   for why there is no router. */
-.shell { display: flex; min-height: 100vh; }
-/* `min-width: 0` is what keeps a long path in the log from widening the screen instead of
-   wrapping inside it: a flex item's default minimum is its content. */
-.shell > .screen { flex: 1 1 auto; min-width: 0; }
-
-.sidebar {
-  flex: 0 0 10.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 3rem 0.6rem;
-  border-right: 1px solid var(--line);
-}
-
-.tab {
-  appearance: none;
-  background: none;
-  border: none;
-  border-radius: 7px;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-  padding: 0.4rem 0.65rem;
-  text-align: left;
-}
-.tab:hover { color: var(--fg); }
-.tab-on {
-  background: var(--card);
-  box-shadow: inset 0 0 0 1px var(--line);
-  color: var(--fg);
-  font-weight: 620;
-}
-
-.screen.screen-wide { max-width: 46rem; }
-
-h2 { font-size: 1.02rem; margin: 0 0 0.6rem; font-weight: 620; }
-section { margin-bottom: 2rem; }
-/* Server-supplied text lands in these: a dropped tool's reason and a `ServerState::Failed`
-   reason are both written by something outside this program. One long unbroken token — a path, a
-   URL, a package name — would be the only thing on the MCP screen that could scroll it sideways,
-   which the screen rules forbid at any width. Everywhere else foreign text is rendered sets the
-   same rule. */
-.note { font-size: 0.9rem; overflow-wrap: anywhere; }
-
-.panel {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 0.9rem 1.1rem 1rem;
-  margin-bottom: 2rem;
-}
-.panel p { margin: 0.45rem 0 0; }
-.switch-row { display: flex; align-items: center; gap: 0.6rem 1rem; flex-wrap: wrap; }
-.switch-state {
-  align-items: center;
-  display: flex;
-  flex: 1 1 18rem;
-  gap: 0.6rem;
-  margin: 0;
-  min-width: 0;
-}
-.switch-state .dot { flex: none; }
-
-.button {
-  appearance: none;
-  background: var(--fg);
-  border: none;
-  border-radius: 7px;
-  color: var(--card);
-  cursor: pointer;
-  font: inherit;
-  font-weight: 620;
-  padding: 0.35rem 1rem;
-}
-.button:hover { opacity: 0.88; }
-/* Registering a scheduled task or enabling a unit is three processes and not instant; the
-   button says so rather than letting a second press arrive mid-install. */
-.button:disabled { cursor: default; opacity: 0.5; }
-
-.caps, .calls { list-style: none; margin: 0; padding: 0; }
-/* `>`, not a descendant: the MCP screen nests a `.dropped` list inside a `.caps` row, and a
-   descendant selector drew every absence with the same full-width rule that separates one server
-   from the next — so the indentation `.dropped` exists for was undone by the thing above it. */
-.caps > li, .call { border-top: 1px solid var(--line); padding: 0.6rem 0; }
-.caps > li:first-child, .call:first-child { border-top: none; padding-top: 0; }
-.cap-head { margin: 0; }
-.cap-tools { color: var(--muted); font-size: 0.9rem; margin: 0.15rem 0 0; overflow-wrap: anywhere; }
-
-.call-head {
-  align-items: baseline;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.2rem 0.9rem;
-  justify-content: space-between;
-}
-.call-what { min-width: 0; overflow-wrap: anywhere; }
-.call-when { align-items: baseline; display: flex; flex: none; gap: 0.7rem; }
-/* Wraps, then stops at two lines. The full value is the row's title; the alternative is a
-   sideways scrollbar, and the screen rules rule that out. */
-.call-detail {
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  color: var(--muted);
-  display: -webkit-box;
-  font-size: 0.9rem;
-  margin: 0.15rem 0 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-
-/* The sending machine's name and the file's, neither of them chosen by this program: a peer
-   directory is named after what Attacca calls that node, and the file name came from whoever
-   sent it. So it gets `.call-detail`'s rule rather than `.call-what`'s — wrap, then stop at two
-   lines, with the whole value on the row itself. A name long enough to scroll this screen
-   sideways is a name somebody chose to be that long. */
-.inbox-what {
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  display: -webkit-box;
-  min-width: 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-
-.badge {
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 0.78rem;
-  padding: 0.05rem 0.55rem;
-  white-space: nowrap;
-}
-.badge-allowed { border-color: var(--on); color: var(--on); }
-.badge-refused { border-color: var(--warn); color: var(--warn); }
-.badge-failed { border-color: var(--problem); color: var(--problem); }
-
-/* An MCP server's state. Named apart from the three above even where the colour is the same: an
-   audit line's outcome and a server's state are different facts, and one set of names for both
-   would make a rename on either side silently repaint the other.
-
-   The three that are not running are **two** colours, not three. A switch somebody moved is muted;
-   a process that fell over and one that never started are both the problem colour, because both
-   are something to act on and a reader scanning eight rows only has to see which ones are wrong.
-   The words tell them apart — "turned off", "stopped", "did not start" — and the sentence under
-   the row carries the rest. */
-.badge-on { border-color: var(--on); color: var(--on); }
-.badge-off { border-color: var(--off); color: var(--muted); }
-.badge-down { border-color: var(--problem); color: var(--problem); }
-
-/* The server list's shape, for a machine that has none. `pre-wrap` rather than `pre`: a long
-   argument would otherwise be the one thing on this screen that scrolls sideways. */
-.snippet {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 0.9rem;
-  margin: 0.6rem 0;
-  overflow-wrap: anywhere;
-  padding: 0.6rem 0.8rem;
-  white-space: pre-wrap;
-}
-
-/* Tools a server offered that this machine did not announce. Indented under the server rather
-   than bulleted beside its own tools, because these are absences and must not read as a second
-   list of things an agent can call. */
-.dropped { list-style: none; margin: 0.15rem 0 0; padding: 0; }
-.dropped li { margin-top: 0.15rem; }
-
-/* The fingerprint a person compares against another machine's screen.
-   `pre-wrap` keeps the string exactly as the core rendered it — eight groups of four uppercase
-   hex digits, single spaces — and, with the default `overflow-wrap`, the only place a line can
-   break is one of those spaces. So a group is never split across lines, the order never changes,
-   and selecting the value copies the spaces with it. Nothing here re-cases or truncates it: a
-   comparison that fails because of the rendering teaches people to stop making the comparison. */
-.fingerprint {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 1.15rem;
-  letter-spacing: 0.04em;
-  margin: 0 0 0.6rem;
-  padding: 0.6rem 0.8rem;
-  white-space: pre-wrap;
-}
-
-.answers { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 0.6rem; }
-/* Neither answer is the recommended one. Approving is not styled as the thing to press and
-   refusing is not styled as a failure, so both get this rather than `.button`'s filled face. */
-.button-quiet {
-  background: none;
-  box-shadow: inset 0 0 0 1px var(--line);
-  color: var(--fg);
-}
-.button-quiet:hover { background: var(--card); opacity: 1; }
-
-/* The microphone list on the Voice tab. A radio and a device name on one line, wrapping rather
-   than pushing the screen sideways: names on Linux are routinely longer than this window is
-   wide, and a person picking a microphone should never have to scroll horizontally to read one.
-   Its own class rather than styling `.caps label`, which the MCP and Tools lists share. */
-.choices label { align-items: baseline; display: flex; gap: 0.5rem; overflow-wrap: anywhere; }
-.choices input { flex: none; }
-
-/* The microphone, speaker and speech model dropdowns. Full width so a long Linux device name
-   is read whole rather than cut at the arrow. */
-.picker {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  color: var(--fg);
-  font: inherit;
-  max-width: 100%;
-  padding: 0.4rem 0.5rem;
-  width: 100%;
-}
-
-/* The Debug screen's log. A list rather than a table: the lines are different lengths and a
-   table would make every one as tall as the longest cell in its row. */
-.trace {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-.trace li {
-  padding: 0.15rem 0.4rem;
-  border-left: 3px solid transparent;
-  overflow-wrap: anywhere;
-}
-/* The two halves of the pipeline, and the things that went wrong. Colour is the *second*
-   signal here and never the only one — every line says what it is in words. */
-.trace-in { border-left-color: #4a90d9; }
-.trace-out { border-left-color: #58a55c; }
-.trace-bad { border-left-color: #c0392b; }
-.trace-at { opacity: 0.55; }
-
-/* The Conversation screen. */
-.turns { list-style: none; margin: 0; padding: 0; }
-.turn { margin: 0 0 1.1rem; padding: 0 0 0 0.7rem; border-left: 3px solid transparent; }
-.turn-you { border-left-color: #4a90d9; }
-.turn-agent { border-left-color: #58a55c; }
-.turn-who { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; }
-.turn p { margin: 0.2rem 0; }
-
-.sentences { list-style: none; margin: 0.45rem 0 0; padding: 0; }
-/* Each sentence is text, a state in words, and a bar. The bar is never the only signal —
-   a reader who cannot see it still gets "62% of 1.4s" beside it. */
-.sentence {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0 0.6rem;
-  align-items: baseline;
-  padding: 0.2rem 0;
-  font-size: 0.85rem;
-}
-.sentence-text { overflow-wrap: anywhere; }
-.sentence-state { opacity: 0.65; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.sentence-bar {
-  grid-column: 1 / -1;
-  height: 3px;
-  border-radius: 2px;
-  background: color-mix(in srgb, currentColor 12%, transparent);
-  overflow: hidden;
-}
-.sentence-bar > span { display: block; height: 100%; background: #58a55c; }
-/* A look at a turn still being spoken. Provisional, and it has to read that way: the next
-   look re-reads the whole recording and may revise it. */
-.sofar { opacity: 0.75; font-style: italic; }
-.sofar-mark { font-style: normal; font-size: 0.8em; opacity: 0.7; }
-.turn-woke { border-left-color: #b8860b; }
-
-/* Which session the conversation is in. Dropdowns on one wrapping line, so a narrow window
-   stacks them rather than scrolling sideways. */
-.session-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem 1rem;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-.session-picker .picker { max-width: 22rem; }
-.session-picker > p { flex-basis: 100%; margin: 0; }
-.session-actions { display: flex; gap: 0.5rem; }

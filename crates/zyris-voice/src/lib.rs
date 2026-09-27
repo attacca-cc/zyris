@@ -135,9 +135,19 @@ pub mod wake;
 #[cfg(feature = "voice")]
 mod run;
 
+// The one reader of the answer stream: traces what the window shows, forwards what the speaker
+// reads. See the module comment for why it had to be separate from `session::Speaking`.
+#[cfg(feature = "voice")]
+pub mod answers;
+
 // What the Voice screen renders. **Not behind the feature**, because `zyris-app` may contain no
 // `#[cfg(feature = "voice")]` and therefore has to be able to name the answer on either build.
 pub mod view;
+
+// How loud the microphone and the speaker are, for the Conversation screen's backdrop. Outside
+// the feature for the same reason `view` is: `zyris-app` forwards `Level` on either build.
+pub mod meter;
+pub use meter::{LEVELS_PER_SECOND, Level, Source};
 
 /// Why a build with no `voice` feature will never hear anything.
 ///
@@ -307,7 +317,13 @@ pub enum Trace {
     Dropped,
     /// The agent started a new answer. What follows is a turn of its own, even with nothing said
     /// on this machine in between — an answer to a message typed somewhere else, say.
-    Answering,
+    ///
+    /// `aloud` is whether this answer will be read: reading aloud is switched on and a speaker is
+    /// open. When it is false no `Fragment` follows, and the window shows the text as it is.
+    #[serde(rename_all = "camelCase")]
+    Answering { aloud: bool },
+    /// The agent stopped writing the answer. Speech may well go on after this: writing is faster.
+    Answered,
     /// The speaker ran out of things to play.
     Spoke,
     /// Speech was cut off by the key, and how much of the answer had been heard.
@@ -425,6 +441,16 @@ impl Voice {
             Some(tx) => tx.subscribe(),
             None => broadcast::channel(1).1,
         }
+    }
+
+    /// A new subscription to how loud the microphone and the speaker are. Closed on a disabled
+    /// voice, for [`Voice::events`]'s reason.
+    pub fn levels(&self) -> broadcast::Receiver<Level> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.levels();
+        }
+        broadcast::channel(1).1
     }
 
     /// Whether this can work **at all** — a build with an audio stack, on a machine with a
@@ -572,6 +598,44 @@ impl Voice {
             engine.choose_compute(transcribe.clone(), speak.clone()).await;
         }
         let _ = (transcribe, speak);
+        self.look().await
+    }
+
+    /// Read answers aloud or not, now and at the next launch.
+    pub async fn set_read_aloud(&self, on: bool) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.set_read_aloud(on).await;
+        }
+        let _ = on;
+        self.look().await
+    }
+
+    /// Send a typed message to the conversation's session.
+    pub async fn send_text(&self, text: String) -> Result<(), String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            return engine.send_text(text).await;
+        }
+        let _ = text;
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
+    /// Stop reading the answer aloud, as the push-to-talk key would. Nothing if nothing is.
+    pub fn stop_speaking(&self) {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.stop_speaking();
+        }
+    }
+
+    /// Choose how loud answers are read, now and at the next launch.
+    pub async fn choose_volume(&self, gain: f32) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_volume(gain).await;
+        }
+        let _ = gain;
         self.look().await
     }
 

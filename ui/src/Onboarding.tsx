@@ -1,5 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ExternalLinkIcon, LoaderCircleIcon } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { CopyButton } from "@/components/CopyButton";
+import { Note, Problem } from "@/components/IconTile";
+import { Mark } from "@/components/Wordmark";
 import type { State } from "./state";
 
 export function Onboarding({ state }: { state: State }) {
@@ -49,45 +55,78 @@ export function Onboarding({ state }: { state: State }) {
   }
 
   return (
-    <main className="screen">
-      <h1>Authorize this computer</h1>
-      <p className="lead">
-        Zyris hands this machine to your Attacca agents. Approve it once and it reconnects on its
-        own from then on.
-      </p>
+    <main className="flex h-full items-center justify-center overflow-y-auto bg-[radial-gradient(900px_600px_at_50%_-10%,rgba(201,115,77,0.10),transparent_60%)] px-6 py-10">
+      <div className="flex w-full max-w-[28.75rem] flex-col items-center gap-7">
+        <div className="flex flex-col items-center gap-3.5 text-center">
+          <Mark className="h-10" />
+          <h1 className="m-0 font-display text-[1.75rem] font-semibold tracking-tight text-heading">
+            Authorize this computer
+          </h1>
+          <p className="m-0 text-[0.90625rem] leading-relaxed text-muted-foreground">
+            Zyris hands this machine to your Attacca agents. Approve it once and it reconnects on its own from
+            then on.
+          </p>
+        </div>
 
-      {code ? (
-        <>
-          <ol className="steps">
-            <li>
-              Open{" "}
-              <button className="link" onClick={() => openVerificationUrl(code.verificationUri)}>
-                {code.verificationUri}
-              </button>
-            </li>
-            <li>
-              Enter this code: <code className="code">{code.userCode}</code>
-            </li>
-          </ol>
-          <p className="muted">Waiting for approval.</p>
-        </>
-      ) : (
-        // Do not say "asking" and "failed" at once: once a problem is known, this placeholder
-        // steps aside and lets the problem message below speak for the screen.
-        !state.problem && <p className="muted">Asking Attacca for a code.</p>
-      )}
+        <Card className="w-full gap-5 p-6">
+          {code ? (
+            <>
+              <Step number={1} title="Open the approval page">
+                <Button size="lg" onClick={() => openVerificationUrl(code.verificationUri)}>
+                  Open {code.verificationUri.replace(/^https?:\/\//, "")}
+                  <ExternalLinkIcon />
+                </Button>
+              </Step>
+              <Step number={2} title="Enter this code">
+                <div className="flex items-center gap-2.5">
+                  <code className="flex-1 rounded-[0.625rem] border bg-inset py-2.5 text-center font-mono text-[1.75rem] font-medium tracking-[0.18em] text-heading">
+                    {code.userCode}
+                  </code>
+                  <CopyButton text={code.userCode} label="Copy the code" />
+                </div>
+              </Step>
+              <div className="flex items-center justify-center gap-2 border-t border-sidebar-border pt-4 text-[0.8125rem] text-muted-foreground">
+                <LoaderCircleIcon className="size-3.5 animate-spin text-primary" aria-hidden="true" />
+                Waiting for approval
+              </div>
+            </>
+          ) : (
+            // Do not say "asking" and "failed" at once: once a problem is known, this placeholder
+            // steps aside and lets the problem message below speak for the screen.
+            !state.problem && (
+              <div className="flex items-center justify-center gap-2 text-[0.8125rem] text-muted-foreground">
+                <LoaderCircleIcon className="size-3.5 animate-spin text-primary" aria-hidden="true" />
+                Asking Attacca for a code
+              </div>
+            )
+          )}
 
-      {state.problem ? (
-        // A core-originated problem here (EnrolmentFailed or SetupFailed) means the connector
-        // has already stopped — unlike `openError` below, clicking again will not help.
-        <p className="problem">
-          {state.problem}
-          <br />
-          <span className="muted">Restart Zyris to try again.</span>
-        </p>
-      ) : (
-        openError && <p className="problem">{openError}</p>
-      )}
+          {state.problem ? (
+            // A core-originated problem here means the connector has already stopped — unlike
+            // `openError` below, clicking again will not help.
+            <div className="flex flex-col gap-1 text-center">
+              <Problem>{state.problem}</Problem>
+              <Note>Restart Zyris to try again.</Note>
+            </div>
+          ) : (
+            openError && <Problem className="text-center">{openError}</Problem>
+          )}
+        </Card>
+      </div>
     </main>
+  );
+}
+
+function Step({ number, title, children }: { number: number; title: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-3.5">
+      <span className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-input bg-secondary text-xs font-semibold text-heading">
+        {number}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-2.5">
+        <span className="text-sm text-foreground">{title}</span>
+        {children}
+      </div>
+    </div>
   );
 }

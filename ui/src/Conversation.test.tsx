@@ -1,285 +1,193 @@
-import { act, cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Every channel the screen listens on, by name, so a test can speak on the one it means.
 const { listen, emit } = vi.hoisted(() => {
-  const handlers: ((message: { payload: unknown }) => void)[] = [];
+  const handlers = new Map<string, ((message: { payload: unknown }) => void)[]>();
   return {
-    listen: vi.fn((_name: string, handler: (message: { payload: unknown }) => void) => {
-      handlers.push(handler);
+    listen: vi.fn((name: string, handler: (message: { payload: unknown }) => void) => {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
       return Promise.resolve(() => {
-        handlers.splice(handlers.indexOf(handler), 1);
+        handlers.set(name, (handlers.get(name) ?? []).filter((h) => h !== handler));
       });
     }),
-    emit: (payload: unknown) => handlers.forEach((handler) => handler({ payload })),
+    emit: (name: string, payload: unknown) =>
+      (handlers.get(name) ?? []).forEach((handler) => handler({ payload })),
   };
 });
 vi.mock("@tauri-apps/api/event", () => ({ listen }));
-// The session picker above the turns asks the Rust side for sessions; these tests are about the
-// turns, so it is told there is no connection and says so.
-vi.mock("@tauri-apps/api/core", () => ({
-  invoke: vi.fn(() => Promise.reject("this machine is not connected to Attacca yet")),
-}));
+
+const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import { Conversation } from "./Conversation";
 import type { Trace } from "./state";
 
-async function show(steps: Trace[]) {
+// A voice state with listening on, a key bound and reading aloud on.
+function voiceScreen(change: { readAloud?: boolean; listening?: boolean } = {}) {
+  return {
+    voice: {
+      support: { state: "ready" },
+      listening: change.listening === false ? { state: "off" } : { state: "on", device: "mic" },
+      speaking: { state: "session", id: "s1" },
+      readAloud: change.readAloud ?? true,
+    },
+    hotkey: { state: "working", trigger: "<Control>space", releaseConfirmed: true },
+  };
+}
+
+function answering(command: string, args?: unknown): Promise<unknown> {
+  switch (command) {
+    case "voice_state":
+      return Promise.resolve(voiceScreen());
+    case "set_read_aloud":
+      return Promise.resolve(voiceScreen({ readAloud: (args as { readAloud: boolean }).readAloud }));
+    case "conversation_sessions":
+      return Promise.reject("this machine is not connected to Attacca yet");
+    default:
+      return Promise.resolve(null);
+  }
+}
+
+async function open() {
   render(<Conversation hidden={false} />);
   await act(async () => {
     await Promise.resolve();
   });
+}
+
+async function steps(...trace: Trace[]) {
   await act(async () => {
-    steps.forEach(emit);
+    trace.forEach((step) => emit("voice-trace", step));
   });
-  return document.body.textContent ?? "";
 }
 
-// One whole exchange, which most tests below start from and then cut short.
-const AN_ANSWER: Trace[] = [
-  { step: "key", down: true },
-  { step: "recording", started: true },
-  { step: "key", down: false },
-  { step: "recording", started: false },
-  { step: "recorded", seconds: 2.5, speechSeconds: 1.8, kept: true },
-  { step: "transcribing", seconds: 2.1 },
-  { step: "transcribed", text: "what is the time", tookMs: 880 },
-  { step: "sent", text: "what is the time" },
-  { step: "delta", kind: "Assistant", text: "It is four. " },
-  { step: "fragment", text: "It is four." },
-  { step: "synthesised", text: "It is four.", seconds: 1.4, tookMs: 2100 },
-  { step: "queued", text: "It is four.", atSample: 0, samples: 61740 },
-];
-
-function bars(): number[] {
-  return Array.from(document.querySelectorAll<HTMLElement>(".sentence-bar > span")).map((bar) =>
-    Number.parseInt(bar.style.width, 10),
-  );
+function tones(): [string, string][] {
+  return Array.from(document.querySelectorAll<HTMLElement>("[data-tone]")).map((span) => [
+    span.textContent ?? "",
+    span.dataset.tone ?? "",
+  ]);
 }
 
+beforeEach(() => invoke.mockImplementation(answering));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
 });
 
 describe("the Conversation screen", () => {
-  it("names both ways into a turn, and why one of them stops while it is talking", async () => {
-    render(<Conversation hidden={false} />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    const page = document.body.textContent ?? "";
-    expect(page).toMatch(/wake word/i);
-    expect(page).toMatch(/push-to-talk key/i);
-    // The rule somebody will otherwise report as a bug: it stops listening while it speaks.
-    expect(page).toMatch(/while nothing is being read aloud/i);
+  it("invites a first message and names the key", async () => {
+    await open();
+    expect(screen.getByText("Start a conversation")).toBeTruthy();
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Hold\s*Ctrl\s*Space\s*to talk/);
   });
 
-  it("shows a turn the wake word opened as one the wake word opened", async () => {
-    // "I said the phrase and it heard me" and "I pressed the key" are different things to be
-    // looking at when nothing happens next, and what whisper heard is what says why it woke.
-    const page = await show([{ step: "woke", heard: "Hey, Zyris." }, ...AN_ANSWER.slice(1)]);
-    expect(page).toMatch(/woke/i);
-    expect(page).toContain("Hey, Zyris.");
-    expect(page).toContain("what is the time");
+  it("listens on the trace and the levels, and nothing else", async () => {
+    await open();
+    const names = listen.mock.calls.map(([name]) => name).sort();
+    expect(names).toEqual(["voice-level", "voice-trace"]);
   });
 
-  it("shows both sides of one exchange", async () => {
-    const page = await show(AN_ANSWER);
-    expect(page).toContain("what is the time");
-    expect(page).toContain("It is four.");
-    expect(page).toMatch(/You/);
-    expect(page).toMatch(/Attacca/);
+  it("shows what you say grey and italic while it is transcribed, then white once sent", async () => {
+    await open();
+    await steps({ step: "recording", started: true }, { step: "hearing", text: "what is", seconds: 1.5 });
+    const bubble = () => document.querySelector<HTMLElement>('[data-turn="you"] div');
+    expect(bubble()?.textContent).toBe("what is");
+    expect(bubble()?.className).toMatch(/italic/);
+    expect(bubble()?.className).toMatch(/text-muted-foreground/);
+
+    await steps({ step: "recording", started: false }, { step: "transcribed", text: "what is the time", tookMs: 900 });
+    expect(bubble()?.className).not.toMatch(/italic/);
+    expect(bubble()?.className).toMatch(/text-muted-foreground/);
+
+    await steps({ step: "sent", text: "what is the time" });
+    expect(bubble()?.className).toMatch(/text-heading/);
   });
 
-  it("does not pretend to transcribe as you speak", async () => {
-    // Whisper answers once per look and re-reads the whole recording each time, so there is
-    // no growing transcript. Between the key coming up and the answer landing there is
-    // nothing to show, and the screen says so rather than leaving the last look sitting there
-    // looking settled.
-    const page = await show(AN_ANSWER.slice(0, 5));
-    expect(page).toMatch(/writing it down/i);
-    expect(page).not.toContain("what is the time");
-  });
+  it("streams the answer and colours each sentence by how far it has got", async () => {
+    await open();
+    await steps(
+      { step: "answering", aloud: true },
+      { step: "delta", kind: "Assistant", text: "It is four. It is late" },
+    );
+    expect(tones()).toEqual([["It is four. It is late", "pending"]]);
 
-  it("shows what has been heard so far while the key is still down", async () => {
-    // The half of the request that needed the session to look at a turn in progress. It is
-    // marked as provisional because it is: the next look re-reads the recording from the
-    // start and may revise it.
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "hearing", text: "what is the", seconds: 1.5 },
+    await steps(
+      { step: "fragment", text: "It is four." },
+      { step: "synthesised", text: "It is four.", seconds: 1, tookMs: 500 },
+    );
+    expect(tones()).toEqual([
+      ["It is four.", "voiced"],
+      [" It is late", "pending"],
     ]);
-    expect(page).toContain("what is the");
-    expect(page).toMatch(/still listening/i);
+
+    await steps(
+      { step: "queued", text: "It is four.", atSample: 0, samples: 44100 },
+      { step: "playing", atSample: 100 },
+    );
+    expect(tones()[0]).toEqual(["It is four.", "spoken"]);
+    expect(screen.getByRole("status").textContent).toMatch(/Speaking/);
   });
 
-  it("replaces a look rather than appending to it", async () => {
-    // Whisper revises. Concatenating would produce "what iswhat is the time" and would read
-    // as the model stuttering rather than as it changing its mind.
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "hearing", text: "what is", seconds: 1.5 },
-      { step: "hearing", text: "what is the time", seconds: 3.0 },
-    ]);
-    expect(page).toContain("what is the time");
-    expect(page).not.toMatch(/what iswhat/);
+  it("shows an answer that is not read aloud as it is", async () => {
+    await open();
+    await steps({ step: "answering", aloud: false }, { step: "delta", kind: "Assistant", text: "Hello." });
+    expect(tones()).toEqual([["Hello.", "plain"]]);
   });
 
-  it("drops a look once the key has come up", async () => {
-    // The turn is no longer being recorded, so a look is stale by definition. Leaving it on
-    // screen beside "writing it down" would be two answers to one question.
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "hearing", text: "what is", seconds: 1.5 },
-      { step: "recording", started: false },
-    ]);
-    expect(page).toMatch(/writing it down/i);
-    expect(page).not.toContain("what is");
+  it("sends a typed message and shows it before it arrives", async () => {
+    await open();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Hi there" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(invoke).toHaveBeenCalledWith("send_conversation_text", { text: "Hi there" });
+    const bubble = document.querySelector<HTMLElement>('[data-turn="you"] div');
+    expect(bubble?.textContent).toBe("Hi there");
+    expect(bubble?.className).toMatch(/text-muted-foreground/);
+
+    await steps({ step: "sent", text: "Hi there" });
+    expect(document.querySelector<HTMLElement>('[data-turn="you"] div')?.className).toMatch(/text-heading/);
   });
 
-  it("fills a sentence as it is actually played, not as time passes", async () => {
-    await show(AN_ANSWER);
-    expect(bars()).toEqual([0]);
+  it("says when a typed message did not go", async () => {
+    invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "send_conversation_text" ? Promise.reject("not connected") : answering(command, args),
+    );
+    await open();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Hi" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText(/Not sent — not connected/)).toBeTruthy();
+  });
 
+  it("switches reading aloud through the Rust side", async () => {
+    await open();
+    const toggle = await screen.findByRole("button", { name: /read aloud/i });
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
     await act(async () => {
-      emit({ step: "playing", atSample: 30870 } satisfies Trace);
+      fireEvent.click(toggle);
     });
-    expect(bars()).toEqual([50]);
-    expect(document.body.textContent ?? "").toMatch(/50% of 1\.4s/);
-
-    await act(async () => {
-      emit({ step: "playing", atSample: 61740 } satisfies Trace);
-    });
-    expect(bars()).toEqual([100]);
-    expect(document.body.textContent ?? "").toMatch(/heard/i);
+    expect(invoke).toHaveBeenCalledWith("set_read_aloud", { readAloud: false });
+    expect(screen.getByRole("button", { name: /read aloud/i }).getAttribute("aria-pressed")).toBe("false");
   });
 
-  it("tells four states of one sentence apart", async () => {
-    // Waiting for the voice, made, queued, heard. Collapsing any two of them would hide the
-    // thing this screen was asked for: how much has been turned into audio, against how much
-    // has actually been played.
-    const said: string[] = [];
-    const steps: Trace[] = [
+  it("stops speaking on request", async () => {
+    await open();
+    await steps(
+      { step: "answering", aloud: true },
       { step: "fragment", text: "One." },
-      { step: "synthesised", text: "One.", seconds: 1.0, tookMs: 900 },
-      { step: "queued", text: "One.", atSample: 0, samples: 44100 },
-      { step: "playing", atSample: 44100 },
-    ];
-    for (let upto = 1; upto <= steps.length; upto += 1) {
-      await show(steps.slice(0, upto));
-      said.push(document.querySelector(".sentence-state")?.textContent ?? "");
-      cleanup();
-    }
-    expect(new Set(said).size).toBe(4);
-    expect(said[0]).toMatch(/waiting for the voice/i);
-    expect(said[3]).toMatch(/heard/i);
+      { step: "queued", text: "One.", atSample: 0, samples: 10 },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(invoke).toHaveBeenCalledWith("stop_speaking");
   });
 
-  it("marks a sentence finished after the key went down as never heard", async () => {
-    // It was made and nobody will hear it. Showing it as queued would have the screen claim
-    // audio that was thrown away.
-    const page = await show([
-      { step: "fragment", text: "One." },
-      { step: "synthesised", text: "One.", seconds: 1.0, tookMs: 900 },
-      { step: "dropped" },
-    ]);
-    expect(page).toMatch(/not heard/i);
-  });
-
-  it("does not read the agent's working-out as part of its answer", async () => {
-    // `Reasoning` deltas are the agent thinking, and `speak::Filter` already refuses to say
-    // them aloud. Putting them in the conversation would contradict what is being spoken.
-    const page = await show([
-      { step: "delta", kind: "Reasoning", text: "The user wants the time." },
-      { step: "delta", kind: "Assistant", text: "It is four." },
-    ]);
-    expect(page).toContain("It is four.");
-    expect(page).not.toContain("The user wants the time.");
-  });
-
-  it("says a turn the silence rule threw away was never sent", async () => {
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "recording", started: false },
-      { step: "recorded", seconds: 0.4, speechSeconds: 0.1, kept: false },
-    ]);
-    expect(page).toMatch(/nothing was sent/i);
-    expect(page).toMatch(/below the floor/i);
-  });
-
-  it("says a transcript that did not reach Attacca did not reach it", async () => {
-    // The gap that existed until the loop was joined: without this the turn would sit there
-    // looking sent, and the missing answer would read as the agent being slow.
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "recording", started: false },
-      { step: "transcribed", text: "hello", tookMs: 400 },
-      { step: "sendFailed", reason: "the connection is gone" },
-    ]);
-    expect(page).toMatch(/nothing was sent/i);
-    expect(page).toContain("the connection is gone");
-  });
-
-  it("says the rest was not read aloud after an interruption", async () => {
-    const page = await show([...AN_ANSWER, { step: "interrupted", heard: 1, unheard: 2 }]);
-    expect(page).toMatch(/not read aloud/i);
-    // The note goes in front of the next thing said, not into a message of its own.
-    expect(page).toMatch(/what you say next tells the agent where it was cut off/i);
-  });
-
-  it("does not leave a turn writing itself down forever when transcription fails", async () => {
-    const page = await show([
-      { step: "recording", started: true },
-      { step: "recording", started: false },
-      { step: "failed", reason: "whisper could not be reached" },
-    ]);
-    expect(page).not.toMatch(/writing it down/i);
-    expect(page).toMatch(/nothing was sent/i);
-    expect(page).toContain("whisper could not be reached");
-  });
-
-  it("says a failure on the agent's side as a line of its own", async () => {
-    const page = await show([...AN_ANSWER, { step: "failed", reason: "the speaker went away" }]);
-    expect(page).toContain("It is four.");
-    expect(page).toContain("the speaker went away");
-  });
-
-  it("keeps two answers apart when nothing was said between them", async () => {
-    // An answer to a message typed on another device arrives with no turn of yours before it.
-    await show([
-      { step: "answering" },
-      { step: "delta", kind: "Assistant", text: "First." },
-      { step: "answering" },
-      { step: "delta", kind: "Assistant", text: "Second." },
-    ]);
-    expect(document.querySelectorAll(".turn-agent")).toHaveLength(2);
-  });
-
-  it("goes on folding the conversation while another tab is showing", async () => {
-    render(<Conversation hidden={true} />);
-    await act(async () => {
-      await Promise.resolve();
-    });
-    await act(async () => {
-      AN_ANSWER.forEach(emit);
-    });
-    const screen = document.querySelector(".screen");
-    expect(screen?.hasAttribute("hidden")).toBe(true);
-    expect(screen?.textContent).toContain("what is the time");
-  });
-
-  it("attributes a repeated sentence to the one being worked on", async () => {
-    // An answer may say the same thing twice. Matching from the start would put the second
-    // sentence's audio onto the first and leave the second looking stuck forever.
-    await show([
-      { step: "fragment", text: "Yes." },
-      { step: "synthesised", text: "Yes.", seconds: 1.0, tookMs: 900 },
-      { step: "queued", text: "Yes.", atSample: 0, samples: 44100 },
-      { step: "fragment", text: "Yes." },
-      { step: "synthesised", text: "Yes.", seconds: 1.0, tookMs: 900 },
-      { step: "queued", text: "Yes.", atSample: 44100, samples: 44100 },
-      { step: "playing", atSample: 66150 },
-    ]);
-    expect(bars()).toEqual([100, 50]);
+  it("turns the microphone on from the composer", async () => {
+    invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "voice_state" ? Promise.resolve(voiceScreen({ listening: false })) : answering(command, args),
+    );
+    await open();
+    fireEvent.click(await screen.findByRole("button", { name: "Turn the microphone on" }));
+    expect(invoke).toHaveBeenCalledWith("set_voice_listening", { listening: true });
   });
 });

@@ -44,6 +44,12 @@ const RECHECK_MS = 1000;
 // which it does not do in the app, and must not appear to do here.
 const dispatch = () => {};
 
+// The element that holds the whole fingerprint, exactly: the tiles are spans inside it with the
+// single spaces between them, so its text is the string the other machine shows.
+function fingerprint(value: string): HTMLElement {
+  return screen.getByText((_, element) => element?.tagName === "P" && element.textContent === value);
+}
+
 function approve(): HTMLButtonElement {
   return screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement;
 }
@@ -108,7 +114,7 @@ describe("PeerConfirm", () => {
 
     // The new question is on the screen — this is a swap, not an unmount — and neither answer is
     // live on it.
-    expect(screen.getByText(SECOND.fingerprint)).toBeTruthy();
+    expect(fingerprint(SECOND.fingerprint)).toBeTruthy();
     expect(approve().disabled).toBe(true);
     expect(refuse().disabled).toBe(true);
 

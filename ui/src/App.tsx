@@ -7,7 +7,7 @@ import { Status } from "./Status";
 import { Tools } from "./Tools";
 import { Voice } from "./Voice";
 import { Conversation } from "./Conversation";
-import { Debug } from "./Debug";
+import { Sidebar } from "./components/Sidebar";
 import {
   fetchLatestEvent,
   fetchPendingPeer,
@@ -15,37 +15,7 @@ import {
   reduce,
   subscribe,
   subscribeResync,
-  TABS,
-  type Screen,
-  type Tab,
 } from "./state";
-
-// The list of screens lives in state.ts beside the `Tab` type it defines — see the comment there.
-// MCP sits beside Tools rather than inside it: both are about what this machine hands an agent,
-// but one of them is a list of processes with switches on it and the other is a record of what
-// ran, and the Tools screen was already three sections long.
-//
-// No router. There are no URLs here — the window is one process with one screen showing — so a
-// router would be a dependency, a history stack and a set of paths to keep in step, in exchange
-// for what an equality check already does.
-function Sidebar({ screen, onNavigate }: { screen: Screen; onNavigate: (to: Tab) => void }) {
-  return (
-    <nav className="sidebar" aria-label="Screens">
-      {TABS.map((tab) => (
-        <button
-          key={tab.id}
-          type="button"
-          // Exactly one item is current, decided by equality against the screen that is showing.
-          className={tab.id === screen ? "tab tab-on" : "tab"}
-          aria-current={tab.id === screen ? "page" : undefined}
-          onClick={() => onNavigate(tab.id)}
-        >
-          {tab.label}
-        </button>
-      ))}
-    </nav>
-  );
-}
 
 export function App() {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -104,12 +74,20 @@ export function App() {
   }, []);
 
   // Over everything, including onboarding, and it does not touch `screen`: the screen underneath
-  // is handed back untouched the moment the question is answered. First because it is the only
-  // thing here with a deadline — an agent's send is blocked on it and refuses itself if nobody
-  // answers — and because it cannot collide with onboarding in practice anyway: a question comes
-  // from an agent, an agent needs a connection, and a connection needs this machine enrolled.
-  if (state.question) return <PeerConfirm question={state.question} dispatch={dispatch} />;
-  if (state.screen === "onboarding") return <Onboarding state={state} />;
+  // is handed back untouched the moment the question is answered. A dialog rather than a screen
+  // of its own, so the person can see what they were doing when an agent asked — and it cannot
+  // be dismissed except by answering, because an agent's send is blocked on it and refuses
+  // itself if nobody answers.
+  const question = state.question && <PeerConfirm question={state.question} dispatch={dispatch} />;
+
+  if (state.screen === "onboarding") {
+    return (
+      <>
+        <Onboarding state={state} />
+        {question}
+      </>
+    );
+  }
   // The sidebar appears only once this machine is enrolled: before that there is nothing to
   // navigate to, and offering a choice of screens to someone who has not authorized the computer
   // yet is offering them a way to miss the one thing they have to do.
@@ -120,8 +98,12 @@ export function App() {
   // anywhere. `pastEnrolment` in state.ts names the two it claims for the same reason.
   if (state.screen !== "starting") {
     return (
-      <div className="shell">
-        <Sidebar screen={state.screen} onNavigate={(to) => dispatch({ kind: "navigate", to })} />
+      <div className="flex h-full overflow-hidden">
+        <Sidebar
+          screen={state.screen}
+          state={state}
+          onNavigate={(to) => dispatch({ kind: "navigate", to })}
+        />
         {state.screen === "status" && <Status state={state} />}
         {state.screen === "tools" && <Tools state={state} dispatch={dispatch} />}
         {/* Only `state` in: what this screen lists is read through a command, and the one thing
@@ -132,17 +114,20 @@ export function App() {
             says arrives on its own Tauri event rather than through the core bus, because a
             microphone is not something the node did about its connection to Attacca. */}
         {state.screen === "voice" && <Voice />}
+        {/* Mounted for the life of the window and hidden when another screen is showing: the
+            turns live nowhere else, and what is said while another screen is open still counts. */}
         <Conversation hidden={state.screen !== "conversation"} />
-        {state.screen === "debug" && <Debug />}
         {/* No props: what this screen shows is read off the machine through a command, not
             folded into core state, because nothing outside it needs the answer. */}
         {state.screen === "settings" && <Settings />}
+        {question}
       </div>
     );
   }
   return (
-    <main className="screen">
-      <p className="muted">Starting.</p>
+    <main className="flex h-full items-center justify-center">
+      <p className="text-muted-foreground">Starting…</p>
+      {question}
     </main>
   );
 }

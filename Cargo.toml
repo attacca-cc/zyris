@@ -204,21 +204,25 @@ windows-core = "0.62.2"
 # from the same checkout gives one copy of each with nothing to patch.
 #
 # Upgrading is a seven-place edit: every `rev` below, together.
-zyris = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917", default-features = false, features = ["caps", "client", "hostname", "enroll", "p2p"] }
+#
+# Pinned at b1a6828 (zyris-protocol#47, `send_message_with`: a message names the agent that
+# answers it). Between eefbde4 and it, #44 gave `cancel_turn` a delivery point and `turn_events` a
+# `Cancelled` frame, and #45 gave `ZSessionEvent` an `id`.
+zyris = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3", default-features = false, features = ["caps", "client", "hostname", "enroll", "p2p"] }
 # The `attacca_api` capability the server announces back. It is where `peer_publish` lives, which
 # is how another of this account's machines learns where to dial this one — and `zyris` does not
 # re-export it: the facade carries `caps` and `p2p` as modules and leaves this one a crate of its
 # own, so a node that talks to Attacca names it directly.
-zyris-attacca = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917" }
-zyris-fs = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917" }
-zyris-input = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917" }
-zyris-screen = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917" }
-zyris-terminal = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917" }
+zyris-attacca = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3" }
+zyris-fs = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3" }
+zyris-input = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3" }
+zyris-screen = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3" }
+zyris-terminal = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3" }
 # `send` is `file_transfer.send_to` — the rendezvous client and the iroh dial. `listen` is the
 # accept loop. Both, because this machine does both directions: upstream keeps them apart so a
 # node can carry only the one it needs, and a desktop needs both. Together they reach `zyris-p2p`
 # and through it iroh, which is the same copy `zyris`'s `p2p` feature above resolves.
-zyris-transfer = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "eefbde4ce11635828eea871e79a685dedc0ea917", features = ["send", "listen"] }
+zyris-transfer = { git = "https://github.com/attacca-cc/zyris-protocol", rev = "b1a68282e475e10d08be367184bf7dacf74b39a3", features = ["send", "listen"] }
 
 # Full debug info is what makes the link stage expensive on a 3.6 GB machine.
 # `line-tables-only` keeps file and line in every backtrace frame and drops the rest.

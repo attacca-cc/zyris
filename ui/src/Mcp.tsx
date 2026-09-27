@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { State } from "./state";
+import { ChevronDownIcon, InfoIcon, ServerIcon, TriangleAlertIcon } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+import { IconTile, Mono, Note, Problem } from "@/components/IconTile";
+import { Page, PageHeader } from "@/components/PageHeader";
+import { cn } from "@/lib/utils";
 
 // One tool a server offered that this machine did not announce, and why. `zyris_mcp::DroppedTool`,
 // serialized with both field names as written.
@@ -65,16 +72,16 @@ function toolCount(count: number): string {
 //
 // The sentence under the row carries the meaning; this is only the thing the eye lands on first,
 // and its job is that a reader scanning a list of eight servers can see which one is wrong.
-function badge(state: ServerState): { label: string; className: string } {
+function badge(state: ServerState): { label: string; variant: "success" | "secondary" | "destructive" } {
   switch (state.state) {
     case "running":
-      return { label: "running", className: "badge-on" };
+      return { label: "running", variant: "success" };
     case "disabled":
-      return { label: "turned off", className: "badge-off" };
+      return { label: "turned off", variant: "secondary" };
     case "died":
-      return { label: "stopped", className: "badge-down" };
+      return { label: "stopped", variant: "destructive" };
     case "failed":
-      return { label: "did not start", className: "badge-down" };
+      return { label: "did not start", variant: "destructive" };
   }
 }
 
@@ -186,214 +193,171 @@ export function Mcp({ state }: { state: State }) {
   }
 
   return (
-    <main className="screen screen-wide">
-      <h1>MCP</h1>
-      <p className="lead">
-        The MCP servers this computer is configured to run, and the tools each one adds to what
-        your agents can call here.
-      </p>
+    <Page wide>
+      <PageHeader
+        title="MCP servers"
+        description="Extra tools from MCP servers on this computer. Your agents can call them like any other tool."
+      />
 
-      {problem && <p className="problem">{problem}</p>}
+      {problem && <Problem>{problem}</Problem>}
 
       {list === undefined ? (
-        problem ? null : (
-          <p className="muted">Reading the server list.</p>
-        )
+        problem ? null : <Note>Reading the server list.</Note>
       ) : list.problem ? (
-        // Never the "nothing configured" line on a failed read. A file with a typo in it starts no
-        // servers, exactly as a machine nobody has configured does, and telling the person who
-        // wrote that file they have configured nothing sends them looking for the file they are
-        // already looking at.
-        <section>
-          <p className="problem">
-            The server list could not be read, so none of the servers in it were started. Nothing
-            else on this computer is affected. {list.problem}
-          </p>
-          <p className="muted note">
-            The file is <span className="mono">{list.path}</span>. Zyris reads it when it starts,
-            so fix it and restart Zyris.
-          </p>
-        </section>
+        <Card>
+          <Problem>
+            The server list could not be read, so none of the servers in it were started. Nothing else on
+            this computer is affected. {list.problem}
+          </Problem>
+          <Note>
+            The file is <Mono>{list.path}</Mono>. Zyris reads it when it starts, so fix it and restart
+            Zyris.
+          </Note>
+        </Card>
       ) : list.servers.length === 0 ? (
-        <section>
-          <p className="muted">No MCP servers are configured on this computer.</p>
-          <p className="muted note">
-            Zyris looks for them in <span className="mono">{list.path}</span>, which does not have
-            to exist. An entry names the server, the command to run and the arguments to pass it,
-            and may add <span className="mono">"enabled": false</span> to be listed here without
-            being started:
-          </p>
-          <pre className="snippet">{EXAMPLE}</pre>
-          <p className="muted note">
-            Its tools are then announced as one capability called{" "}
-            <span className="mono">mcp_desk-notes</span> — <span className="mono">mcp_</span> and
-            the name you gave it. A name with a dot in it cannot be announced, and two entries
-            sharing a name stop every server in the file from starting. Zyris reads this file when
-            it starts, so restart it after an edit.
-          </p>
-        </section>
+        <Card className="items-start">
+          <CardHeader className="items-center">
+            <IconTile tone="muted">
+              <ServerIcon />
+            </IconTile>
+            <div className="flex flex-col gap-0.5">
+              <CardTitle>No MCP servers are configured on this computer</CardTitle>
+              <CardDescription>
+                Add one to <Mono>{list.path}</Mono> and restart Zyris. An entry names the server, the
+                command to run and its arguments:
+              </CardDescription>
+            </div>
+          </CardHeader>
+          <pre className="m-0 w-full overflow-x-auto rounded-lg border bg-inset px-4 py-3 font-mono text-xs text-heading">
+            {EXAMPLE}
+          </pre>
+          <Note>
+            Its tools are announced as one capability called <Mono>mcp_desk-notes</Mono> — <Mono>mcp_</Mono>{" "}
+            and the name you gave it. Add <Mono>"enabled": false</Mono> to list a server here without
+            starting it. A name with a dot in it cannot be announced.
+          </Note>
+        </Card>
       ) : (
-        <section>
-          <ul className="caps">
+        <>
+          <ul className="m-0 flex list-none flex-col gap-3 p-0">
             {list.servers.map((server) => {
-              const { label, className } = badge(server.state);
+              const { label, variant } = badge(server.state);
               const inFlight = moving === server.name;
+              const running = server.state.state === "running";
+              const broken = server.state.state === "died" || server.state.state === "failed";
               return (
                 <li key={rowName(server)} aria-label={rowName(server)}>
-                  <div className="call-head">
-                    <span className="mono call-what">{rowName(server)}</span>
-                    <span className="call-when">
-                      <span className={`badge ${className}`}>{label}</span>
+                  <Card className="gap-3 py-4.5">
+                    <CardHeader className="items-center">
+                      <IconTile tone={broken ? "destructive" : running ? "accent" : "muted"}>
+                        {broken ? <TriangleAlertIcon /> : <ServerIcon />}
+                      </IconTile>
+                      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                        <CardTitle className={cn(!running && !broken && "text-[#bdb5ad]")}>{rowName(server)}</CardTitle>
+                        <span className="truncate font-mono text-xs text-muted-foreground" title={commandLine(server)}>
+                          {commandLine(server)}
+                        </span>
+                      </div>
+                      <Badge variant={variant}>{label}</Badge>
                       {/* No switch for a server that can never be announced: starting it fails for
                           the same reason every time, and the fix is the rename below. */}
                       {server.capability !== null && (
-                        <button
-                          type="button"
-                          className="button button-quiet"
+                        <Switch
+                          aria-label={`Turn ${rowName(server)} ${running ? "off" : "on"}`}
+                          checked={running}
                           disabled={inFlight}
-                          onClick={() => toggle(server)}
-                        >
-                          {server.state.state === "running"
-                            ? inFlight
-                              ? "Turning off"
-                              : "Turn off"
-                            : inFlight
-                              ? "Turning on"
-                              : "Turn on"}
-                        </button>
+                          onCheckedChange={() => toggle(server)}
+                        />
                       )}
-                    </span>
-                  </div>
+                    </CardHeader>
 
-                  <p className="mono call-detail" title={commandLine(server)}>
-                    {commandLine(server)}
-                  </p>
-
-                  {server.state.state === "running" && (
-                    <>
-                      {/* Not "…that an agent can call": with the pause switch on it cannot, and
-                          a sentence that has to be re-read against another screen to be true is
-                          one this project has shipped three times too often. */}
-                      <p className="note muted">
-                        Announced as <span className="mono">{server.capability}</span>, with{" "}
-                        {toolCount(server.tools.length)}.
-                      </p>
-                      {server.tools.length > 0 && (
-                        <p className="mono cap-tools">{server.tools.join(", ")}</p>
+                    <div className="flex flex-col gap-2 pl-12">
+                      {running && (
+                        <>
+                          {server.tools.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5">
+                              {server.tools.map((tool) => (
+                                <span key={tool} className="rounded-md border bg-muted px-2 py-0.5 font-mono text-xs text-foreground">
+                                  {tool}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <Note className="text-xs">
+                            Announced as <Mono className="text-xs">{server.capability}</Mono>, with{" "}
+                            {toolCount(server.tools.length)}.
+                          </Note>
+                        </>
                       )}
-                    </>
-                  )}
-
-                  {server.state.state === "disabled" && (
-                    <p className="note muted">
-                      Turned off. It is not running, and nothing of its is announced.
-                    </p>
-                  )}
-
-                  {server.state.state === "died" && (
-                    // The distinction the core carries all the way here, and the last place it
-                    // could be thrown away. Both are "not announced"; only this one is a process
-                    // to restart, and nobody chose it.
-                    <p className="note problem">
-                      Its process stopped on its own — nobody asked for that — so its tools are no
-                      longer announced. Turn it on again to start it afresh.
-                    </p>
-                  )}
-
-                  {/* The reason on its own. The badge beside the name already reads "did not
-                      start", and this used to be rendered behind a second "It did not start." —
-                      so a row whose reason began the same way said it twice. `zyris_tools`'s
-                      `startup_failure` is where the wording lives now, and it is written to be
-                      the whole of what the row says. */}
-                  {server.state.state === "failed" && (
-                    <p className="note problem">{server.state.reason}</p>
-                  )}
-
-                  {server.capability === null && (
-                    // `capability_name` refuses exactly two names, and both are fixed the same
-                    // way. Said as the action rather than as the rule.
-                    <p className="note problem">
-                      This server's name cannot be announced: a capability name cannot be empty and
-                      cannot contain a dot, because an agent addresses a tool as{" "}
-                      <span className="mono">capability.tool</span>. Rename it in the server list
-                      and restart Zyris.
-                    </p>
-                  )}
-
-                  {server.dropped.length > 0 && (
-                    // An agent sees a tool list, never a list of absences, so it cannot tell a
-                    // tool that was dropped from one this server never had. This is the only place
-                    // anybody could.
-                    <ul className="dropped">
-                      {server.dropped.map((tool) => (
-                        <li key={tool.name} className="note muted">
-                          <span className="mono">{tool.name}</span> is not announced: {tool.reason}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-
-                  {refused[server.name] && <p className="note problem">{refused[server.name]}</p>}
+                      {server.state.state === "disabled" && (
+                        <Note className="text-xs">Turned off. It is not running, and nothing of its is announced.</Note>
+                      )}
+                      {server.state.state === "died" && (
+                        <Problem>
+                          Its process stopped on its own — nobody asked for that — so its tools are no longer
+                          announced. Turn it on again to start it afresh.
+                        </Problem>
+                      )}
+                      {/* The reason on its own: the badge already says it did not start. */}
+                      {server.state.state === "failed" && <Problem>{server.state.reason}</Problem>}
+                      {server.capability === null && (
+                        <Problem>
+                          This server's name cannot be announced: a capability name cannot be empty or
+                          contain a dot, because an agent addresses a tool as <Mono>capability.tool</Mono>.
+                          Rename it in the server list and restart Zyris.
+                        </Problem>
+                      )}
+                      {server.dropped.length > 0 && (
+                        <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                          {server.dropped.map((tool) => (
+                            <li key={tool.name} className="text-xs text-muted-foreground">
+                              <Mono className="text-xs">{tool.name}</Mono> is not announced: {tool.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {refused[server.name] && <Problem>{refused[server.name]}</Problem>}
+                    </div>
+                  </Card>
                 </li>
               );
             })}
           </ul>
 
-          {/* The claim that would be easiest to get wrong, and the one this project has got wrong
-              four times. `guarded.rs` switches argument summarising off for every capability named
-              `mcp_*`: the allowlist it would otherwise use matches on spelling, and a third party's
-              `path` or `command` shares the spelling with this machine's own and none of the
-              meaning — it could as easily be a password. The three words are `Outcome`'s three and
-              nothing more: `allowed` there means the call was accepted, which for an MCP tool says
-              nothing about whether the server was happy with it.
-
-              The second sentence is the fifth thing this copy got wrong, and it was found by
-              reading `Guarded::dispatch` rather than by running anything: the line is written
-              *when the call finishes*, and a call that is cut off before it finishes — an agent
-              that gave up on a slow server, a connection that dropped — is carried by a task
-              `zyris-core` aborts, which never reaches the line. Saying "the log records that an
-              MCP tool was called" claimed more than that. */}
-          <p className="muted note">
-            A promoted tool goes through the same pause switch and the same audit log as this
-            computer's own. When a call finishes, the log records that an MCP tool was called —
-            when, which server, which tool, and whether the call was allowed, refused or failed —
-            and not what was asked of it. Nothing an agent sends to one of these servers is
-            written down.
-          </p>
-          <p className="muted note">
-            A call that never finishes is not written down either. These servers are given no time
-            limit, so one that accepts a request and goes quiet waits until the agent gives up or
-            the connection drops — and a call cut off that way leaves no line at all. The same is
-            true of this computer's own <span className="mono">terminal.exec</span> with no
-            timeout.
-          </p>
-
-          {/* The switch is a real switch and it really is only for this run. A toggle that forgot
-              silently would be a screen that lied, so this is the sentence that makes not writing
-              the file a decision rather than a gap. `zyris_tools::Servers::set_enabled` has the
-              three reasons. */}
-          <p className="muted note">
-            Turning a server off here stops its process and takes its tools off what this computer
-            announces, straight away. It lasts until Zyris restarts, and so does turning one on:
-            the server list decides what starts, and Zyris never writes to it. To keep a server
-            off, or to add or remove one, edit <span className="mono">{list.path}</span> — an entry
-            with <span className="mono">"enabled": false</span> is listed here and not started.
-            Zyris reads that file when it starts, so restart it after an edit.
-          </p>
-
-          <p className="muted note">
-            Each server is run directly, with its arguments passed exactly as the file has them:
-            nothing goes through a shell, so a command shown above may need quoting to run by hand.
-          </p>
-        </section>
+          <details className="group rounded-lg border border-sidebar-border px-4 py-3 text-[0.8125rem] text-muted-foreground">
+            <summary className="flex cursor-pointer list-none items-center gap-2 text-foreground">
+              <InfoIcon className="size-4 text-muted-foreground" aria-hidden="true" />
+              How these servers are run and recorded
+              <ChevronDownIcon className="ml-auto size-4 transition-transform group-open:rotate-180" aria-hidden="true" />
+            </summary>
+            <div className="mt-3 flex flex-col gap-2">
+              {/* The claims easiest to get wrong, and the ones this project has got wrong most. */}
+              <p className="m-0">
+                A promoted tool goes through the same pause switch and audit log as this computer's own.
+                When a call finishes, the log records that an MCP tool was called — when, which server,
+                which tool, and whether it was allowed, refused or failed — and not what was asked of it.
+              </p>
+              <p className="m-0">
+                A call that never finishes is not written down either. These servers are given no time
+                limit, so one that goes quiet waits until the agent gives up or the connection drops.
+              </p>
+              <p className="m-0">
+                A switch moved here lasts until Zyris restarts. To keep a server off, or to add or remove
+                one, edit <Mono>{list.path}</Mono> — an entry with <Mono>"enabled": false</Mono> is listed
+                and not started.
+              </p>
+              <p className="m-0">
+                Each server is run directly, with its arguments exactly as the file has them: nothing goes
+                through a shell.
+              </p>
+            </div>
+          </details>
+        </>
       )}
-    </main>
+    </Page>
   );
 }
 
-// What an entry looks like, for a machine that has none. Two spaces and real values rather than
-// placeholders in angle brackets: this is meant to be copied and edited, and a person who has
-// never seen the file should be able to tell which parts are theirs.
 const EXAMPLE = `{
   "servers": [
     { "name": "desk-notes", "command": "notes-mcp", "args": ["--root", "/home/you/notes"] }

@@ -1,5 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  FileIcon,
+  HistoryIcon,
+  InboxIcon,
+  PauseIcon,
+  PlayIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
+  TerminalIcon,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { IconTile, Mono, Note, Problem } from "@/components/IconTile";
+import { Page, PageHeader } from "@/components/PageHeader";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MAX_TOOL_CALLS, type Action, type State, type ToolCallRow } from "./state";
@@ -280,211 +296,239 @@ export function Tools({ state, dispatch }: { state: State; dispatch: (action: Ac
     });
   }
 
-  return (
-    <main className="screen screen-wide">
-      <h1>Tools</h1>
-      <p className="lead">
-        What your Attacca agents can reach on this computer, what they have run, and what your
-        other machines have sent here.
-      </p>
+  const activity = (
+    <>
+      {callsProblem && <Problem>{callsProblem}</Problem>}
+      {rows.length === 0 && !callsProblem ? (
+        <Empty icon={<HistoryIcon />}>No agent has run anything on this computer yet.</Empty>
+      ) : rows.length === 0 ? null : (
+        <Card className="gap-0 overflow-hidden p-0">
+          <div className="grid grid-cols-[4.5rem_minmax(0,12rem)_minmax(0,1fr)_5.5rem] gap-4 border-b px-5 py-2.5 text-xs text-subtle max-[820px]:grid-cols-[4.5rem_minmax(0,1fr)_5.5rem]">
+            <span>Time</span>
+            <span>Tool</span>
+            <span className="max-[820px]:hidden">Details</span>
+            <span className="text-right">Result</span>
+          </div>
+          <ol className="m-0 list-none p-0">
+            {rows.map((row, index) => (
+              <li
+                key={`${row.at}-${index}`}
+                className="grid grid-cols-[4.5rem_minmax(0,12rem)_minmax(0,1fr)_5.5rem] items-center gap-4 border-b border-[#1d1814] px-5 py-3 text-[0.8125rem] last:border-b-0 max-[820px]:grid-cols-[4.5rem_minmax(0,1fr)_5.5rem]"
+              >
+                <time className="text-muted-foreground tabular-nums" dateTime={row.at} title={row.at}>
+                  {clockTime(row.at)}
+                </time>
+                <span className="flex min-w-0 items-center gap-2 text-heading">
+                  <span aria-hidden="true" className="size-1.5 shrink-0 rounded-[2px] bg-primary" />
+                  <span className="truncate font-mono text-xs">
+                    {row.capability} · {row.tool}
+                  </span>
+                </span>
+                {/* A command line or a path will be longer than the row: it is cut to one line
+                    here, with the whole value on hover. Nothing on this screen scrolls sideways. */}
+                <span className="truncate font-mono text-xs text-muted-foreground max-[820px]:hidden" title={row.detail}>
+                  {row.detail}
+                </span>
+                <span className="text-right">
+                  <Badge variant={OUTCOME[row.outcome] ?? "secondary"}>{row.outcome}</Badge>
+                </span>
+              </li>
+            ))}
+          </ol>
+          <div className="flex items-center justify-between gap-4 border-t px-5 py-3 text-xs text-subtle">
+            <span>
+              Showing {rows.length} of the last {MAX_TOOL_CALLS} this window keeps, newest first.
+            </span>
+            {announcement && (
+              <span className="truncate" title={announcement.auditLog}>
+                Full record: <Mono className="text-xs">{announcement.auditLog}</Mono>
+              </span>
+            )}
+          </div>
+        </Card>
+      )}
+    </>
+  );
 
-      <section className="panel">
-        <div className="switch-row">
-          <p className="switch-state">
-            <span className={state.paused ? "dot dot-off" : "dot dot-on"} aria-hidden="true" />
-            {state.paused
-              ? "Paused. No new commands or file access will be accepted."
-              : "Running. Agents can run commands and read and write files as you."}
-          </p>
-          <button type="button" className="button" onClick={toggle}>
-            {state.paused ? "Resume" : "Pause"}
-          </button>
-        </div>
-        {/* The switch stops calls arriving; it does not reach into one that is already under
-            way. Saying so is the whole point — a person who reads "paused" as "nothing is
-            running" has been told something untrue. See zyris_tools::gate for the exact list. */}
-        <p className="muted note">
-          Pausing stops new calls only. A command already running and a stream already open keep
-          going until they finish.
-        </p>
-        {switchProblem && <p className="problem">{switchProblem}</p>}
-      </section>
-
-      <section>
-        <h2>What this computer offers</h2>
-        {announcement ? (
-          <>
-            <ul className="caps">
+  const offers = (
+    <>
+      {announcement ? (
+        <>
+          <Card className="gap-0 overflow-hidden p-0">
+            <ul className="m-0 list-none p-0">
               {announcement.capabilities.map((capability) => (
-                <li key={capability.name}>
-                  <p className="cap-head">
-                    <span className="mono">{capability.name}</span>{" "}
-                    <span className="muted">
+                <li key={capability.name} className="flex flex-col gap-2 border-b border-[#1d1814] px-5 py-3.5 last:border-b-0">
+                  <div className="flex items-center gap-2.5">
+                    <TerminalIcon className="size-4 text-primary" aria-hidden="true" />
+                    <span className="font-mono text-[0.8125rem] text-heading">{capability.name}</span>
+                    <span className="text-xs text-subtle">
                       version {capability.version} · {toolCount(capability.tools.length)}
                     </span>
-                  </p>
-                  <p className="mono cap-tools">{capability.tools.join(", ")}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 pl-6.5">
+                    {capability.tools.map((tool) => (
+                      <span key={tool} className="rounded-md border bg-muted px-2 py-0.5 font-mono text-xs text-foreground">
+                        {tool}
+                      </span>
+                    ))}
+                  </div>
                 </li>
               ))}
             </ul>
-            <p className="muted note">
-              A path an agent sends without a leading slash starts in{" "}
-              <span className="mono">{announcement.root}</span>. That is where relative paths
-              start, not a boundary: an absolute path goes wherever it names, and a command can
-              work anywhere you can.
-            </p>
-          </>
-        ) : (
-          !announcementProblem && <p className="muted">Reading what this computer offers.</p>
-        )}
-        {/* Shown whether or not there is a list, which is the part that used to be missing. This
-            screen re-reads whenever a local MCP server moves, so a read failing *after* one has
-            succeeded is now an ordinary thing rather than a first-load case — and the list left on
-            the screen is then the last answer rather than the current one. Saying nothing would be
-            a correct-looking list that has quietly stopped being current. */}
-        {announcementProblem && (
-          <p className="problem note">
-            {announcementProblem}
-            {announcement && " What is listed above is the last answer this computer gave."}
-          </p>
-        )}
-      </section>
+          </Card>
+          <Note>
+            A path an agent sends without a leading slash starts in <Mono>{announcement.root}</Mono>. That
+            is where relative paths start, not a boundary: an absolute path goes wherever it names.
+          </Note>
+        </>
+      ) : (
+        !announcementProblem && <Note>Reading what this computer offers.</Note>
+      )}
+      {/* Shown whether or not there is a list: a read failing after one succeeded leaves the last
+          answer on screen, and saying nothing would be a correct-looking list gone stale. */}
+      {announcementProblem && (
+        <Problem>
+          {announcementProblem}
+          {announcement && " What is listed above is the last answer this computer gave."}
+        </Problem>
+      )}
+    </>
+  );
 
-      <section>
-        <h2>What has arrived</h2>
-        {inboxProblem ? (
-          // Never the "nothing yet" line on a failed read. The inbox is the one place on this
-          // machine a stranger's file is written to, and telling somebody it is empty because a
-          // directory would not open is the same confident false negative the audit tail shipped.
-          <p className="problem">{inboxProblem}</p>
-        ) : inbox === undefined ? (
-          <p className="muted">Reading what has arrived.</p>
-        ) : inbox === null ? (
-          <p className="muted">
-            File transfer is not running on this computer, so nothing can arrive here and there is
-            no inbox to read. Zyris says why in its log when it starts.
-          </p>
-        ) : (
-          <>
-            {inbox.length === 0 ? (
-              <p className="muted">Nothing has arrived yet.</p>
-            ) : (
-              <>
-                <ol className="calls">
-                  {inbox.map((entry) => {
-                    const when = arrived(entry.received_unix_ms);
-                    return (
-                      <li className="call" key={entry.path}>
-                        <div className="call-head">
-                          {/* Both names are text this program did not choose — the folder is
-                              named after the machine Attacca says sent the file, the file after
-                              whatever the sender called it — so both are set in a monospace face
-                              and only the word between them is the screen's own. A file named
-                              "from your laptop, approved" must not read as this row's wording. */}
-                          <span className="inbox-what" title={`${entry.name} from ${entry.from}`}>
-                            <span className="mono">{entry.name}</span>{" "}
-                            <span className="muted">
-                              from <span className="mono">{entry.from}</span>
-                            </span>
-                          </span>
-                          <span className="call-when">
-                            <span className="muted" title={`${entry.bytes} bytes`}>
-                              {fileSize(entry.bytes)}
-                            </span>
-                            {when ? (
-                              <time className="muted" dateTime={when.iso} title={when.iso}>
-                                {when.label}
-                              </time>
-                            ) : (
-                              // Zero is what upstream reports when the filesystem will not give
-                              // a modification time. Saying so beats dating the file to 1970.
-                              <span className="muted">time unknown</span>
-                            )}
-                          </span>
-                        </div>
-                        {/* Wraps and then stops at two lines, with the whole path on the row —
-                            the same rule the audit rows follow, and the reason nothing on this
-                            screen scrolls sideways. */}
-                        <p className="mono call-detail" title={entry.path}>
-                          {entry.path}
-                        </p>
-                      </li>
-                    );
-                  })}
-                </ol>
-                <p className="muted note">
-                  Showing {inbox.length === 1 ? "1 file" : `${inbox.length} files`}, newest first.
-                  The time is when the file was last written here, in this computer's local time —
-                  which is when it arrived, unless something has changed it since.
-                </p>
-              </>
-            )}
-            {/* The section sits under a pause switch that does not stop an arriving file and
-                beside an approval that does not gate one. Both are easy to read as covering this
-                list, and neither does: the confirmer is consulted on `send_to` and nowhere else,
-                and a delivery never asks this machine's agent surface for anything, so the gate
-                never sees it. Three times this project has shipped copy claiming more than the
-                code does; this paragraph is where the fourth would go. */}
-            <p className="muted note">
-              Any machine enrolled on your Attacca account can send files here, whether or not you
-              have approved it. Approving a machine decides what this computer will send to it, not
-              what arrives from it — and pausing does not stop a file arriving either, because
-              nothing an agent asks of this computer is involved in one.
-            </p>
-          </>
-        )}
-      </section>
-
-      <section>
-        <h2>What ran</h2>
-        {callsProblem ? (
-          // Never the "nothing yet" line on a failed read: that is a confident false negative
-          // about the one record of what touched this machine. The live rows above are still
-          // shown — they are what this window heard directly.
-          <p className="problem">{callsProblem}</p>
-        ) : null}
-        {rows.length === 0 && !callsProblem ? (
-          <p className="muted">No agent has run anything on this computer yet.</p>
-        ) : rows.length === 0 ? null : (
-          <>
-            <ol className="calls">
-              {rows.map((row, index) => (
-                <li className="call" key={`${row.at}-${index}`}>
-                  <div className="call-head">
-                    <span className="mono call-what">
-                      {row.capability} · {row.tool}
+  const received = (
+    <>
+      {inboxProblem ? (
+        <Problem>{inboxProblem}</Problem>
+      ) : inbox === undefined ? (
+        <Note>Reading what has arrived.</Note>
+      ) : inbox === null ? (
+        <Empty icon={<InboxIcon />}>
+          File transfer is not running on this computer, so nothing can arrive here. Zyris says why in its
+          log when it starts.
+        </Empty>
+      ) : inbox.length === 0 ? (
+        <Empty icon={<InboxIcon />}>Nothing has arrived yet.</Empty>
+      ) : (
+        <Card className="gap-0 overflow-hidden p-0">
+          <ol className="m-0 list-none p-0">
+            {inbox.map((entry) => {
+              const when = arrived(entry.received_unix_ms);
+              return (
+                <li key={entry.path} className="flex items-center gap-3 border-b border-[#1d1814] px-5 py-3 last:border-b-0">
+                  <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  {/* Both names are text this program did not choose, so both are monospace and
+                      only the word between them is the screen's own. */}
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5" title={entry.path}>
+                    <span className="truncate text-[0.8125rem] text-heading">
+                      <Mono>{entry.name}</Mono>{" "}
+                      <span className="text-muted-foreground">
+                        from <Mono>{entry.from}</Mono>
+                      </span>
                     </span>
-                    <span className="call-when">
-                      <time className="muted" dateTime={row.at} title={row.at}>
-                        {clockTime(row.at)}
-                      </time>
-                      <span className={`badge badge-${row.outcome}`}>{row.outcome}</span>
-                    </span>
+                    <span className="truncate font-mono text-xs text-subtle">{entry.path}</span>
                   </div>
-                  {/* A command line or a path will be longer than the row. It wraps and then
-                      stops at two lines, with the whole value on the row itself; nothing on
-                      this screen ever scrolls sideways. */}
-                  {row.detail && (
-                    <p className="mono call-detail" title={row.detail}>
-                      {row.detail}
-                    </p>
+                  <span className="shrink-0 text-xs text-muted-foreground" title={`${entry.bytes} bytes`}>
+                    {fileSize(entry.bytes)}
+                  </span>
+                  {when ? (
+                    <time className="w-28 shrink-0 text-right text-xs text-muted-foreground" dateTime={when.iso} title={when.iso}>
+                      {when.label}
+                    </time>
+                  ) : (
+                    <span className="w-28 shrink-0 text-right text-xs text-muted-foreground">time unknown</span>
                   )}
                 </li>
-              ))}
-            </ol>
-            <p className="muted note">
-              Showing {rows.length} of the last {MAX_TOOL_CALLS} this window keeps, newest first,
-              in this computer's local time.
-              {announcement && (
-                <>
-                  {" "}
-                  The whole record is <span className="mono">{announcement.auditLog}</span>.
-                </>
-              )}
-            </p>
-          </>
-        )}
-      </section>
-    </main>
+              );
+            })}
+          </ol>
+        </Card>
+      )}
+      {inbox !== undefined && inbox !== null && !inboxProblem && (
+        // Easy to read as covered by the pause switch or by approving a machine, and neither
+        // does: this is where claiming more than the code does would go.
+        <Note>
+          Any machine on your Attacca account can send files here, whether or not you approved it, and
+          pausing does not stop a file arriving.
+        </Note>
+      )}
+    </>
+  );
+
+  return (
+    <Page wide>
+      <PageHeader title="Tools" description="What your agents can do on this computer, and what they have done." />
+
+      <Card>
+        <CardHeader className="items-center">
+          <IconTile tone={state.paused ? "muted" : "accent"}>
+            {state.paused ? <ShieldOffIcon /> : <ShieldCheckIcon />}
+          </IconTile>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <CardTitle>{state.paused ? "Paused" : "Agents can use this computer"}</CardTitle>
+            <CardDescription>
+              {state.paused
+                ? "No new commands or file access will be accepted."
+                : "They run commands and read and write files as you."}{" "}
+              {/* The switch stops calls arriving; it does not reach into one already under way. */}
+              Pausing stops new calls only; anything already running finishes.
+            </CardDescription>
+          </div>
+          <Button variant={state.paused ? "default" : "outline"} onClick={toggle}>
+            {state.paused ? <PlayIcon /> : <PauseIcon />}
+            {state.paused ? "Resume" : "Pause"}
+          </Button>
+        </CardHeader>
+        {switchProblem && <Problem>{switchProblem}</Problem>}
+      </Card>
+
+      <Tabs defaultValue="activity">
+        <TabsList>
+          <TabsTrigger value="activity">
+            <HistoryIcon aria-hidden="true" />
+            Activity
+          </TabsTrigger>
+          <TabsTrigger value="offers">
+            <TerminalIcon aria-hidden="true" />
+            Capabilities
+            {announcement && <Count>{announcement.capabilities.length}</Count>}
+          </TabsTrigger>
+          <TabsTrigger value="received">
+            <InboxIcon aria-hidden="true" />
+            Received files
+            {inbox && inbox.length > 0 && <Count>{inbox.length}</Count>}
+          </TabsTrigger>
+        </TabsList>
+        {/* All three stay mounted, so each is read once and switching is instant. */}
+        <TabsContent value="activity" forceMount className="flex flex-col gap-3 data-[state=inactive]:hidden">
+          {activity}
+        </TabsContent>
+        <TabsContent value="offers" forceMount className="flex flex-col gap-3 data-[state=inactive]:hidden">
+          {offers}
+        </TabsContent>
+        <TabsContent value="received" forceMount className="flex flex-col gap-3 data-[state=inactive]:hidden">
+          {received}
+        </TabsContent>
+      </Tabs>
+    </Page>
+  );
+}
+
+const OUTCOME: Record<string, "success" | "warning" | "destructive"> = {
+  allowed: "success",
+  refused: "warning",
+  failed: "destructive",
+};
+
+function Count({ children }: { children: ReactNode }) {
+  return <span className="rounded-full bg-muted px-1.5 text-[0.6875rem] text-muted-foreground">{children}</span>;
+}
+
+// A tab with nothing in it yet.
+function Empty({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center [&>svg]:size-5 [&>svg]:text-subtle">
+      {icon}
+      <p className="m-0 max-w-md text-[0.8125rem] text-muted-foreground">{children}</p>
+    </div>
   );
 }

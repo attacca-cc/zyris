@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Both Tauri boundaries the app reaches through on startup. `listen` is the one under test here:
@@ -36,5 +36,38 @@ describe("App", () => {
     await waitFor(() => expect(listen).toHaveBeenCalledTimes(2));
     const names = listen.mock.calls.map(([name]) => name).sort();
     expect(names).toEqual(["core-event", "core-resync"]);
+  });
+
+  it("offers the six screens once enrolled, opens on the conversation, and has no debug screen", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "latest_event") return Promise.resolve({ kind: "connected", nodeId: "n1", nodeName: "desk-linux" });
+      if (command === "conversation_sessions") return Promise.reject("not connected yet");
+      return Promise.resolve(null);
+    });
+    render(<App />);
+
+    const nav = await screen.findByRole("navigation", { name: "Screens" });
+    const names = within(nav)
+      .getAllByRole("button")
+      .map((button) => button.textContent);
+    expect(names).toEqual(["Conversation", "Voice", "Tools", "MCP servers", "Status", "Settings"]);
+    expect(within(nav).getByRole("button", { name: "Conversation" }).getAttribute("aria-current")).toBe("page");
+    expect(nav.textContent).toMatch(/desk-linux/);
+  });
+
+  it("asks about a machine in a dialog over the screen that was showing", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "latest_event") return Promise.resolve({ kind: "connected", nodeId: "n1", nodeName: "desk-linux" });
+      if (command === "conversation_sessions") return Promise.reject("not connected yet");
+      if (command === "pending_peer")
+        return Promise.resolve({ id: 3, label: "laptop", fingerprint: "AAAA BBBB CCCC DDDD EEEE FFFF 0000 1111" });
+      return Promise.resolve(null);
+    });
+    render(<App />);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toMatch(/Approve “laptop”\?/);
+    // The screen underneath is still there, not replaced.
+    expect(await screen.findByRole("navigation", { name: "Screens", hidden: true })).toBeTruthy();
   });
 });

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CheckIcon, InfoIcon, LaptopIcon, XIcon } from "lucide-react";
 import { fetchPendingPeer, type Action, type PeerQuestion } from "./state";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { Fingerprint } from "@/components/CopyButton";
+import { IconTile, Problem } from "@/components/IconTile";
 
 // How often this screen re-asks whether the question it is showing is still waiting.
 //
@@ -187,101 +192,94 @@ export function PeerConfirm({
   // words. The quotes and the face are where that sentence ends and this one begins.
   const name = (
     <>
-      &ldquo;<span className="mono">{question.label}</span>&rdquo;
+      &ldquo;<span className="font-mono">{question.label}</span>&rdquo;
     </>
   );
 
+  // Open for as long as a question is waiting, and not dismissable: Escape or a click outside
+  // would leave an agent's send blocked on a question nobody can see. It ends by being answered,
+  // by running out of time, or — once it has gone — by Close.
+  const stay = (event: Event) => event.preventDefault();
+
   return (
-    <main className="screen">
-      <h1>Approve {name}?</h1>
-      <p className="lead">
-        An agent asked this computer to send a file to {name}, a machine it has never sent to
-        before. Nothing is sent until you answer.
-      </p>
-
-      <section>
-        <h2>Compare this fingerprint</h2>
-        {/* Exactly the characters the core was given: eight groups of four, uppercase, single
-            spaces. `white-space: pre-wrap` keeps them, and wrapping happens only at the spaces,
-            so a group is never split across lines and selecting the value copies it whole. */}
-        <p className="fingerprint">{question.fingerprint}</p>
-        {/* It has to name somewhere a person can actually get to. This used to point at a log
-            line, which is where the value is written — and on an installed, autostarted node
-            there is no console attached to read it on, so following the instruction dead-ended
-            and the only way left was to approve blind. The Status screen shows the same string
-            through the `peer_fingerprint` command. */}
-        <p className="muted note">
-          Check it group by group against the fingerprint {name} reports for itself. Open Zyris on
-          that machine and read it off its Status screen, under{" "}
-          <span className="mono">This computer&rsquo;s fingerprint</span>. A machine running{" "}
-          <span className="mono">--headless</span> has no window, and writes the same value to its
-          log at startup on the line that reads{" "}
-          <span className="mono">peer identity ready</span>. If the two differ anywhere, refuse.
-        </p>
-      </section>
-
-      <section>
-        <h2>What approving does</h2>
-        <p className="note">
-          This computer will send files to the name {name} from now on, and it remembers the key
-          behind the fingerprint above as that name. If a different key ever answers to {name}, the
-          send is refused outright rather than asked about again.
-        </p>
-        {/* Three times this project has shipped copy claiming more than the code does, and this
-            is the screen most likely to be read as a gate on incoming files. It is not one: the
-            confirmer is consulted on `send_to` and nowhere else, and the receiving side admits
-            any connection whose key is on the account's node list without ever asking it. */}
-        <h2>What it does not do</h2>
-        <p className="note">
-          It does not change what can arrive here. Any machine enrolled on your Attacca account can
-          already send files to this computer, whether or not you have ever approved it.
-        </p>
-      </section>
-
-      {gone ? (
-        <section>
-          <p>This question is no longer waiting.</p>
-          <p className="muted note">
-            It ran out of time, or the machine that asked gave up. Nothing was approved. If an
-            agent tries the send again, you will be asked again.
-          </p>
-          <button
-            type="button"
-            className="button button-quiet"
-            onClick={() => dispatch({ kind: "peerQuestionEnded", id: question.id })}
-          >
-            Close
-          </button>
-        </section>
-      ) : (
-        <section>
-          {/* Both answers the same weight. Approving is not the recommended one and refusing is
-              not a failure, so neither is drawn as the thing to press. */}
-          <div className="answers">
-            <button
-              type="button"
-              className="button button-quiet"
-              disabled={busy || settling}
-              onClick={() => answer(true)}
-            >
-              Approve
-            </button>
-            <button
-              type="button"
-              className="button button-quiet"
-              disabled={busy || settling}
-              onClick={() => answer(false)}
-            >
-              Refuse
-            </button>
+    <Dialog open>
+      <DialogContent onEscapeKeyDown={stay} onPointerDownOutside={stay} onInteractOutside={stay}>
+        <div className="flex items-start gap-3.5">
+          <IconTile className="size-10 rounded-[0.625rem] border-primary/30 bg-primary/10 [&_svg]:size-[1.1875rem]">
+            <LaptopIcon />
+          </IconTile>
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <DialogTitle>Approve {name}?</DialogTitle>
+            <DialogDescription>
+              An agent asked this computer to send a file to {name}, a machine it has never sent to before.
+              Nothing is sent until you answer.
+            </DialogDescription>
           </div>
-          <p className="muted note">
-            Refusing approves nothing and stops this send. Leave it unanswered and the send is
-            refused for you.
+        </div>
+
+        <section className="flex flex-col gap-2.5" aria-label="Compare this fingerprint">
+          <h3 className="m-0 text-[0.78125rem] font-normal text-muted-foreground">
+            Compare this fingerprint with the one on that machine's Status screen
+          </h3>
+          {/* Exactly the characters the core was given: eight groups of four, uppercase, single
+              spaces. Selecting it copies it whole. */}
+          <Fingerprint value={question.fingerprint} size="md" />
+          <p className="m-0 text-xs text-subtle">
+            If any group differs, refuse. A machine running <span className="font-mono">--headless</span> writes
+            the same value to its log on the line that reads <span className="font-mono">peer identity ready</span>.
           </p>
-          {problem && <p className="problem">{problem}</p>}
         </section>
-      )}
-    </main>
+
+        <div className="flex flex-col gap-2 rounded-lg border border-sidebar-border bg-inset px-3.5 py-3 text-[0.8125rem] leading-relaxed text-muted-foreground">
+          <p className="m-0 flex gap-2">
+            <CheckIcon className="mt-0.5 size-4 shrink-0 text-success" aria-hidden="true" />
+            <span>
+              Approving lets this computer send files to {name} from now on. If a different key ever answers
+              to that name, the send is refused.
+            </span>
+          </p>
+          {/* The screen most likely to be read as a gate on incoming files. It is not one. */}
+          <p className="m-0 flex gap-2">
+            <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span>
+              It does not change what can arrive here: any machine on your Attacca account can already send
+              files to this computer.
+            </span>
+          </p>
+        </div>
+
+        {gone ? (
+          <div className="flex flex-col gap-3">
+            <p className="m-0 text-sm text-heading">This question is no longer waiting.</p>
+            <p className="m-0 text-[0.8125rem] text-muted-foreground">
+              It ran out of time, or the machine that asked gave up. Nothing was approved. If an agent tries
+              again, you will be asked again.
+            </p>
+            <Button variant="outline" onClick={() => dispatch({ kind: "peerQuestionEnded", id: question.id })}>
+              Close
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {/* Both answers the same weight. Approving is not the recommended one and refusing is
+                not a failure, so neither is drawn as the thing to press. */}
+            <div className="grid grid-cols-2 gap-2.5">
+              <Button variant="outline" size="lg" disabled={busy || settling} onClick={() => answer(false)}>
+                <XIcon />
+                Refuse
+              </Button>
+              <Button variant="outline" size="lg" disabled={busy || settling} onClick={() => answer(true)}>
+                <CheckIcon />
+                Approve
+              </Button>
+            </div>
+            <p className="m-0 text-center text-xs text-subtle">
+              Refusing approves nothing and stops this send. Leave it unanswered and it is refused for you.
+            </p>
+            {problem && <Problem className="text-center">{problem}</Problem>}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }

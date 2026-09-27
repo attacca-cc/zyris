@@ -168,8 +168,36 @@ pub fn after_falling_behind(bus: &EventBus, gate: &Gate, pending: &Pending) -> V
 /// `VoiceEvent` lives in `zyris-voice`'s `lib.rs` and not behind its feature.
 pub const VOICE_EVENT_NAME: &str = "voice-event";
 
-/// Every step the audio took, for the Debug screen. [`VOICE_EVENT_NAME`]'s noisy neighbour.
+/// Every step the audio took. [`VOICE_EVENT_NAME`]'s noisy neighbour, and what the Conversation
+/// screen builds the conversation from.
 pub const VOICE_TRACE_NAME: &str = "voice-trace";
+
+/// How loud the microphone and the speaker are, as `zyris_voice::Level`, for the Conversation
+/// screen's backdrop. Its own channel, because twenty-five numbers a second per source would
+/// crowd the trace.
+pub const VOICE_LEVEL_NAME: &str = "voice-level";
+
+/// Republish the levels onto the webview.
+///
+/// **A lag is not even logged.** A level is out of date forty milliseconds after it was measured,
+/// so one that was missed is not worth a line in anybody's log; the next one replaces it.
+pub fn forward_levels(
+    app: AppHandle,
+    mut levels: tokio::sync::broadcast::Receiver<zyris_voice::Level>,
+    runtime: &tokio::runtime::Handle,
+) {
+    runtime.spawn(async move {
+        loop {
+            match levels.recv().await {
+                Ok(level) => {
+                    let _ = app.emit(VOICE_LEVEL_NAME, &level);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
 
 /// Republish the diagnostic stream onto the webview.
 ///
@@ -323,6 +351,16 @@ pub async fn set_voice_compute(
     Ok(voice_screen(voice.choose_compute(transcribe, speak).await, &hotkey))
 }
 
+/// Choose how loud answers are read, now and at the next launch.
+#[tauri::command]
+pub async fn set_voice_volume(
+    volume: f32,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_volume(volume).await, &hotkey))
+}
+
 /// Choose how fast answers are read, now and at the next launch.
 #[tauri::command]
 pub async fn set_speaking_rate(
@@ -331,6 +369,31 @@ pub async fn set_speaking_rate(
     hotkey: State<'_, Arc<dyn Hotkey>>,
 ) -> Result<VoiceScreen, String> {
     Ok(voice_screen(voice.choose_speaking_rate(rate).await, &hotkey))
+}
+
+/// Read answers aloud or not, now and at the next launch. The Conversation screen's switch.
+#[tauri::command]
+pub async fn set_read_aloud(
+    read_aloud: bool,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.set_read_aloud(read_aloud).await, &hotkey))
+}
+
+/// Send a typed message to the conversation's session.
+#[tauri::command]
+pub async fn send_conversation_text(
+    text: String,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+) -> Result<(), String> {
+    voice.send_text(text).await
+}
+
+/// Stop reading the answer aloud, as the push-to-talk key would.
+#[tauri::command]
+pub fn stop_speaking(voice: State<'_, Arc<zyris_voice::Voice>>) {
+    voice.stop_speaking();
 }
 
 /// Choose which speech model listening uses, by id.
@@ -818,6 +881,14 @@ mod tests {
         // the Rust half of that guard, and the comment beside the TypeScript literal is the
         // other half.
         assert_eq!(EVENT_NAME, "core-event");
+    }
+
+    #[test]
+    fn the_voice_names_are_what_ui_src_state_ts_hardcodes() {
+        // The same agreement for the three voice channels, which `state.ts` names as literals.
+        assert_eq!(VOICE_EVENT_NAME, "voice-event");
+        assert_eq!(VOICE_TRACE_NAME, "voice-trace");
+        assert_eq!(VOICE_LEVEL_NAME, "voice-level");
     }
 
     #[test]

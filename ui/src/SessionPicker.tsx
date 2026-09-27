@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { BotIcon, ChevronRightIcon, FolderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
 
 // Which Attacca session this machine talks to: a project, then a session in it, or a new one.
 //
@@ -16,6 +21,8 @@ export type SessionsView = {
     title: string | null;
     project: string | null;
     agent: string | null;
+    // Named only when the account's agent list has it.
+    agentName: string | null;
     running: boolean;
   }[];
   agents: { id: string; name: string }[];
@@ -38,6 +45,13 @@ function titleOf(session: Session): string {
     : `Untitled session (${session.id.slice(0, 8)})`;
 }
 
+// Who answers in the current session: its own agent, or the one a new session would get.
+function agentNameOf(view: SessionsView, chosen: string | null): string | null {
+  const current = view.sessions.find((s) => s.id === view.current);
+  const id = current?.agent ?? chosen;
+  return view.agents.find((a) => a.id === id)?.name ?? null;
+}
+
 function asMessage(error: unknown, fallback: string): string {
   return typeof error === "string" ? error : fallback;
 }
@@ -45,10 +59,13 @@ function asMessage(error: unknown, fallback: string): string {
 export function SessionPicker({
   hidden,
   onSwitched,
+  onAgentName,
 }: {
   hidden: boolean;
   // Called once the machine is talking to a different session than before.
   onSwitched: () => void;
+  // The name of the agent the current session talks to, for the thread to put over its answers.
+  onAgentName?: (name: string | null) => void;
 }) {
   const [view, setView] = useState<SessionsView | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -107,11 +124,19 @@ export function SessionPicker({
       .finally(() => setBusy(false));
   };
 
+  // Above the early return, as every hook must be.
+  const agentName = view ? agentNameOf(view, agent) : null;
+  useEffect(() => {
+    onAgentName?.(agentName);
+  }, [agentName, onAgentName]);
+
   if (view === null) {
     return (
-      <section className="session-picker">
-        <p className="note muted">{problem ?? "Reading this account's sessions…"}</p>
-      </section>
+      <div className="flex min-h-14 items-center border-b border-[#1d1814] px-6">
+        <p className={cn("m-0 text-[0.8125rem]", problem ? "text-[#ef7d75]" : "text-muted-foreground")}>
+          {problem ?? "Reading this account's sessions…"}
+        </p>
+      </div>
     );
   }
 
@@ -125,81 +150,97 @@ export function SessionPicker({
   // The current session stays selectable even when it is in another project or not listed, so
   // the dropdown never shows some other session as if it were the one in use.
   const showCurrentApart = view.current !== null && !inProject.some((s) => s.id === view.current);
+  const notes = [
+    ...(view.agents.length === 0 ? ["This account has no agent, so no session can be started."] : []),
+    ...(inProject.length === 0 && !showCurrentApart
+      ? [byProject ? "There are no sessions in this project yet." : "There are no sessions yet."]
+      : []),
+    ...view.problems.map((line) => `Could not read ${line}`),
+    ...(!byProject && view.problems.some((line) => line.startsWith("projects"))
+      ? ["Sessions from every project are listed, and a new session goes to the default project."]
+      : []),
+  ];
 
   return (
-    <section className="session-picker">
-      {byProject && (
-        <label className="note">
-          Project{" "}
-          <select
-            className="picker"
-            aria-label="Project"
-            value={project ?? ""}
-            disabled={busy}
-            onChange={(event) => setProject(event.target.value)}
-          >
-            {view.projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.isDefault ? " (default)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-
-      <label className="note">
-        Session{" "}
-        <select
-          className="picker"
-          aria-label="Session"
-          value={view.current ?? ""}
+    <div className="border-b border-[#1d1814] bg-background">
+      <div className="flex min-h-14 flex-wrap items-center gap-2 px-6 py-2.5">
+        {byProject && (
+          <>
+            <Select value={project ?? undefined} disabled={busy} onValueChange={setProject}>
+              <SelectTrigger size="sm" aria-label="Project" className="w-auto max-w-44 bg-transparent">
+                <FolderIcon className="text-muted-foreground" aria-hidden="true" />
+                <SelectValue placeholder="Project" />
+              </SelectTrigger>
+              <SelectContent>
+                {view.projects.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <ChevronRightIcon className="size-3.5 text-[#4a3f37]" aria-hidden="true" />
+          </>
+        )}
+        <Select
+          value={view.current ?? undefined}
           disabled={busy}
-          onChange={(event) =>
-            act("choose_conversation_session", { session: event.target.value })
-          }
+          onValueChange={(session) => act("choose_conversation_session", { session })}
         >
-          {view.current === null && <option value="">No session yet</option>}
-          {showCurrentApart && (
-            <option value={view.current ?? ""}>
-              {current ? titleOf(current) : view.current} (another project)
-            </option>
-          )}
-          {inProject.map((s) => (
-            <option key={s.id} value={s.id}>
-              {titleOf(s)}
-              {s.running ? " — answering" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {view.agents.length === 1 && (
-        <p className="note muted">New sessions talk to {view.agents[0].name}.</p>
-      )}
-      {view.agents.length > 1 && (
-        <label className="note">
-          Agent for a new session{" "}
-          <select
-            className="picker"
-            aria-label="Agent for a new session"
-            value={agent ?? ""}
-            disabled={busy}
-            onChange={(event) => setAgent(event.target.value)}
-          >
-            {view.agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
+          <SelectTrigger size="sm" aria-label="Session" className="w-auto max-w-80 min-w-44 bg-transparent font-medium">
+            <SelectValue placeholder="No session yet" />
+          </SelectTrigger>
+          <SelectContent>
+            {showCurrentApart && view.current !== null && (
+              <SelectItem value={view.current}>
+                {current ? titleOf(current) : view.current} (another project)
+              </SelectItem>
+            )}
+            {inProject.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {titleOf(s)}
+                {s.agentName && s.agentName !== "Voice" ? ` — ${s.agentName}` : ""}
+                {s.running ? " — answering" : ""}
+              </SelectItem>
             ))}
-          </select>
-        </label>
-      )}
+          </SelectContent>
+        </Select>
+        {agentName && view.agents.length === 1 && (
+          <Badge variant="secondary" title="The agent new sessions talk to">
+            {agentName}
+          </Badge>
+        )}
 
-      <div className="session-actions">
-        <button
-          type="button"
-          className="button"
+        <div className="flex-1" />
+
+        {view.agents.length > 1 && (
+          <Select value={agent ?? undefined} disabled={busy} onValueChange={setAgent}>
+            <SelectTrigger size="sm" aria-label="Agent for a new session" className="w-auto max-w-40 bg-transparent">
+              <BotIcon className="text-muted-foreground" aria-hidden="true" />
+              <SelectValue placeholder="Agent" />
+            </SelectTrigger>
+            <SelectContent>
+              {view.agents.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Refresh"
+          title="Read the sessions again"
+          disabled={busy}
+          onClick={load}
+        >
+          <RefreshCwIcon />
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           disabled={busy || (byProject && project === null) || view.agents.length === 0}
           onClick={() =>
             act("new_conversation_session", {
@@ -208,32 +249,20 @@ export function SessionPicker({
             })
           }
         >
+          <PlusIcon />
           New session
-        </button>
-        <button type="button" className="button-quiet" disabled={busy} onClick={load}>
-          Refresh
-        </button>
+        </Button>
       </div>
-
-      {view.agents.length === 0 && (
-        <p className="note muted">This account has no agent, so no session can be started.</p>
+      {(notes.length > 0 || problem) && (
+        <div className="flex flex-col gap-0.5 px-6 pb-2.5">
+          {notes.map((line) => (
+            <p key={line} className="m-0 text-xs text-muted-foreground">
+              {line}
+            </p>
+          ))}
+          {problem && <p className="m-0 text-xs text-[#ef7d75]">{problem}</p>}
+        </div>
       )}
-      {inProject.length === 0 && (
-        <p className="note muted">
-          {byProject ? "There are no sessions in this project yet." : "There are no sessions yet."}
-        </p>
-      )}
-      {view.problems.map((line) => (
-        <p key={line} className="note muted">
-          Could not read {line}
-        </p>
-      ))}
-      {!byProject && view.problems.some((line) => line.startsWith("projects")) && (
-        <p className="note muted">
-          Sessions from every project are listed, and a new session goes to the default project.
-        </p>
-      )}
-      {problem && <p className="note problem">{problem}</p>}
-    </section>
+    </div>
   );
 }

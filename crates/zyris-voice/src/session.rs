@@ -279,6 +279,10 @@ pub struct Session {
     /// The diagnostic stream. Never `Option`: a sender with no subscribers costs an atomic
     /// load per send, and a `None` arm here would be a branch on every step of the pipeline.
     traces: broadcast::Sender<crate::Trace>,
+    /// Where the microphone's loudness goes while a turn is open, for the window's backdrop.
+    /// `None` until [`Session::metering`]: nothing is measured that nobody asked for.
+    levels: Option<broadcast::Sender<crate::Level>>,
+    meter: crate::meter::Meter,
     /// When the transcription in flight was handed over, so the trace can say what it cost.
     since: Option<std::time::Instant>,
     /// A look at the turn so far, running while the key is still down.
@@ -367,6 +371,10 @@ impl Session {
             // Replaced by [`Session::tracing`] when anything is watching. A channel nobody
             // subscribed to is the ordinary case and sending on it is a discarded error.
             traces: broadcast::channel(1).0,
+            levels: None,
+            meter: crate::meter::Meter::new(
+                (crate::capture::SAMPLE_RATE / crate::LEVELS_PER_SECOND) as usize,
+            ),
             since: None,
             partial: None,
             partial_from: 0,
@@ -446,6 +454,12 @@ impl Session {
     /// Publish every step onto this stream as well.
     pub fn tracing(mut self, traces: broadcast::Sender<crate::Trace>) -> Session {
         self.traces = traces;
+        self
+    }
+
+    /// Publish how loud the microphone is while a turn is open.
+    pub fn metering(mut self, levels: broadcast::Sender<crate::Level>) -> Session {
+        self.levels = Some(levels);
         self
     }
 
@@ -586,6 +600,15 @@ impl Session {
             // on the same condition, so nothing observable changes, and what this saves is the
             // processor running a hundred times a second over audio nobody asked for.
             return;
+        }
+
+        // Only while a turn is open: the backdrop moves with the person's voice when they are
+        // talking to the agent, and a room being listened to for the wake word is not that.
+        if self.turn.is_some()
+            && let Some(levels) = &self.levels
+            && let Some(rms) = self.meter.push(samples)
+        {
+            let _ = levels.send(crate::Level { source: crate::Source::Microphone, rms });
         }
 
         // Out of `self` so that the per-frame work can be an ordinary `&mut self` method. Both
@@ -1375,10 +1398,9 @@ pub struct Speaking {
     out: Arc<dyn Play>,
     turn: Arc<dyn Says>,
     events: broadcast::Sender<VoiceEvent>,
-    /// The diagnostic stream, for the half of the pipeline that runs after the agent answers.
-    /// **Everything it needs is already here**: `run` sees `TurnEvent::Shown` — what the agent
-    /// wrote — beside `TurnEvent::Say` — what the filter and splitter made of it — so the two
-    /// texts can be shown against each other without `turn.rs` knowing about tracing at all.
+    /// The diagnostic stream, for the half of the pipeline that runs after the agent answers:
+    /// fragments, synthesis, the queue and playback. What the agent *wrote* is traced by
+    /// [`crate::answers::Answers`], which reads the feed whether or not anything is speaking.
     traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
 }
@@ -1452,39 +1474,20 @@ impl Speaking {
                     }
                     self.synthesise(fragment.text()).await;
                 }
-                // Carried to the trace and nowhere else. This is what the agent wrote, before
-                // the filter took the code fences and asides out of it, and seeing the two
-                // beside each other is the only way to tell "the filter ate it" from "the
-                // agent never said it".
-                Ok(crate::turn::TurnEvent::Shown { kind, text }) => {
-                    self.trace(crate::Trace::Delta { kind: format!("{kind:?}"), text });
+                // A new answer: whatever an interruption muted belonged to the last one. Traced
+                // by `Answers`, which saw it first.
+                Ok(crate::turn::TurnEvent::Running(true)) => {
+                    let mut state = self.lock();
+                    state.running = true;
+                    state.muted = false;
                 }
                 // The end of a turn. Everything sayable has been said; what is left is waiting
                 // for the speaker to get through it.
-                Ok(crate::turn::TurnEvent::Running(true)) => {
-                    {
-                        let mut state = self.lock();
-                        state.running = true;
-                        state.muted = false;
-                    }
-                    self.trace(crate::Trace::Answering);
-                }
                 Ok(crate::turn::TurnEvent::Running(false)) => {
                     self.lock().running = false;
                     self.drained().await
                 }
-                // The server writes a failed agent run into the timeline as an `error` event
-                // and says nothing else: no delta, often not even a status. Without this a
-                // person who asked something heard silence and saw nothing.
-                Ok(crate::turn::TurnEvent::Event { event, .. }) if event.kind == "error" => {
-                    let said = event.payload.get("message").and_then(|m| m.as_str());
-                    self.publish(VoiceEvent::Failed {
-                        reason: match said {
-                            Some(message) => format!("The agent did not answer: {message}"),
-                            None => "The agent did not answer.".to_string(),
-                        },
-                    });
-                }
+                // Deltas and the timeline's own events are `Answers`'s: it does not forward them.
                 Ok(_) => {}
                 // A fragment was dropped before it was read, which is a sentence that will never
                 // be spoken. Nothing can recover it — a `Delta` is not durable and nothing
@@ -1646,6 +1649,25 @@ impl Speaking {
         state.muted = true;
         state.note = Some(interruption.message());
         Some(interruption)
+    }
+
+    /// Stop reading, without interrupting anybody: what is queued is thrown away and whatever is
+    /// still being made is dropped when it finishes, but the turn goes on, nothing is cancelled
+    /// and no note is kept for the next message. Reading aloud was switched off; the agent was
+    /// not cut off.
+    ///
+    /// Traces `Spoke` when something was being read, so the window stops showing speech.
+    pub fn hush(&self) {
+        let mut state = self.lock();
+        state.generation += 1;
+        self.out.silence();
+        let was_reading = !state.ledger.is_empty();
+        state.ledger.clear();
+        drop(state);
+        if was_reading {
+            self.trace(crate::Trace::Spoke);
+            self.publish(VoiceEvent::Spoke);
+        }
     }
 
     /// Cancel the turn that was interrupted.
@@ -2202,6 +2224,46 @@ mod tests {
         zyris.press().await;
 
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.stops().await;
+    }
+
+    /// The backdrop moves with the person's voice **only while they are talking to the agent**:
+    /// nothing is measured between turns, and a turn's audio is.
+    #[tokio::test]
+    async fn the_microphone_is_metered_only_while_a_turn_is_open() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let (levels, mut seen) = broadcast::channel(256);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let scribe = Scribe::always("hello");
+        let session =
+            Session::new(audio_rx, keys_rx, apm, scribe.clone(), events).metering(levels);
+        let zyris = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+        let loud = vec![0.5f32; crate::capture::SAMPLE_RATE as usize];
+
+        zyris.feed(&loud).await;
+        assert!(seen.try_recv().is_err(), "nothing is measured between turns");
+
+        zyris.press().await;
+        // In the chunks a device delivers: one push that spans several windows reports only
+        // the last of them.
+        for chunk in loud.chunks(crate::capture::APM_FRAME) {
+            zyris.feed(chunk).await;
+        }
+        let mut measured = Vec::new();
+        while let Ok(level) = seen.try_recv() {
+            measured.push(level);
+        }
+        assert_eq!(measured.len(), crate::LEVELS_PER_SECOND as usize, "a second is 25 levels");
+        assert!(measured.iter().all(|level| level.source == crate::Source::Microphone));
+        assert!(measured.iter().all(|level| (level.rms - 0.5).abs() < 1e-3), "{measured:?}");
         zyris.stops().await;
     }
 
@@ -3620,6 +3682,32 @@ mod barge_in {
         assert_eq!(rig.speaking.take_note(), None, "and it goes in front of one message, not two");
     }
 
+    /// Switching reading aloud off stops the speaker where it is, but interrupts nobody: no
+    /// cancel, no note, and a sentence that finishes being made afterwards is not played.
+    #[tokio::test]
+    async fn hushing_stops_the_speaker_without_interrupting_the_turn() {
+        let (voice, open) = Voicebox::gated();
+        let mut rig = rig(voice);
+        open.send(()).expect("the first sentence goes straight through");
+        rig.say("Yes.").await;
+        assert_eq!(rig.next_event().await, VoiceEvent::Speaking);
+        let speaking = rig.speaking.clone();
+        let making = tokio::spawn(async move { speaking.synthesise("And more.").await });
+        settle().await;
+
+        rig.speaking.hush();
+        open.send(()).expect("the voice is waiting");
+        tokio::time::timeout(PATIENCE, making).await.expect("finishes").expect("no panic");
+
+        // The discard happens in the callback.
+        rig.play(6000);
+        assert_eq!(rig.speaker.played(), 0, "nothing reached the device after the switch");
+        assert_eq!(rig.speaker.pending(), 0, "and nothing is left to play");
+        assert_eq!(rig.next_event().await, VoiceEvent::Spoke);
+        assert_eq!(rig.speaking.take_note(), None, "nobody was interrupted");
+        assert_eq!(rig.conversation.told(), Vec::new(), "and nothing was cancelled");
+    }
+
     /// **The hole this closes**: the key going down while the agent is still thinking, or while
     /// the first sentence is still being synthesised. Nothing has reached the speaker, so the
     /// ledger has nothing missed — and the turn used to go on running and be read out over
@@ -3886,29 +3974,6 @@ mod barge_in {
             .await
             .expect("the worker ends when the feed does, or a stopped session leaks a task")
             .expect("it does not panic");
-    }
-
-    /// A failed agent run arrives only as an `error` event in the timeline, and it has to be
-    /// said as a failure — this is what production sent on 2026-09-25 while nothing was heard.
-    #[tokio::test]
-    async fn an_agent_run_that_failed_is_a_failure_and_not_silence() {
-        let mut rig = rig(Voicebox::plain());
-        let (turns, subscription) = broadcast::channel(16);
-        let worker = tokio::spawn(rig.speaking.clone().run(subscription));
-
-        let event: zyris_attacca::ZSessionEvent = serde_json::from_value(serde_json::json!({
-            "seq": 2, "cursor": 2, "kind": "error",
-            "payload": { "kind": "error", "message": "The agent run failed. Please try again. (ref c3cd2811)" },
-        }))
-        .expect("the wire shape");
-        turns.send(crate::turn::TurnEvent::Event { cursor: 2, event }).expect("the worker is reading");
-
-        match rig.next_event().await {
-            VoiceEvent::Failed { reason } => assert!(reason.contains("ref c3cd2811"), "{reason}"),
-            other => panic!("{other:?}"),
-        }
-        drop(turns);
-        let _ = tokio::time::timeout(PATIENCE, worker).await;
     }
 
     /// The double `session::tests` already has, reached through its module so that there is one

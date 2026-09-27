@@ -91,8 +91,14 @@ pub trait TurnApi: Send + Sync + 'static {
         after: Option<i64>,
     ) -> zyris::Result<zyris::Streaming<ZTurnStatus, ZTurnFrame>>;
 
-    /// Post a message, starting a turn.
-    async fn send_message(&self, session_id: String, message: String) -> zyris::Result<()>;
+    /// Post a message, starting a turn — answered by `agent` when it is named, and by the
+    /// session's own agent otherwise.
+    async fn send_message(
+        &self,
+        session_id: String,
+        message: String,
+        agent: Option<String>,
+    ) -> zyris::Result<()>;
 
     /// Stop the turn that is running, if one is.
     ///
@@ -138,14 +144,41 @@ impl TurnApi for AttaccaApiClient {
         AttaccaApi::turn_events(self, session_id, after).await
     }
 
-    async fn send_message(&self, session_id: String, message: String) -> zyris::Result<()> {
+    async fn send_message(
+        &self,
+        session_id: String,
+        message: String,
+        agent: Option<String>,
+    ) -> zyris::Result<()> {
+        if let Some(agent) = agent {
+            let named = zyris_attacca::ZNewMessage {
+                session_id: session_id.clone(),
+                message: message.clone(),
+                agent_id: Some(agent),
+            };
+            match AttaccaApi::send_message_with(self, named).await {
+                // A deployment from before zyris-protocol#47 has no such tool. The message
+                // still goes, answered by the session's own agent, rather than not at all.
+                Err(error)
+                    if matches!(
+                        error.code,
+                        ErrorCode::MethodNotFound
+                            | ErrorCode::CapabilityNotAnnounced
+                            | ErrorCode::Unsupported
+                    ) =>
+                {
+                    tracing::warn!(%error, "this Attacca cannot name the agent that answers; the session's own will");
+                }
+                sent => return sent,
+            }
+        }
         // No attachments: this node speaks, it does not upload. `Datum` is the protocol's shape
         // for a file riding along with a message and nothing in the voice path produces one.
         AttaccaApi::send_message(self, session_id, message, Vec::new()).await
     }
 
     async fn cancel_turn(&self, session_id: String) -> zyris::Result<()> {
-        AttaccaApi::cancel_turn(self, session_id).await
+        AttaccaApi::cancel_turn(self, session_id, None).await
     }
 
     async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>> {
@@ -199,6 +232,7 @@ impl TurnApi for AttaccaApiClient {
                 title: session.title,
                 project: session.project_id,
                 agent: session.agent_id,
+                agent_name: None,
                 running: session.running,
             })
             .collect())
@@ -234,6 +268,15 @@ pub enum TurnEvent {
     Lost { reason: String, resubscribing: bool },
 }
 
+/// The summary a `report_result` tool call carries, which is how an agent running a session as
+/// a job answers. `None` for any other tool call.
+fn reported_summary(payload: &serde_json::Value) -> Option<String> {
+    (payload.get("name")?.as_str()? == "report_result")
+        .then(|| payload.get("arguments")?.get("summary")?.as_str().map(str::to_string))
+        .flatten()
+        .filter(|summary| !summary.trim().is_empty())
+}
+
 /// The agent a voice session is made with when `voice.json` names no other: the one written for
 /// the ear, attacca-cc/prompts `agents/voice.yml`. Matched by name, which that file marks as
 /// load-bearing.
@@ -262,6 +305,10 @@ pub struct Feed {
     /// connected yet would be answering a question nobody asked; this is set when the answer
     /// is *your account has none* or *your account has several and I will not choose*.
     agent_trouble: Mutex<Option<Vec<String>>>,
+    /// The agent every message is answered by, whichever session it goes to: the one named in
+    /// the settings, else [`VOICE_AGENT`]. `None` until the first message looks it up, and
+    /// `Some(None)` on an account with neither, where the session's own agent answers.
+    answers_as: Mutex<Option<Option<String>>>,
 }
 
 /// Everything about the feed that a reconnect replaces, under one lock so that a generation and
@@ -332,6 +379,7 @@ impl Feed {
             events: broadcast::channel(EVENT_CAPACITY).0,
             state: Mutex::new(State { api: None, generation: 0, live: false, cursor: None }),
             agent_trouble: Mutex::new(None),
+            answers_as: Mutex::new(None),
         })
     }
 
@@ -455,9 +503,9 @@ impl Feed {
 
     /// Everything the Conversation screen needs to choose a session, read off the account.
     ///
-    /// **Narrowed to the [`VOICE_AGENT`] when the account has one**: its sessions (and the current
-    /// one, whatever it is), and it alone as the agent a new session is made with. A session made
-    /// for typing is answered in tables and markdown, which is the wrong thing to read aloud.
+    /// **Every session is listed, and only the [`VOICE_AGENT`] is offered for a new one** when the
+    /// account has it. Hiding the other sessions left every project but one looking empty, and a
+    /// person has to be able to go back to a conversation they had typed.
     ///
     /// **Each of the three is read on its own**, and one that is refused leaves the other two
     /// standing with a sentence saying what is missing. A credential is granted scopes one by
@@ -486,16 +534,21 @@ impl Feed {
             Vec::new()
         });
         let current = self.session_id();
-        let (agents, sessions) = match voice_agent(&agents).cloned() {
-            Some((voice, name)) => {
-                let sessions = sessions
-                    .into_iter()
-                    .filter(|s| s.agent.as_deref() == Some(voice.as_str()) || Some(&s.id) == current.as_ref())
-                    .collect();
-                (vec![(voice, name)], sessions)
-            }
-            None => (agents, sessions),
+        let agent_names = agents.clone();
+        let agents = match voice_agent(&agents).cloned() {
+            Some(voice) => vec![voice],
+            None => agents,
         };
+        // The agent's name on each session, so one made for typing can be told apart.
+        let sessions = sessions
+            .into_iter()
+            .map(|mut s| {
+                s.agent_name = s.agent.as_deref().and_then(|id| {
+                    agent_names.iter().find(|(a, _)| a == id).map(|(_, name)| name.clone())
+                });
+                s
+            })
+            .collect();
         Ok(SessionsView {
             projects,
             sessions,
@@ -595,7 +648,25 @@ impl Feed {
             // session and the cost of being right is one branch.
             return Err(WireError::new(ErrorCode::ConnectionLost, "there is no session"));
         };
-        api.send_message(session, message.into()).await
+        let agent = self.answering_agent(api.as_ref()).await;
+        api.send_message(session, message.into(), agent).await
+    }
+
+    /// Which agent answers what is said, looked up once. **Whichever session a person picked**:
+    /// one made with a typing agent is answered in markdown and reports, reasoning for a minute
+    /// in silence first, and none of that should be read aloud.
+    async fn answering_agent(&self, api: &dyn TurnApi) -> Option<String> {
+        if let Some(known) = self.answers_as.lock().expect("not poisoned").clone() {
+            return known;
+        }
+        let agents = match api.list_agents().await {
+            Ok(agents) => agents,
+            // Asked again next time; this message goes to the session's own agent.
+            Err(_) => return None,
+        };
+        let chosen = Feed::choose_agent(&agents, self.agent.as_deref());
+        *self.answers_as.lock().expect("not poisoned") = Some(chosen.clone());
+        chosen
     }
 
     /// Stop the turn that is running.
@@ -770,6 +841,7 @@ impl Feed {
     ) -> Next {
         let mut filter = Filter::new();
         let mut splitter = Splitter::new();
+        let mut answered = false;
 
         loop {
             let idle = tokio::time::sleep(IDLE_FLUSH);
@@ -778,7 +850,7 @@ impl Feed {
             tokio::select! {
                 item = items.next() => match item {
                     Some(Ok(frame)) => {
-                        if !self.on_frame(frame, &mut filter, &mut splitter, generation) {
+                        if !self.on_frame(frame, &mut filter, &mut splitter, &mut answered, generation) {
                             return Next::Stop;
                         }
                     }
@@ -824,9 +896,12 @@ impl Feed {
         frame: ZTurnFrame,
         filter: &mut Filter,
         splitter: &mut Splitter,
+        answered: &mut bool,
         generation: u64,
     ) -> bool {
         match frame {
+            // A stop, followed by the `Status` that ends the turn; that is where this feed acts.
+            ZTurnFrame::Cancelled => true,
             ZTurnFrame::Delta { kind, text } => {
                 // **The one place the protocol's two kinds become the filter's two kinds**, and
                 // it is a `match` rather than a cast so that a third arm upstream is a compile
@@ -836,6 +911,9 @@ impl Feed {
                     ZDeltaKind::Assistant => Kind::Assistant,
                     ZDeltaKind::Reasoning => Kind::Reasoning,
                 };
+                if kind == Kind::Assistant && !text.trim().is_empty() {
+                    *answered = true;
+                }
                 let reading = filter.read(kind, &text);
                 if !self.publish(
                     TurnEvent::Shown { kind, text: reading.shown.text().to_string() },
@@ -858,9 +936,35 @@ impl Feed {
                     }
                     state.cursor = Some(cursor);
                 }
+                // **An answer that arrives as a report instead of as text.** An agent running a
+                // session as a job answers through its `report_result` tool: the web app shows
+                // that summary as the reply, and no assistant delta is written at all, so a
+                // question to such a session was heard, answered, and never said. Read the
+                // summary — but only in a turn that wrote nothing else, or it is said twice.
+                let report = (!*answered && event.kind == "tool_call")
+                    .then(|| reported_summary(&event.payload))
+                    .flatten();
+                if let Some(summary) = report {
+                    *answered = true;
+                    let reading = filter.read(Kind::Assistant, &format!("{summary} "));
+                    if !self.publish(
+                        TurnEvent::Shown { kind: Kind::Assistant, text: reading.shown.text().to_string() },
+                        generation,
+                    ) {
+                        return false;
+                    }
+                    for fragment in splitter.push(&reading.aloud) {
+                        if !self.publish(TurnEvent::Say(fragment), generation) {
+                            return false;
+                        }
+                    }
+                }
                 self.publish(TurnEvent::Event { cursor, event }, generation)
             }
             ZTurnFrame::Status { running } => {
+                if running {
+                    *answered = false;
+                }
                 if !running {
                     // **The end of a turn, and the only thing that releases the last word.**
                     // `Filter::finish` holds the final token until something tells it the turn
@@ -959,7 +1063,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(super) enum Call {
         Subscribe { after: Option<i64> },
-        Send { message: String },
+        Send { message: String, agent: Option<String> },
         Cancel,
         Agents,
         Create { agent: String, project: Option<String> },
@@ -1096,6 +1200,7 @@ mod tests {
                 title: Some("First".to_string()),
                 project: Some("p-default".to_string()),
                 agent: Some("a1".to_string()),
+                agent_name: None,
                 running: false,
             }])
         }
@@ -1133,8 +1238,13 @@ mod tests {
             Ok(zyris::Streaming::new(head, items))
         }
 
-        async fn send_message(&self, _session_id: String, message: String) -> zyris::Result<()> {
-            self.script.lock().unwrap().calls.push(Call::Send { message });
+        async fn send_message(
+            &self,
+            _session_id: String,
+            message: String,
+            agent: Option<String>,
+        ) -> zyris::Result<()> {
+            self.script.lock().unwrap().calls.push(Call::Send { message, agent });
             Ok(())
         }
 
@@ -1156,6 +1266,7 @@ mod tests {
         Ok(ZTurnFrame::Event {
             cursor,
             event: ZSessionEvent {
+                id: None,
                 seq: cursor,
                 cursor,
                 kind: "assistant_message".to_string(),
@@ -1203,9 +1314,33 @@ mod tests {
             api.calls(),
             vec![
                 Call::Subscribe { after: None },
-                Call::Send { message: "hello".to_string() }
+                Call::Agents,
+                Call::Send { message: "hello".to_string(), agent: None }
             ],
             "the subscription has to be open before the message that starts the turn"
+        );
+    }
+
+    /// Whichever session is current, what is said is answered by the Voice agent — looked up
+    /// once, not per message.
+    #[tokio::test]
+    async fn every_message_is_answered_by_the_voice_agent() {
+        let api = Fake::new().with_agents(&[("a-main", "Main Agent"), ("a-voice", "Voice")]);
+        let feed = Feed::new("session-made-with-main");
+
+        feed.attach(api.clone()).await;
+        within("the first message", feed.say("hello")).await.expect("posted");
+        within("the second message", feed.say("again")).await.expect("posted");
+
+        let calls = api.calls();
+        assert_eq!(calls.iter().filter(|c| matches!(c, Call::Agents)).count(), 1);
+        let sent: Vec<_> = calls.into_iter().filter(|c| matches!(c, Call::Send { .. })).collect();
+        assert_eq!(
+            sent,
+            vec![
+                Call::Send { message: "hello".into(), agent: Some("a-voice".into()) },
+                Call::Send { message: "again".into(), agent: Some("a-voice".into()) },
+            ]
         );
     }
 
@@ -1250,6 +1385,55 @@ mod tests {
             vec![Call::Subscribe { after: None }, Call::Subscribe { after: None }],
             "the message must not have been posted on the strength of the old subscription"
         );
+    }
+
+    /// A session run as a job answers through `report_result` and writes no text; the summary is
+    /// the answer, and it has to be said. In a turn that did write text, it is not said again.
+    #[tokio::test]
+    async fn a_reported_summary_is_said_when_the_turn_wrote_nothing_else() {
+        let report = |cursor: i64, summary: &str| -> zyris::Result<ZTurnFrame> {
+            Ok(ZTurnFrame::Event {
+                cursor,
+                event: ZSessionEvent {
+                    id: None,
+                    seq: cursor,
+                    cursor,
+                    kind: "tool_call".to_string(),
+                    payload: serde_json::json!({
+                        "kind": "tool_call",
+                        "name": "report_result",
+                        "arguments": { "status": "success", "summary": summary },
+                    }),
+                    created_at: None,
+                },
+            })
+        };
+        let api = Fake::new();
+        let feed = Feed::new("session-1");
+        let mut events = feed.events();
+        feed.attach(api.clone()).await;
+        let stream = within("the subscription", api.stream(0)).await;
+
+        stream.send(Ok(ZTurnFrame::Status { running: true })).unwrap();
+        stream.send(report(1, "Yes, I can hear you.")).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: true })).unwrap();
+        stream.send(assistant("Already said. ")).unwrap();
+        stream.send(report(2, "Not to be said twice.")).unwrap();
+        stream.send(Ok(ZTurnFrame::Status { running: false })).unwrap();
+
+        // The subscription opens with the session's status, which is not the end of a turn.
+        let mut spoken = Vec::new();
+        let (mut started, mut ends) = (false, 0);
+        while ends < 2 {
+            match next_event(&mut events).await {
+                TurnEvent::Say(fragment) => spoken.push(fragment.text().to_string()),
+                TurnEvent::Running(true) => started = true,
+                TurnEvent::Running(false) if started => ends += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(spoken, vec!["Yes, I can hear you.".to_string(), "Already said.".to_string()]);
     }
 
     /// Rule 1, at the seam this task owns. The kind is a protocol-level distinction and the only
