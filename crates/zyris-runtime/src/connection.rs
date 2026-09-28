@@ -48,6 +48,18 @@ pub fn missing_scopes(credential: &Credential) -> Vec<&'static str> {
 /// every path this machine's node gets: `<system>/zyris/desktop`.
 pub const PROGRAM: &str = "zyris";
 
+/// The platform as the enrolment endpoint names it. It knows `linux`, `windows`, `macos`, `cli`
+/// and `other`, and refuses anything else with a 422 — which is what a phone got for `android`
+/// and `ios` until 0.2.0.
+fn enrolment_platform(os: &str) -> &'static str {
+    match os {
+        "linux" => "linux",
+        "windows" => "windows",
+        "macos" => "macos",
+        _ => "other",
+    }
+}
+
 /// What each connection asks to be called. The system segment already names the machine, so this
 /// names the kind of node rather than repeating it — `laptop/zyris/laptop` is legal, and says the
 /// same word twice. A second copy live at the same path is told `desktop-2`.
@@ -471,7 +483,7 @@ impl Connector {
             program: PROGRAM.to_string(),
             // Lets the approval screen preselect this machine. A hint, never verified.
             system_hint: zyris::machine_name().unwrap_or_default(),
-            platform: std::env::consts::OS.to_string(),
+            platform: enrolment_platform(std::env::consts::OS).to_string(),
             scopes: SCOPES.iter().map(|scope| scope.to_string()).collect(),
         };
         let mut enrollment = match zyris::enroll(&self.server, request).await {
@@ -549,6 +561,13 @@ fn is_permanent_refusal(error: &zyris::ConnectError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_phone_enrols_as_other() {
+        assert_eq!(super::enrolment_platform("android"), "other");
+        assert_eq!(super::enrolment_platform("ios"), "other");
+        assert_eq!(super::enrolment_platform("linux"), "linux");
+    }
+
     use std::sync::Mutex;
     use std::time::Duration;
 

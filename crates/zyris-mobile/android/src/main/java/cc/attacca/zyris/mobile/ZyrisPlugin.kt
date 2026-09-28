@@ -151,6 +151,7 @@ class ZyrisPlugin(private val activity: Activity) : Plugin(activity) {
             try {
                 val manager = activity.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 val granted = manager.getMediaProjection(result.resultCode, data)
+                    ?: throw IllegalStateException("Android handed back no screen capture")
                 startMirroring(granted)
                 // The first frame takes a moment to arrive.
                 var waited = 0

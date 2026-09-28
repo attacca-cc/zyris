@@ -170,6 +170,18 @@ pub struct Release {
 
 const LATEST: &str = "https://api.github.com/repos/attacca-cc/zyris/releases/latest";
 
+/// An error with every cause under it: reqwest's own message stops at "error sending request".
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 fn http() -> Result<reqwest::Client, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder().user_agent("Zyris").build().map_err(|error| error.to_string())
@@ -200,10 +212,10 @@ pub async fn newer_release(current: &str) -> Result<Option<Release>, String> {
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .map_err(|error| error.to_string())?
+        .map_err(|error| chain(&error))?
         .json()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| chain(&error))?;
     if numbers(&latest.tag_name) <= numbers(current) {
         return Ok(None);
     }
@@ -225,14 +237,14 @@ pub async fn install(app: &AppHandle, release: Release, cache: std::path::PathBu
         .send()
         .await
         .and_then(|response| response.error_for_status())
-        .map_err(|error| error.to_string())?
+        .map_err(|error| chain(&error))?
         .bytes()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| chain(&error))?;
     let dir = cache.join("updates");
-    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|error| chain(&error))?;
     let file = dir.join("zyris-update.apk");
-    std::fs::write(&file, &bytes).map_err(|error| error.to_string())?;
+    std::fs::write(&file, &bytes).map_err(|error| chain(&error))?;
     act(app, "installApk", json!({ "path": file })).await.map_err(|error| error.message)
 }
 
@@ -248,3 +260,4 @@ mod tests {
         assert!(numbers("v0.2.0-rc.1") <= numbers("0.2.0"));
     }
 }
+

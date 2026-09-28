@@ -71,23 +71,21 @@ jobs:
         run: pnpm tauri icon crates/zyris-app/icons/app-mobile.svg
 
       # The Kotlin half of `rustls-platform-verifier`, which TLS on Android calls into (see
-      # `init_tls_verifier` in mobile.rs). It ships as a Maven repository inside a crate, so the
-      # Gradle project is pointed at the copy cargo downloaded.
+      # `initTls` in mobile.rs). From 0.2.0 it is published to a Maven repository on GitHub, at the
+      # version of `rustls-platform-verifier-android` in Cargo.lock; a mismatch fails at run time.
       - name: Add the TLS verifier's Kotlin component
         run: |
           set -euo pipefail
-          manifest=$(cargo metadata --format-version 1 --filter-platform aarch64-linux-android \
-            | jq -r '.packages[] | select(.name == "rustls-platform-verifier-android") | .manifest_path')
-          maven="$(dirname "$manifest")/maven"
-          version=$(ls "$maven/rustls/rustls-platform-verifier" | grep -E "^[0-9.]+$" | sort -V | tail -1)
+          version=$(grep -A1 '^name = "rustls-platform-verifier-android"$' Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          test -n "$version"
           app=crates/zyris-app/gen/android/app
           cat >> "$app/build.gradle.kts" <<EOF
 
           repositories {
-              maven { url = uri("$maven") }
+              maven { url = uri("https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/") }
           }
           dependencies {
-              implementation("rustls:rustls-platform-verifier:$version")
+              implementation("org.rustls:rustls-platform-verifier:$version")
           }
           // R8 removes classes only JNI calls, and the template's keep-rule files were not
           // applied to them (0.1.2 shipped none). Nothing here is worth the risk of shrinking.
@@ -110,7 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           apk=$(find crates/zyris-app/gen/android -name '*-release-unsigned.apk' | head -1)
-          (cd crates/zyris-app/gen/android && ./gradlew -q :app:dependencies --configuration universalReleaseRuntimeClasspath 2>/dev/null | grep -i rustls || true)
+          # 0 matches fails the step under pipefail.
           unzip -p "$apk" 'classes*.dex' | grep -a -c 'org/rustls/platformverifier/CertificateVerifier'
 
       # Signed with the release key in the repository's secrets, so every later version installs

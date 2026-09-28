@@ -25,6 +25,17 @@ const INSTANCE: &str = "zyris";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Android sends a process's stderr to logcat (tag `RustStdoutStderr`), so this is the phone
+    // app's log. `RUST_LOG` is not something a phone user sets; `info` is what is kept.
+    // `set_global_default` rather than `init`: `init` also claims the `log` facade, which Tauri
+    // has already taken on Android, and fails as a whole when it cannot.
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .with_ansi(false)
+        .with_writer(std::io::stderr)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "zyris phone app starting");
     let runtime = tokio::runtime::Runtime::new().expect("a tokio runtime");
     let handle = runtime.handle().clone();
     let bus = EventBus::new(EVENT_CAPACITY);
@@ -298,7 +309,9 @@ async fn check_for_update(app: tauri::AppHandle) -> Result<Option<Available>, St
     #[cfg(target_os = "android")]
     {
         let current = app.package_info().version.to_string();
-        let release = crate::phone::newer_release(&current).await?;
+        let release = crate::phone::newer_release(&current)
+            .await
+            .inspect_err(|error| tracing::warn!(%error, "could not look for an update"))?;
         Ok(release.map(|r| Available { version: r.version, notes: r.notes }))
     }
     #[cfg(not(target_os = "android"))]
