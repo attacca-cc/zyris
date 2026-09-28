@@ -73,6 +73,9 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "android": {
+      "minSdkVersion": 26
     }
   },
   "plugins": {

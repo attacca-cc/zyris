@@ -52,6 +52,14 @@ optional = true
 workspace = true
 optional = true
 
+# **Android has no prebuilt ONNX Runtime to download**, so the phone loads the one the app
+# packages from Microsoft's `onnxruntime-android` AAR (see `mobile.yml`) at run time instead.
+# `load-dynamic` also stops `ort-sys` from linking anything.
+[target.'cfg(target_os = "android")'.dependencies.ort]
+workspace = true
+optional = true
+features = ["load-dynamic"]
+
 # NFKD, without which Korean is silent and French is mangled. See `tts.rs`.
 [dependencies.unicode-normalization]
 workspace = true

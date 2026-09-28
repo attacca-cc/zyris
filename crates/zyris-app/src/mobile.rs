@@ -58,6 +58,19 @@ pub fn run() {
             choose_conversation_session,
             new_conversation_session,
             conversation_history,
+            set_voice_listening,
+            set_voice_device,
+            set_voice_speaker,
+            set_voice_compute,
+            set_voice_volume,
+            set_speaking_rate,
+            set_speech_model,
+            fetch_speech_model,
+            fetch_voice_model,
+            forget_speech_model,
+            record_wake_take,
+            clear_wake_word,
+            push_to_talk,
             check_for_update,
             install_update,
             phone_status,
@@ -79,6 +92,9 @@ pub fn run() {
                 // The websocket reads roots from files: the system store is a directory of them.
                 // SAFETY: as for HOME above.
                 unsafe { std::env::set_var("SSL_CERT_DIR", "/system/etc/security/cacerts") };
+                // ONNX Runtime comes from the APK (Microsoft's AAR), loaded by name at first use.
+                // SAFETY: as for HOME above.
+                unsafe { std::env::set_var("ORT_DYLIB_PATH", "libonnxruntime.so") };
             }
             #[cfg(target_os = "ios")]
             match write_root_certificates(&data) {
@@ -143,8 +159,19 @@ pub extern "system" fn Java_cc_attacca_zyris_mobile_ZyrisPlugin_initTls<'caller>
     _plugin: jni::objects::JObject<'caller>,
     context: jni::objects::JObject<'caller>,
 ) {
-    env.with_env(|env| rustls_platform_verifier::android::init_with_env(env, context))
-        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+    env.with_env(|env| -> Result<(), jni::errors::Error> {
+        // The audio stack (cpal on AAudio) finds the JVM through `ndk-context`, which Tauri
+        // leaves unset; a global reference keeps the Context valid for the life of the process.
+        // Once per process: the plugin, and so this call, comes again whenever Android recreates
+        // the activity, and `ndk-context` asserts it is set only once.
+        static AUDIO_CONTEXT: std::sync::Once = std::sync::Once::new();
+        let vm = env.get_java_vm()?.get_raw();
+        let global = env.new_global_ref(&context)?.into_raw();
+        // SAFETY: a live JVM and a global reference that is never deleted.
+        AUDIO_CONTEXT.call_once(|| unsafe { ndk_context::initialize_android_context(vm.cast(), global.cast()) });
+        rustls_platform_verifier::android::init_with_env(env, context)
+    })
+    .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 /// Mozilla's roots as one PEM file in the app's data directory, for the websocket's TLS, which
@@ -380,4 +407,93 @@ async fn phone_allow_screen(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn phone_allow_notifications(app: tauri::AppHandle) -> Result<(), String> {
     phone(app, "requestPermissions", serde_json::json!({ "permissions": ["notifications"] })).await.map(drop)
+}
+
+// ---- Speech ---------------------------------------------------------------------------------------
+//
+// The desktop's Voice screen commands, answered the same way. An Android build compiled with
+// `voice` hears and speaks on the phone; any other phone build answers with a voice that says it
+// cannot, as the desktop's off build does.
+
+type VoiceState<'a> = State<'a, Arc<zyris_voice::Voice>>;
+
+/// Turning listening on asks Android for the microphone first: without it the stream opens and
+/// hears nothing, with no error to say why.
+#[tauri::command]
+async fn set_voice_listening(app: tauri::AppHandle, listening: bool, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    if listening {
+        let answer = phone(app, "requestPermissions", serde_json::json!({ "permissions": ["microphone"] })).await;
+        #[cfg(target_os = "android")]
+        if answer?.get("microphone").and_then(|v| v.as_str()) != Some("granted") {
+            return Err("Zyris needs the microphone to listen; allow it in the prompt or the app's settings.".to_string());
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = answer;
+    }
+    Ok(screen(voice.set_listening(listening).await))
+}
+
+#[tauri::command]
+async fn set_voice_device(device: zyris_voice::view::Choice, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose(device).await))
+}
+
+#[tauri::command]
+async fn set_voice_speaker(speaker: zyris_voice::view::Choice, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_speaker(speaker).await))
+}
+
+#[tauri::command]
+async fn set_voice_compute(
+    transcribe: Option<String>,
+    speak: Option<String>,
+    voice: VoiceState<'_>,
+) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_compute(transcribe, speak).await))
+}
+
+#[tauri::command]
+async fn set_voice_volume(volume: f32, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_volume(volume).await))
+}
+
+#[tauri::command]
+async fn set_speaking_rate(rate: f32, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_speaking_rate(rate).await))
+}
+
+#[tauri::command]
+async fn set_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_model(id).await))
+}
+
+#[tauri::command]
+async fn fetch_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.fetch_model(id).await?))
+}
+
+#[tauri::command]
+async fn fetch_voice_model(voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.fetch_voice().await?))
+}
+
+#[tauri::command]
+async fn forget_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.forget_model(id).await?))
+}
+
+#[tauri::command]
+async fn record_wake_take(voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.record_wake_take().await?))
+}
+
+#[tauri::command]
+async fn clear_wake_word(voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.clear_wake_word().await?))
+}
+
+/// The talk button on a phone, held and let go: what the push-to-talk key is on a desktop.
+#[tauri::command]
+fn push_to_talk(down: bool, voice: VoiceState<'_>) {
+    voice.push(if down { zyris_voice::Push::Pressed } else { zyris_voice::Push::Released });
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MessageCircleIcon } from "lucide-react";
 import { SessionPicker } from "./SessionPicker";
-import { subscribeLevels, subscribeTrace, type Trace } from "./state";
+import { PHONE, subscribeLevels, subscribeTrace, type Trace } from "./state";
 import type { VoiceScreen } from "./Voice";
 import { Backdrop, type Mode } from "./conversation/Backdrop";
 import { Composer, StatusLine, type Phase } from "./conversation/Composer";
@@ -163,6 +163,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
               readAloud={readAloud !== false}
               onStop={() => void invoke("stop_speaking").catch(() => {})}
             />
+            {PHONE && listening === true && <HoldToTalk />}
             <Composer
               onSend={send}
               readAloud={readAloud}
@@ -180,5 +181,35 @@ export function Conversation({ hidden }: { hidden: boolean }) {
         </div>
       </div>
     </main>
+  );
+}
+
+// A phone has no push-to-talk key, so this is it: held down, it records; let go, it sends. Every
+// way a finger can leave the button ends the turn, so a turn never stays open by accident.
+function HoldToTalk() {
+  const [down, setDown] = useState(false);
+  const press = (next: boolean) => {
+    if (next === down) return;
+    setDown(next);
+    void invoke("push_to_talk", { down: next }).catch(() => {});
+  };
+  return (
+    <button
+      type="button"
+      className={
+        "h-12 w-full touch-none rounded-xl border text-sm font-medium transition-colors select-none " +
+        (down ? "border-primary bg-primary text-primary-foreground" : "bg-card text-heading")
+      }
+      onPointerDown={(event) => {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        press(true);
+      }}
+      onPointerUp={() => press(false)}
+      onPointerCancel={() => press(false)}
+      onLostPointerCapture={() => press(false)}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {down ? "Listening — let go to send" : "Hold to talk"}
+    </button>
   );
 }
