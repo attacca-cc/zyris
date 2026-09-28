@@ -9,6 +9,18 @@ on:
   push:
     tags:
       - "v*"
+  # A pull request that touches the phone app is built for both phones before it merges: 0.1.2
+  # shipped an Android build that aborted at start because nothing built it until the tag.
+  pull_request:
+    paths:
+      - "crates/zyris-app/**"
+      - "crates/zyris-mobile/**"
+      - "crates/zyris-runtime/**"
+      - "crates/zyris-voice/**"
+      - "ui/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mobile.yml"
   workflow_dispatch:
     inputs:
       release:
@@ -18,6 +30,8 @@ on:
 
 concurrency:
   group: mobile-${{ github.ref }}
+  # A newer commit on a pull request makes the older build pointless; a tag's never is.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

@@ -76,12 +76,14 @@ request.
 - **whisper.cpp is built for the AVX2 set** (`.cargo/config.toml`), never for the CPU that happens
   to build it. A release without those settings refuses to build.
 
-### Phones
+### Phones and macOS
 
 Android and iOS builds are generated rather than committed (`crates/zyris-app/gen/` is ignored).
-`.github/workflows/mobile.yml` is the reference for what a phone build needs. It builds on tags
-and on a manual run: if your change touches `crates/zyris-app/src/mobile.rs`, `phone.rs`,
-`crates/zyris-mobile` or the phone UI, ask a maintainer to run it on your branch.
+`.github/workflows/mobile.yml` is the reference for what a phone build needs, and it runs on every
+pull request that touches the app, the runtime, the voice crate, the UI or the lockfile. A macOS
+build with speech (`voice,metal`) runs on every pull request that changes code.
+
+A change to documentation alone (`*.md`, `docs/`, `LICENSE`) skips the builds.
 
 ## Writing code
 
@@ -114,8 +116,9 @@ wrong and how you know the change fixes it. Keep commits focused: one concern ea
 - Branch from `main` with a name like `feat/…`, `fix/…`, `build/…` or `docs/…`, and target `main`.
 - Describe what changes and why, and how you verified it.
 - Link the issue it resolves, with `Closes #N` when it closes one.
-- **CI must be green** on Ubuntu and Windows before a merge. A change to a release or phone
-  workflow should also pass a manual run of that workflow on the branch.
+- **CI must be green** before a merge: the tests on Ubuntu and Windows, the macOS build, and
+  the phone builds when they run. A change to the release workflow should also pass a manual
+  run of it on the branch.
 - A maintainer reviews and merges. Keep the history readable; fix-up commits are fine while a
   review is in progress.
 
