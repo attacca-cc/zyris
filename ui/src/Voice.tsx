@@ -14,7 +14,7 @@ import {
   Trash2Icon,
   Volume2Icon,
 } from "lucide-react";
-import { subscribeVoice, type VoiceEvent } from "./state";
+import { PHONE, subscribeVoice, type VoiceEvent } from "./state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -651,10 +651,12 @@ export function Voice() {
 
   const { voice, hotkey } = screen;
   const canHear = voice.support.state === "ready";
-  // **No switch where there is no key.** Turning listening on would open a microphone that
-  // nothing could ever start a turn on. `needsAKeyBound` is not this case: the key may well
-  // already be bound, and Zyris cannot tell either way.
+  // **Something has to be able to start a turn** for listening to be worth turning on: a key, the
+  // hold-to-talk button a phone has in its place, or the wake word, which can be recorded on any
+  // machine that hears at all. Only a desktop with no key and no wake word has nothing, and even
+  // there the switch stays: turning listening on is how the wake word gets recorded against.
   const aKeyCouldWork = hotkey.state !== "unavailable";
+  const wakeCouldWork = voice.wake.state.state !== "notHere";
   const badge = listeningBadge(voice.listening);
   const listeningOn = voice.listening.state === "on" || voice.listening.state === "starting";
   const offered = voice.models.filter((m) => m.state.state === "ready" || m.chosen);
@@ -699,7 +701,7 @@ export function Voice() {
           canHear && (
             <div className="flex items-center gap-3">
               <Badge variant={badge.variant}>{badge.label}</Badge>
-              {aKeyCouldWork && (
+              {(aKeyCouldWork || PHONE || wakeCouldWork) && (
                 <Switch
                   aria-label="Listening"
                   checked={listeningOn}
@@ -718,9 +720,10 @@ export function Voice() {
       >
         {!canHear && <Problem>{(voice.support as { reason: string }).reason}</Problem>}
         {canHear && voice.listening.state === "failed" && <Problem>{voice.listening.reason}</Problem>}
-        {canHear && !aKeyCouldWork && (
+        {canHear && !aKeyCouldWork && !PHONE && !wakeCouldWork && (
           <Problem>
-            This desktop has no push-to-talk key, so nothing could start a recording. See below.
+            This desktop has no push-to-talk key and cannot listen for a wake word, so nothing could
+            start a recording. See below.
           </Problem>
         )}
         {refused.listening && <Problem>{refused.listening}</Problem>}
@@ -764,9 +767,16 @@ export function Voice() {
                 )}
               </>
             )}
-            {hotkey.state === "unavailable" && (
-              <Problem>{hotkey.reason} Nothing on this screen can start a turn until that changes.</Problem>
-            )}
+            {hotkey.state === "unavailable" &&
+              (PHONE ? (
+                <p className="m-0 text-sm text-heading">
+                  On a phone, hold the <strong>Hold to talk</strong> button on the Conversation screen.
+                </p>
+              ) : (
+                <Problem>
+                  {hotkey.reason} {wakeCouldWork ? "Use the wake word instead." : "Nothing here can start a turn."}
+                </Problem>
+              ))}
             {(hotkey.state === "working" || (hotkey.state === "needsAKeyBound" && hotkey.line !== null)) && (
               <KeyChanger
                 busy={isBusy("hotkey")}

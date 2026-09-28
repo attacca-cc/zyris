@@ -268,7 +268,7 @@ describe("Voice", () => {
     expect(readable()).toContain("push_to_talk");
   });
 
-  it("offers no listening switch on a desktop where no key can be registered", async () => {
+  it("offers listening on a desktop with no key, because the wake word can start a turn", async () => {
     answers(
       machine({
         hotkey: {
@@ -281,10 +281,35 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/no GlobalShortcuts interface/i);
-    // **The rule this whole project keeps restating**: a control that cannot work is worse than
-    // an absent one. Opening a microphone here would open one nothing could ever start a turn on.
+    // The key is one way to start a turn, not the only one: the wake word needs listening on, and
+    // hiding the switch here took every way of talking away (and on a phone, all of speech).
+    expect(screen.getByRole("switch", { name: /listening/i })).toBeTruthy();
+    expect(readable()).toMatch(/use the wake word instead/i);
+  });
+
+  it("offers no listening switch where neither a key nor the wake word can work", async () => {
+    answers(
+      machine({
+        hotkey: {
+          state: "unavailable",
+          reason: "this desktop's portal has no GlobalShortcuts interface, so no application can register a global key here.",
+        },
+        wake: {
+          state: { state: "notHere", reason: "there is nowhere to keep the recordings" },
+          dir: TAKES,
+          wanted: 5,
+          seconds: 5,
+          note: "",
+        },
+      }),
+    );
+
+    render(<Voice />);
+
+    await screen.findByText(/no GlobalShortcuts interface/i);
+    // **A control that cannot work is worse than an absent one.** Here nothing could ever start a turn.
     expect(screen.queryByRole("switch", { name: /listening/i })).toBeNull();
-    expect(readable()).toMatch(/this desktop has no push-to-talk key/i);
+    expect(readable()).toMatch(/nothing could\s+start a recording/i);
   });
 
   it("keeps a key that has to be bound by hand apart from one that can never exist", async () => {
