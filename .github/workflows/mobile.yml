@@ -96,6 +96,15 @@ jobs:
       - name: Build the APK
         run: pnpm tauri android build --apk --target aarch64 --ci
 
+      # 0.1.2 shipped without these classes and died on its first TLS handshake; a build that
+      # loses them again stops here instead.
+      - name: Check the TLS verifier's classes are in the APK
+        run: |
+          set -euo pipefail
+          apk=$(find crates/zyris-app/gen/android -name '*-release-unsigned.apk' | head -1)
+          (cd crates/zyris-app/gen/android && ./gradlew -q :app:dependencies --configuration universalReleaseRuntimeClasspath 2>/dev/null | grep -i rustls || true)
+          unzip -p "$apk" 'classes*.dex' | grep -a -c 'org/rustls/platformverifier/CertificateVerifier'
+
       # Signed with the release key in the repository's secrets, so every later version installs
       # over this one. Without the key the build is still checked, and nothing is published.
       - name: Sign
