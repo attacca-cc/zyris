@@ -77,6 +77,14 @@ class PathArgs {
     ]
 )
 class ZyrisPlugin(private val activity: Activity) : Plugin(activity) {
+    /** In the app's Rust library (`mobile.rs`): hands TLS verification the JVM and a Context. */
+    private external fun initTls(context: Context)
+
+    init {
+        // Before the connection's first handshake, which the Rust side starts after plugins load.
+        initTls(activity.applicationContext)
+    }
+
     /** Where every blocking answer is worked out, so the main thread stays free for callbacks. */
     private val worker = Executors.newSingleThreadExecutor()
     private val captureThread = HandlerThread("zyris-capture").apply { start() }

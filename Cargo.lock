@@ -9248,7 +9248,6 @@ dependencies = [
  "global-hotkey",
  "gtk",
  "jni 0.22.4",
- "ndk-context",
  "open",
  "reqwest",
  "rustls",

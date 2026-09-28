@@ -68,7 +68,6 @@ tauri-plugin-zyris-mobile = { path = "../zyris-mobile" }
 # and the app's Context before the first request — see `mobile.rs`. Same versions as the lockfile.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22"
-ndk-context = "0.1"
 rustls-platform-verifier = "0.7"
 # What the phone serves its agent (`phone.rs`): the capability traits, the file backend the
 # desktop uses too, and the APK download for updates.

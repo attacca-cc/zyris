@@ -65,9 +65,6 @@ pub fn run() {
             unsafe { std::env::set_var("HOME", &data) };
             #[cfg(target_os = "android")]
             {
-                if let Err(error) = init_tls_verifier() {
-                    tracing::error!(%error, "could not set up certificate verification; enrolment will fail");
-                }
                 // The websocket reads roots from files: the system store is a directory of them.
                 // SAFETY: as for HOME above.
                 unsafe { std::env::set_var("SSL_CERT_DIR", "/system/etc/security/cacerts") };
@@ -123,21 +120,20 @@ pub fn run() {
     drop(runtime);
 }
 
-/// **Why the phone stopped at "Asking Attacca for a code".** Enrolment and the connection verify
-/// TLS through `rustls-platform-verifier`, which on Android asks the platform's trust store over
-/// JNI and panics on first use unless it was given the JVM and the app's Context. The panic took
-/// the connector task with it, so the window waited for a code forever. The Kotlin half it calls
-/// is added to the Gradle project by `mobile.yml`.
+/// **Why the phone stopped at "Asking Attacca for a code", and then crashed.** Enrolment and the
+/// connection verify TLS through `rustls-platform-verifier`, which on Android asks the platform's
+/// trust store over JNI and panics unless it was first handed the JVM and the app's Context.
+/// 0.1.1 never did; 0.1.2 reached for them through `ndk-context`, which Tauri leaves unset, and
+/// aborted at start. The Kotlin plugin calls this as it loads, with its Context in hand.
 #[cfg(target_os = "android")]
-fn init_tls_verifier() -> Result<(), jni::errors::Error> {
-    let android = ndk_context::android_context();
-    // SAFETY: both pointers come from the activity that started this process and live as long as
-    // it; the Context is a global reference, which this never deletes.
-    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) };
-    vm.attach_current_thread(|env| {
-        let context = unsafe { jni::objects::JObject::from_raw(env, android.context().cast()) };
-        rustls_platform_verifier::android::init_with_env(env, context)
-    })
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_cc_attacca_zyris_mobile_ZyrisPlugin_initTls<'caller>(
+    mut env: jni::EnvUnowned<'caller>,
+    _plugin: jni::objects::JObject<'caller>,
+    context: jni::objects::JObject<'caller>,
+) {
+    env.with_env(|env| rustls_platform_verifier::android::init_with_env(env, context))
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
 
 /// Mozilla's roots as one PEM file in the app's data directory, for the websocket's TLS, which
