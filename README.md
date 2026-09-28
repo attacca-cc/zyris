@@ -383,9 +383,12 @@ offers up to 1.4.
 
 **The voice weights are not Apache-2.0.** Supertonic's example code is MIT and its **weights are
 licensed BigScience OpenRAIL-M**: free to use and to redistribute, including commercially, with
-use-based restrictions that must be passed on with any copy. Zyris does not ship them — they are
-fetched onto your machine on request — but anyone redistributing a build with the models beside
-it is redistributing those weights and takes that licence with them.
+use-based restrictions that must be passed on with any copy. **The desktop installers carry
+them**, with Whisper's Base model, so speech works on first launch without a download: the licence
+is installed beside them as `models/supertonic-3/LICENSE`, and anyone redistributing an installer
+redistributes those weights under it. On first start the app copies both into its model cache,
+where the Voice tab manages them like any downloaded model. The phone apps do not carry them and
+download them on request.
 
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such

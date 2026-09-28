@@ -168,6 +168,10 @@ fn main() -> anyhow::Result<()> {
     // to hold. `data` rather than a shared directory for the reason the MCP server list is
     // scoped that way: a development run choosing to listen must not turn the production node's
     // microphone on.
+    // Before the engine looks for them: the models an installer carried become cached ones.
+    if let Some(bundled) = bundled_models_dir() {
+        zyris_voice::adopt_bundled_models(&bundled);
+    }
     let voice = std::sync::Arc::new(zyris_voice::start(Some(&data)));
     tracing::info!(support = ?voice.describe(), "speech");
 
@@ -584,6 +588,18 @@ fn peer_confirmer(
             ))
         }
     }
+}
+
+/// Where the installer put the models it carries, if it carried any: Tauri's resource
+/// directory, which is beside the executable on Windows, `Contents/Resources` in a macOS bundle
+/// and `/usr/lib/Zyris` for a `.deb` or `.rpm`. A development build has none.
+fn bundled_models_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.to_path_buf(), dir.join("../Resources"), dir.join("../lib/Zyris")]
+        .into_iter()
+        .map(|resources| resources.join(zyris_voice::BUNDLED_DIR))
+        .find(|models| models.is_dir())
 }
 
 #[cfg(test)]

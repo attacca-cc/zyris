@@ -828,6 +828,38 @@ pub fn start(dir: Option<&std::path::Path>) -> Voice {
     }
 }
 
+/// Where an installer puts the models it carries, under the app's resource directory.
+pub const BUNDLED_DIR: &str = "models";
+
+/// Move the models an installer carried into the cache, where the app keeps every model it
+/// downloads: Base (`ggml-base.bin`) and Supertonic (`supertonic-3/`) under `bundled`.
+///
+/// **Copied rather than read in place.** The cache is the one place the Voice screen looks,
+/// deletes from and downloads into, so a bundled copy there behaves exactly like one fetched
+/// from the network. A file already in the cache at the right size is left alone, and a copy
+/// goes through a temporary name, so a start interrupted halfway leaves nothing half-written.
+/// Nothing happens in a build without speech, or when `bundled` does not exist (a development
+/// build, the Nix package).
+pub fn adopt_bundled_models(bundled: &std::path::Path) {
+    #[cfg(feature = "voice")]
+    {
+        let whisper = stt::model_path(&stt::BASE).map(|to| (bundled.join(stt::BASE.file), to, stt::BASE));
+        let voice = tts::models_dir().map(|dir| {
+            tts::required()
+                .into_iter()
+                .map(move |m| (bundled.join(tts::DIRECTORY).join(m.file), dir.join(m.file), m))
+                .collect::<Vec<_>>()
+        });
+        for (from, to, model) in whisper.into_iter().chain(voice.into_iter().flatten()) {
+            if let Err(error) = model::adopt(&from, &to, &model) {
+                tracing::warn!(%error, from = %from.display(), "could not use a model the installer carried");
+            }
+        }
+    }
+    #[cfg(not(feature = "voice"))]
+    let _ = bundled;
+}
+
 /// How many [`VoiceEvent`]s a subscriber may fall behind before it loses the oldest.
 ///
 /// A turn produces four at most — `Listening`, `Thinking`, and one of `Heard`, `HeardNothing`
@@ -837,9 +869,45 @@ pub fn start(dir: Option<&std::path::Path>) -> Voice {
 #[cfg(feature = "voice")]
 const EVENT_CAPACITY: usize = 64;
 
+/// What an installer carries, one line per file: its digest, where it goes under
+/// [`BUNDLED_DIR`], and where it comes from. The release workflow downloads exactly this list and
+/// checks each digest; `bundled-models.txt` beside this crate's manifest is this, committed.
+#[cfg(feature = "voice")]
+pub fn bundled_manifest() -> String {
+    let whisper = std::iter::once((stt::BASE, stt::BASE.file.to_string()));
+    let voice = tts::required().into_iter().map(|m| (m, format!("{}/{}", tts::DIRECTORY, m.file)));
+    whisper
+        .chain(voice)
+        .map(|(model, path)| format!("{}  {path} {}\n", model.sha256, model.url))
+        .chain(std::iter::once({
+            let (url, sha256) = tts::LICENCE_FILE;
+            format!("{sha256}  {}/LICENSE {url}\n", tts::DIRECTORY)
+        }))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The list the release downloads is the list the app checks.** A model changed in
+    /// `stt` or `tts` without this file would ship an installer carrying the old one, which the
+    /// app would then refuse by its size and download again.
+    #[cfg(feature = "voice")]
+    #[test]
+    fn the_committed_list_of_bundled_models_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bundled-models.txt");
+        let expected = bundled_manifest();
+        if std::env::var_os("ZYRIS_WRITE_MANIFEST").is_some() {
+            std::fs::write(&path, &expected).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            expected,
+            "run this test with ZYRIS_WRITE_MANIFEST=1 to rewrite {}",
+            path.display()
+        );
+    }
 
     /// **The test the whole feature layout rests on.** It is written so that it passes in both
     /// feature states on purpose: the point is not that voice is off, it is that a consumer of

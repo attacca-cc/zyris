@@ -125,6 +125,14 @@ macro_rules! supertonic {
     };
 }
 
+/// The weights' licence, at the same revision: BigScience OpenRAIL-M, whose use-based
+/// restrictions have to travel with every copy, so an installer carrying the model carries this
+/// beside it. Not needed to speak, so not in [`required`].
+pub const LICENCE_FILE: (&str, &str) = (
+    supertonic!("LICENSE"),
+    "0d944a9110fed9a9602d60e0423a272903e7bd21ab060490774efc77c2275e9f",
+);
+
 /// The six files the model itself is. Sizes and digests read from the pinned revision on
 /// 2026-09-15 and checked against the copies measured on this machine.
 pub const FILES: [Model; 6] = [
