@@ -811,6 +811,7 @@ export function Voice() {
                   onSave={(phrase) => act("wakePhrase", "set_wake_phrase", { phrase })}
                 />
                 {refused.wakePhrase && <Problem>{refused.wakePhrase}</Problem>}
+                <Note>Separate other spellings with a slash, such as Agent / 에이전트.</Note>
                 {voice.wake.state.state === "unreadable" && (
                   <Problem>The recordings could not be read. {voice.wake.state.reason}</Problem>
                 )}
@@ -1162,6 +1163,8 @@ function WakePhrase({ phrase, busy, onSave }: { phrase: string; busy: boolean; o
         aria-label="The wake phrase"
         value={typed}
         onChange={(event) => setTyped(event.target.value)}
+        placeholder="Hey Zyris"
+        title="Separate spellings with /, such as Agent / 에이전트"
         className="h-8 flex-1"
       />
       <Button type="submit" size="sm" variant="outline" disabled={busy || typed.trim() === phrase}>
