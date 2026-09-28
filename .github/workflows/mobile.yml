@@ -89,8 +89,18 @@ jobs:
           dependencies {
               implementation("rustls:rustls-platform-verifier:$version")
           }
+          // R8 removes classes only JNI calls, and the template's keep-rule files were not
+          // applied to them (0.1.2 shipped none). Nothing here is worth the risk of shrinking.
+          android {
+              buildTypes {
+                  getByName("release") {
+                      optimization {
+                          enable = false
+                      }
+                  }
+              }
+          }
           EOF
-          echo '-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }' >> "$app/proguard-rules.pro"
           tail -8 "$app/build.gradle.kts"
 
       - name: Build the APK
