@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { KeyRoundIcon, WifiIcon, WifiOffIcon } from "lucide-react";
-import type { State } from "./state";
+import { PHONE, type State } from "./state";
+import { PhoneAccess } from "./PhoneAccess";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { CopyButton, Fingerprint } from "@/components/CopyButton";
 import { IconTile, Mono, Note, Problem } from "@/components/IconTile";
@@ -100,38 +101,42 @@ export function Status({ state }: { state: State }) {
           peers. It works before this machine has ever connected, so it is not inside the node
           branch — and keeping it separate stops anybody reading the node id aloud against a
           fingerprint. */}
-      <Card>
-        <CardHeader className="items-center">
-          <IconTile>
-            <KeyRoundIcon />
-          </IconTile>
-          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <CardTitle>This computer's fingerprint</CardTitle>
-            <CardDescription>Read this out when another of your machines asks you to approve this one.</CardDescription>
-          </div>
-          {typeof fingerprint === "string" && !fingerprintProblem && (
-            <CopyButton text={fingerprint} label="Copy the fingerprint" withText />
-          )}
-        </CardHeader>
-        {fingerprintProblem ? (
-          <Problem>{fingerprintProblem}</Problem>
-        ) : fingerprint === undefined ? (
-          <Note>Reading this computer's fingerprint.</Note>
-        ) : fingerprint === null ? (
-          <Note>
-            File transfer is not running on this computer, so it has no fingerprint and no other machine can
-            send a file here. Zyris says why in its log when it starts.
-          </Note>
-        ) : (
-          <>
-            <Fingerprint value={fingerprint} />
-            <Note className="text-xs text-subtle">
-              Not a secret — it is the short form of this computer's public key, and it stays the same after
-              every restart.
+      {PHONE ? (
+        <PhoneAccess />
+      ) : (
+        <Card>
+          <CardHeader className="items-center">
+            <IconTile>
+              <KeyRoundIcon />
+            </IconTile>
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <CardTitle>This computer's fingerprint</CardTitle>
+              <CardDescription>Read this out when another of your machines asks you to approve this one.</CardDescription>
+            </div>
+            {typeof fingerprint === "string" && !fingerprintProblem && (
+              <CopyButton text={fingerprint} label="Copy the fingerprint" withText />
+            )}
+          </CardHeader>
+          {fingerprintProblem ? (
+            <Problem>{fingerprintProblem}</Problem>
+          ) : fingerprint === undefined ? (
+            <Note>Reading this computer's fingerprint.</Note>
+          ) : fingerprint === null ? (
+            <Note>
+              File transfer is not running on this computer, so it has no fingerprint and no other machine can
+              send a file here. Zyris says why in its log when it starts.
             </Note>
-          </>
-        )}
-      </Card>
+          ) : (
+            <>
+              <Fingerprint value={fingerprint} />
+              <Note className="text-xs text-subtle">
+                Not a secret — it is the short form of this computer's public key, and it stays the same after
+                every restart.
+              </Note>
+            </>
+          )}
+        </Card>
+      )}
     </Page>
   );
 }

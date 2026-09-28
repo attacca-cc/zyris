@@ -6864,6 +6864,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-zyris-mobile"
+version = "0.1.2"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+]
+
+[[package]]
 name = "tauri-runtime"
 version = "2.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9240,6 +9250,8 @@ dependencies = [
  "jni 0.22.4",
  "ndk-context",
  "open",
+ "reqwest",
+ "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
@@ -9248,13 +9260,16 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tauri-plugin-zyris-mobile",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "webpki-root-certs",
  "windows-sys 0.61.2",
+ "zyris",
  "zyris-autostart",
+ "zyris-fs",
  "zyris-mcp",
  "zyris-runtime",
  "zyris-tools",

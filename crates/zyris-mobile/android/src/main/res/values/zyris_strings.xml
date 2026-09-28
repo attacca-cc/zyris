@@ -1,0 +1,5 @@
+<resources>
+    <string name="zyris_accessibility_label">Zyris</string>
+    <string name="zyris_accessibility_description">Lets your Attacca agent tap, swipe and type on this phone when it is asked to. Zyris does not read or send what is on screen through this service.</string>
+    <string name="zyris_channel_name">Connection</string>
+</resources>

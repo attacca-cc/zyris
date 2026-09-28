@@ -32,6 +32,7 @@ pub fn run() {
     let setup_bus = bus.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_zyris_mobile::init())
         .manage(bus)
         .invoke_handler(tauri::generate_handler![
             latest_event,
@@ -46,6 +47,13 @@ pub fn run() {
             choose_conversation_session,
             new_conversation_session,
             conversation_history,
+            check_for_update,
+            install_update,
+            phone_status,
+            phone_open_touch_settings,
+            phone_open_files_settings,
+            phone_allow_screen,
+            phone_allow_notifications,
         ])
         .setup(move |app| {
             // **Where everything this app keeps lives.** The runtime finds its secrets and data
@@ -75,7 +83,13 @@ pub fn run() {
             let identity =
                 zyris_runtime::identity::Identity::new(zyris_runtime::secret::SecretStore::new(INSTANCE));
             let hook = voice.clone();
-            let connector = zyris_runtime::connection::Connector::new(identity, setup_bus.clone())
+            let connector = zyris_runtime::connection::Connector::new(identity, setup_bus.clone());
+            // Android lends its screen, touch and files to the agent; iOS allows none of them.
+            #[cfg(target_os = "android")]
+            let connector = connector.with_capabilities(zyris_runtime::LiveCapabilities::new(
+                crate::phone::capabilities(app.handle(), data.clone()),
+            ));
+            let connector = connector
                 .add_connect_hook(move |connection| {
                     let voice = hook.clone();
                     async move { voice.on_connect(connection).await }
@@ -85,6 +99,18 @@ pub fn run() {
             forward_traces(app.handle().clone(), voice.traces(), &handle);
             app.manage(voice);
             handle.spawn(connector.run());
+            // The foreground service that keeps the connection up off screen. Off the main
+            // thread: the call waits for Kotlin, which answers on it.
+            #[cfg(target_os = "android")]
+            {
+                use tauri_plugin_zyris_mobile::PhoneExt;
+                let app = app.handle().clone();
+                handle.spawn_blocking(move || {
+                    if let Err(error) = app.phone().call::<serde_json::Value>("startBackground", ()) {
+                        tracing::warn!(%error, "could not start the background connection");
+                    }
+                });
+            }
             // `tauri.conf.json` declares the window hidden, for the desktop's tray-first start;
             // a phone app has no tray to open it from.
             if let Some(window) = app.get_webview_window("main") {
@@ -259,4 +285,90 @@ async fn conversation_history(
     voice: State<'_, Arc<zyris_voice::Voice>>,
 ) -> Result<zyris_voice::view::HistoryView, String> {
     voice.history().await
+}
+
+// ---- Updates and what the phone has allowed -----------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct Available {
+    version: String,
+    notes: Option<String>,
+}
+
+/// The newer release, in the desktop's answer shape so the window's update notice is the same
+/// code. An iPhone app is installed by the person's own signing tool, so it never offers one.
+#[tauri::command]
+async fn check_for_update(app: tauri::AppHandle) -> Result<Option<Available>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let current = app.package_info().version.to_string();
+        let release = crate::phone::newer_release(&current).await?;
+        Ok(release.map(|r| Available { version: r.version, notes: r.notes }))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
+}
+
+/// Download the APK and open the system installer, which asks the person to confirm.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let current = app.package_info().version.to_string();
+        let Some(release) = crate::phone::newer_release(&current).await? else {
+            return Err("there is no newer release any more".to_string());
+        };
+        let cache = app.path().app_cache_dir().map_err(|error| error.to_string())?;
+        crate::phone::install(&app, release, cache).await
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("updates on this phone come from the tool that installed it".to_string())
+    }
+}
+
+/// Run one Kotlin command from a window command, off the main thread it answers on.
+#[cfg(target_os = "android")]
+async fn phone(app: tauri::AppHandle, command: &'static str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+    use tauri_plugin_zyris_mobile::PhoneExt;
+    tokio::task::spawn_blocking(move || app.phone().call::<serde_json::Value>(command, args))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[cfg(not(target_os = "android"))]
+async fn phone(_app: tauri::AppHandle, _command: &'static str, _args: serde_json::Value) -> Result<serde_json::Value, String> {
+    Err("this phone does not let apps share their screen, touch or files".to_string())
+}
+
+/// Touch, screen, files and installs: what the person has turned on.
+#[tauri::command]
+async fn phone_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    phone(app, "status", serde_json::json!({})).await
+}
+
+#[tauri::command]
+async fn phone_open_touch_settings(app: tauri::AppHandle) -> Result<(), String> {
+    phone(app, "openTouchSettings", serde_json::json!({})).await.map(drop)
+}
+
+#[tauri::command]
+async fn phone_open_files_settings(app: tauri::AppHandle) -> Result<(), String> {
+    phone(app, "openFilesSettings", serde_json::json!({})).await.map(drop)
+}
+
+/// Android's screen-capture prompt, asked now rather than on the agent's first screenshot, when
+/// the app might not be on screen to show it.
+#[tauri::command]
+async fn phone_allow_screen(app: tauri::AppHandle) -> Result<(), String> {
+    phone(app, "screenshot", serde_json::json!({ "maxWidth": 64 })).await.map(drop)
+}
+
+#[tauri::command]
+async fn phone_allow_notifications(app: tauri::AppHandle) -> Result<(), String> {
+    phone(app, "requestPermissions", serde_json::json!({ "permissions": ["notifications"] })).await.map(drop)
 }

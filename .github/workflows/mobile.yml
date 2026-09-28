@@ -94,9 +94,7 @@ jobs:
           android {
               buildTypes {
                   getByName("release") {
-                      optimization {
-                          enable = false
-                      }
+                      isMinifyEnabled = false
                   }
               }
           }

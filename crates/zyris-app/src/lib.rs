@@ -4,5 +4,8 @@
 #[cfg(mobile)]
 mod mobile;
 
+#[cfg(target_os = "android")]
+mod phone;
+
 #[cfg(mobile)]
 pub use mobile::run;
