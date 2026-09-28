@@ -466,8 +466,14 @@ pub const WARM_LANGUAGE: &str = "en";
 /// Four on this machine, which is what every measurement in this module was taken with. The
 /// cap is there because whisper.cpp does not get faster past a machine's physical cores and
 /// a 32-thread server would spend the difference on contention.
+///
+/// **Four on a phone, whatever it reports.** A phone's cores are not alike: a Galaxy S23 Ultra
+/// reports eight, three of them small efficiency cores, and whisper.cpp's threads wait on each
+/// other at every step, so the small cores set the pace. The same cores also draw the screen,
+/// and eight busy-waiting threads leave it none.
 pub fn threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8)
+    let cap = if cfg!(target_os = "android") { 4 } else { 8 };
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, cap)
 }
 
 /// Everything about a transcription that is a decision rather than a default.
