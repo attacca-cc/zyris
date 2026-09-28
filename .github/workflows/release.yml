@@ -272,7 +272,9 @@ jobs:
             mkdir -p "$(dirname "$file")"
             curl -fsSL --retry 5 -o "$file" "$url"
             echo "$sha256  $file" | $sum -c -
-          done < crates/zyris-voice/bundled-models.txt
+          # Without `\r`: the Windows checkout turns the list's line ends into CRLF, and curl
+          # rejects a URL that ends in one.
+          done < <(tr -d '\r' < crates/zyris-voice/bundled-models.txt)
           du -sh crates/zyris-app/models
 
       - name: Build the bundles
