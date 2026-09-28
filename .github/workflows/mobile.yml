@@ -84,7 +84,24 @@ jobs:
           {
             echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME"
             echo "ANDROID_NDK=$ANDROID_NDK_LATEST_HOME"
-            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot -I$RUNNER_TEMP/vulkan-headers/include"
+          } >> "$GITHUB_ENV"
+
+      # Whisper on the phone's GPU (`--features gpu-stt` below): ggml-vulkan is C++ and needs
+      # vulkan.hpp, which the NDK does not carry. The loader and glslc are the NDK's; see
+      # crates/zyris-voice/cmake/android-vulkan.cmake.
+      - name: Vulkan headers for the phone's GPU
+        run: |
+          curl -fsSL -o vulkan-headers.tar.gz https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/vulkan-sdk-1.4.357.0.tar.gz
+          echo "e87dce08116151f6b6d7de6b6faf41498e87e6cf848ff16fa3bd5402190ad4a3  vulkan-headers.tar.gz" | sha256sum -c -
+          tar xzf vulkan-headers.tar.gz
+          mv Vulkan-Headers-vulkan-sdk-1.4.357.0 "$RUNNER_TEMP/vulkan-headers"
+          rm vulkan-headers.tar.gz
+          {
+            echo "ZYRIS_VULKAN_HEADERS=$RUNNER_TEMP/vulkan-headers"
+            echo "CXXFLAGS_aarch64_linux_android=-I$RUNNER_TEMP/vulkan-headers/include"
+            echo "CFLAGS_aarch64_linux_android=-I$RUNNER_TEMP/vulkan-headers/include"
+            echo "CMAKE_PROJECT_INCLUDE_BEFORE=$GITHUB_WORKSPACE/crates/zyris-voice/cmake/android-vulkan.cmake"
           } >> "$GITHUB_ENV"
 
       # The Gradle project is generated rather than committed: it is Tauri's template and the
@@ -133,7 +150,7 @@ jobs:
             "$app/src/main/jniLibs/arm64-v8a/"
 
       - name: Build the APK
-        run: pnpm tauri android build --apk --target aarch64 --ci --features voice
+        run: pnpm tauri android build --apk --target aarch64 --ci --features voice,gpu-stt
 
       # 0.1.2 shipped without these classes and died on its first TLS handshake; a build that
       # loses them again stops here instead.
