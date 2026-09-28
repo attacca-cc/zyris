@@ -61,7 +61,7 @@ export function Status({ state }: { state: State }) {
     <Page>
       <PageHeader
         title="Status"
-        description={`${PHONE ? "This phone's" : "This computer's"} link to Attacca.${version ? ` Zyris ${version}.` : ""}`}
+        description={`${PHONE ? "This phone's" : "This computer's"} link to Attacca.${version ? ` Zyris ${version} (build ${__ZYRIS_BUILD__}).` : ""}`}
       />
 
       <Card

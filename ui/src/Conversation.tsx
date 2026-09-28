@@ -128,7 +128,10 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col" hidden={hidden}>
+    // `min-h-0`: on a phone the sidebar stacks and this is a column item, whose height would
+    // otherwise grow to fit the whole thread — pushing the session picker off the top and leaving
+    // the thread nothing to scroll.
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col" hidden={hidden}>
       <SessionPicker
         hidden={hidden}
         onAgentName={setAgentName}
