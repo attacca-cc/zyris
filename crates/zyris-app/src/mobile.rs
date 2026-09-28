@@ -63,6 +63,7 @@ pub fn run() {
             set_voice_speaker,
             set_voice_compute,
             set_voice_volume,
+            set_input_gain,
             set_speaking_rate,
             set_speech_model,
             fetch_speech_model,
@@ -455,6 +456,11 @@ async fn set_voice_compute(
 #[tauri::command]
 async fn set_voice_volume(volume: f32, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
     Ok(screen(voice.choose_volume(volume).await))
+}
+
+#[tauri::command]
+async fn set_input_gain(gain: f32, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_input_gain(gain).await))
 }
 
 #[tauri::command]

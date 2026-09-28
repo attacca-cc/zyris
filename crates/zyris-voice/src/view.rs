@@ -392,6 +392,8 @@ pub struct VoiceView {
     pub read_aloud: bool,
     /// How loud answers are read, as a gain on the voice.
     pub volume: f32,
+    /// How much the microphone is amplified, 1.0 as delivered.
+    pub input_gain: f32,
     /// Where speech is transcribed and answers are read.
     pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
@@ -449,6 +451,7 @@ impl VoiceView {
             speaking_rate: 1.0,
             read_aloud: false,
             volume: 1.0,
+            input_gain: 1.0,
             compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),

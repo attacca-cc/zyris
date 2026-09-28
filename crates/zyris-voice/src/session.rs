@@ -336,6 +336,12 @@ pub struct Session {
     /// 30-second recordings is how a 3.6 GB machine dies quietly.
     queued: Option<Vec<f32>>,
 
+    /// How much the microphone is amplified, shared with the engine so the Voice screen's
+    /// slider reaches this session while it listens. An `f32`'s bits; `None` is 1.0.
+    input_gain: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// The amplified copy of a callback's samples, reused like the two buffers below.
+    amplified: Vec<f32>,
+
     /// Reused across callbacks so the steady state allocates nothing.
     staged: Vec<f32>,
     ready: Vec<f32>,
@@ -404,6 +410,8 @@ impl Session {
             turn: None,
             pending: None,
             queued: None,
+            input_gain: None,
+            amplified: Vec::new(),
             staged: Vec::new(),
             ready: Vec::new(),
             watch: None,
@@ -472,6 +480,13 @@ impl Session {
     /// Publish how loud the microphone is while a turn is open.
     pub fn metering(mut self, levels: broadcast::Sender<crate::Level>) -> Session {
         self.levels = Some(levels);
+        self
+    }
+
+    /// Multiply the microphone by this gain before anything reads it. Read on every callback,
+    /// so a change takes effect at once.
+    pub fn amplified_by(mut self, gain: Arc<std::sync::atomic::AtomicU32>) -> Session {
+        self.input_gain = Some(gain);
         self
     }
 
@@ -603,6 +618,23 @@ impl Session {
     }
 
     fn heard(&mut self, samples: &[f32]) {
+        let gain = self
+            .input_gain
+            .as_ref()
+            .map_or(1.0, |gain| f32::from_bits(gain.load(std::sync::atomic::Ordering::Relaxed)));
+        if gain != 1.0 {
+            // Clipped at full scale: past it the echo canceller and whisper read distortion.
+            let mut amplified = std::mem::take(&mut self.amplified);
+            amplified.clear();
+            amplified.extend(samples.iter().map(|sample| (sample * gain).clamp(-1.0, 1.0)));
+            self.gained(&amplified);
+            self.amplified = amplified;
+        } else {
+            self.gained(samples);
+        }
+    }
+
+    fn gained(&mut self, samples: &[f32]) {
         if self.turn.is_none() && !self.should_watch() {
             // Neither recording nor listening for the phrase. The audio is dropped rather than
             // buffered, and the session.s endpointer is not advanced — which is what keeps a
@@ -2337,6 +2369,40 @@ mod tests {
         assert_eq!(measured.len(), crate::LEVELS_PER_SECOND as usize, "a second is 25 levels");
         assert!(measured.iter().all(|level| level.source == crate::Source::Microphone));
         assert!(measured.iter().all(|level| (level.rms - 0.5).abs() < 1e-3), "{measured:?}");
+        zyris.stops().await;
+    }
+
+    /// **The input gain multiplies what is heard, and a change reaches a session already
+    /// listening.** The meter reads the same samples the endpointer and whisper do.
+    #[tokio::test]
+    async fn the_input_gain_amplifies_the_microphone_while_it_listens() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let (levels, mut seen) = broadcast::channel(256);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let scribe = Scribe::always("hello");
+        let gain = Arc::new(std::sync::atomic::AtomicU32::new(0.5f32.to_bits()));
+        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+            .metering(levels)
+            .amplified_by(gain.clone());
+        let zyris = Harness { audio: Some(audio), keys, events: events_rx, scribe, session: tokio::spawn(session.run()) };
+        let steady = vec![0.4f32; crate::capture::SAMPLE_RATE as usize];
+        let mut rms_at = async |zyris: &Harness| {
+            for chunk in steady.chunks(crate::capture::APM_FRAME) {
+                zyris.feed(chunk).await;
+            }
+            let mut last = None;
+            while let Ok(level) = seen.try_recv() {
+                last = Some(level.rms);
+            }
+            last.expect("a second of audio was measured")
+        };
+
+        zyris.press().await;
+        assert!((rms_at(&zyris).await - 0.2).abs() < 1e-3, "half the gain is half the level");
+        gain.store(4.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        assert!((rms_at(&zyris).await - 1.0).abs() < 1e-3, "four times 0.4 is clipped at full scale");
         zyris.stops().await;
     }
 

@@ -694,6 +694,16 @@ impl Voice {
         }
     }
 
+    /// Choose how much the microphone is amplified, now and at the next launch.
+    pub async fn choose_input_gain(&self, gain: f32) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_input_gain(gain).await;
+        }
+        let _ = gain;
+        self.look().await
+    }
+
     /// Choose how loud answers are read, now and at the next launch.
     pub async fn choose_volume(&self, gain: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

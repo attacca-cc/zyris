@@ -103,6 +103,11 @@ pub struct Settings {
     /// How loud answers are read, as a gain on the voice: 1.0 is as the model writes it.
     #[serde(default)]
     pub volume: Option<f32>,
+    /// How much the microphone is amplified before anything reads it: 1.0 is as the device
+    /// delivers it. For a microphone the system records too quietly (one measured at -29 dBFS
+    /// with the system volume at 47% heard Base hallucinate, 2026-09-28).
+    #[serde(default)]
+    pub input_gain: Option<f32>,
     /// Where speech is transcribed: `cpu` or `gpu:N`, as [`stt::Device::id`] writes it. `None`
     /// is [`stt::default_device`].
     #[serde(default)]
@@ -206,6 +211,11 @@ fn read_aloud(settings: &Settings) -> bool {
     settings.read_aloud.unwrap_or(true)
 }
 
+/// The input gain `settings` asks for: a quarter to eight times, 1.0 when unset.
+fn input_gain(settings: &Settings) -> f32 {
+    settings.input_gain.filter(|g| g.is_finite()).unwrap_or(1.0).clamp(0.25, 8.0)
+}
+
 /// The volume `settings` asks for, clamped the way the voice will clamp it.
 fn volume(settings: &Settings) -> f32 {
     settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.1, 2.0)
@@ -267,6 +277,9 @@ pub struct Engine {
     /// Whether that reader has been started. It is started by the first connection rather than
     /// here, because `new` is not async and may run before the runtime does.
     answers_started: std::sync::atomic::AtomicBool,
+    /// The microphone gain every session multiplies by, shared so a change reaches the one
+    /// listening now. An `f32`'s bits.
+    input_gain: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 struct Live {
@@ -312,6 +325,7 @@ impl Engine {
         };
         let traces = broadcast::channel(TRACE_CAPACITY).0;
         let answers = Answers::new(traces.clone(), events.clone(), read_aloud(&settings));
+        let gain = input_gain(&settings);
         Engine {
             settings_path,
             events,
@@ -324,6 +338,7 @@ impl Engine {
             loaded: std::sync::Mutex::new(Vec::new()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
+            input_gain: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(gain.to_bits())),
             answers,
             levels: broadcast::channel(LEVEL_CAPACITY).0,
             answers_started: std::sync::atomic::AtomicBool::new(false),
@@ -492,6 +507,7 @@ impl Engine {
             speaking_rate: speaking_rate(settings),
             read_aloud: read_aloud(settings),
             volume: volume(settings),
+            input_gain: input_gain(settings),
             compute: compute_view(settings),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
@@ -647,6 +663,17 @@ impl Engine {
         if !on && let Some(speaking) = self.answers.speaking() {
             speaking.hush();
         }
+    }
+
+    /// Choose how much the microphone is amplified. Takes effect at once, on the session that is
+    /// listening, without reopening anything.
+    pub async fn choose_input_gain(&self, gain: f32) {
+        let mut live = self.live.lock().await;
+        live.settings.input_gain = Some(gain);
+        let gain = input_gain(&live.settings);
+        live.settings.input_gain = Some(gain);
+        self.store(&live.settings);
+        self.input_gain.store(gain.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Choose how loud answers are read. Takes effect from the next sentence, like the rate.
@@ -913,6 +940,7 @@ impl Engine {
         }
         session = session.tracing(self.traces.clone());
         session = session.metering(self.levels.clone());
+        session = session.amplified_by(self.input_gain.clone());
         session = session.expecting(settings.vocabulary.as_deref().unwrap_or(DEFAULT_VOCABULARY));
         if let Some(phrase) = phrase {
             session = session.listening_for(phrase);
