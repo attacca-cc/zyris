@@ -260,8 +260,12 @@ impl Watch {
 /// A room the detector never hears silence in — a fan, a television, a conversation across it
 /// — would otherwise grow this buffer for as long as the machine is on. Anything longer than
 /// a take could have been is not the phrase, so there is nothing to lose by forgetting it.
+///
+/// **Long enough for the phrase and a whole request after it**, said in one breath: "Hey Zyris,
+/// what is on my calendar tomorrow and …" is one utterance, and a cap of two takes cut every
+/// request longer than a few seconds, so only the pause-and-wait form ever worked.
 fn watch_cap() -> usize {
-    crate::stt::samples_in(crate::wake::MAX_TAKE) * 2
+    crate::stt::samples_in(crate::wake::MAX_TAKE) + crate::stt::samples_in(MAX_TURN)
 }
 
 /// One voice session, driven by a key and a microphone.
@@ -302,6 +306,12 @@ pub struct Session {
     /// The whisper those checks use, when it is not the one turns are transcribed with. See
     /// `run::Engine::wake_checker`.
     checker: Option<Arc<dyn Transcribe>>,
+    /// The utterance the check in flight is reading, kept so a request said in the same breath
+    /// as the phrase can be written down again by the turn's own whisper.
+    checked_audio: Option<Vec<f32>>,
+    /// The transcription in flight is of a whole utterance, phrase included, and the phrase
+    /// comes off the front before it is sent.
+    after_phrase: bool,
     /// Names whisper is told to expect in every turn, so it spells them as written rather than as
     /// it heard them: "깃허브" comes back "기토부" without it (zyris#18). `None` reads plainly.
     vocabulary: Option<Arc<str>>,
@@ -381,6 +391,8 @@ impl Session {
             partial_next: PARTIAL_EVERY,
             checking: None,
             checker: None,
+            checked_audio: None,
+            after_phrase: false,
             vocabulary: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
@@ -687,6 +699,12 @@ impl Session {
         watch.heard.extend_from_slice(frame);
 
         match listening {
+            // While the last utterance is still being read, this one is kept rather than
+            // checked: if that one was the phrase, this is the request, and the turn it opens
+            // starts with it.
+            Listening::Ended(Ended::Utterance { .. }) if self.checking.is_some() => {
+                watch.ends.reset();
+            }
             Listening::Ended(Ended::Utterance { first, last, .. }) => {
                 let from = first * crate::capture::VAD_FRAME;
                 let to = ((last + 1) * crate::capture::VAD_FRAME).min(watch.heard.len());
@@ -720,6 +738,7 @@ impl Session {
         let Some(watch) = &self.watch else { return };
         let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
         let phrase = watch.phrase.said().to_string();
+        self.checked_audio = Some(said.clone());
         self.checking =
             Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
     }
@@ -728,6 +747,7 @@ impl Session {
     /// the request came in the same breath, send it.
     fn checked(&mut self, heard: Result<Result<String, stt::Fault>, tokio::task::JoinError>) {
         self.checking = None;
+        let checked_audio = self.checked_audio.take();
         // The key went down while whisper was reading; that turn is the one that counts.
         if self.turn.is_some() {
             return;
@@ -749,6 +769,20 @@ impl Session {
                 // `push_to_talk_rule` deliberately makes that impossible.
                 self.endpointer.use_rule(Rule::default());
                 self.pressed();
+                // **What was said while whisper was reading belongs to this turn.** The phrase
+                // ended on a pause and the request began before the check came back; the watch
+                // kept listening, and that audio is the start of the request, not a gap to lose.
+                let carried = self.watch.as_mut().map(|watch| {
+                    let heard = std::mem::take(&mut watch.heard);
+                    watch.forget();
+                    heard
+                });
+                for frame in carried.unwrap_or_default().chunks_exact(VAD_FRAME) {
+                    if self.turn.is_none() {
+                        break;
+                    }
+                    self.frame(frame);
+                }
             }
             // Said in one breath. The request is already transcribed, so it goes as it is,
             // through the same steps a turn takes, rather than asking the person to repeat it.
@@ -759,11 +793,29 @@ impl Session {
                 self.trace(crate::Trace::Recording { started: false });
                 self.publish(VoiceEvent::Thinking);
                 self.since = Some(std::time::Instant::now());
-                self.transcribed(Ok(Ok(rest)));
+                // Read by the wake word's whisper, which is Base whenever a larger model is
+                // chosen. The request deserves the chosen one: the whole utterance is written
+                // down again by it, and the phrase comes off the front in `transcribed`.
+                let checker_is_the_turns = self
+                    .checker
+                    .as_ref()
+                    .is_none_or(|checker| std::ptr::addr_eq(Arc::as_ptr(checker), Arc::as_ptr(&self.stt)));
+                match checked_audio {
+                    Some(audio) if !checker_is_the_turns && self.pending.is_none() => {
+                        self.after_phrase = true;
+                        self.pending = Some(self.spawn(audio));
+                    }
+                    _ => self.transcribed(Ok(Ok(rest))),
+                }
             }
             // Said, not dropped: a phrase that never wakes anything is otherwise
             // indistinguishable from a microphone that never heard it.
             crate::wake::Heard::Other => {
+                // What was held for a request nobody announced is let go, or the next check
+                // would read it glued to the front of whatever is said next.
+                if let Some(watch) = &mut self.watch {
+                    watch.forget();
+                }
                 tracing::info!(heard = %text, "heard something that was not the wake word");
                 self.trace(crate::Trace::Unmatched { heard: text });
             }
@@ -1014,6 +1066,11 @@ impl Session {
     ) {
         self.pending = None;
         let took = self.since.take().map_or(0, |at| at.elapsed().as_millis() as u64);
+        let done = if std::mem::take(&mut self.after_phrase) {
+            done.map(|heard| heard.map(|text| self.request_after_phrase(text)))
+        } else {
+            done
+        };
         match done {
             // An empty transcript is not an empty sentence. `stt::clean` turns whisper's own
             // annotations for audio it found no speech in — `[BLANK_AUDIO]`, `(silence)` —
@@ -1035,6 +1092,18 @@ impl Session {
         if let Some(next) = self.queued.take() {
             self.since = Some(std::time::Instant::now());
             self.pending = Some(self.spawn(next));
+        }
+    }
+
+    /// The request in a transcript of the phrase and the request together. The larger model
+    /// may spell the phrase differently from the wake word's whisper, or not hear it at all;
+    /// then the whole sentence is the request, since the person was clearly talking to Zyris.
+    fn request_after_phrase(&self, text: String) -> String {
+        let Some(watch) = &self.watch else { return text };
+        match watch.phrase.in_(&text) {
+            crate::wake::Heard::PhraseThen(rest) => rest,
+            crate::wake::Heard::Phrase => String::new(),
+            crate::wake::Heard::Other => text,
         }
     }
 
@@ -2639,6 +2708,57 @@ mod tests {
         assert_eq!(
             zyris.next().await,
             VoiceEvent::Heard { text: "what is the time".into() }
+        );
+        zyris.stops().await;
+    }
+
+    /// **A request that starts before the phrase has been read is kept.** The phrase ends on
+    /// a pause, the person carries on talking, and whisper is still reading the phrase: that
+    /// speech is the start of the request, and a turn that opened empty after it made the
+    /// person wait for the microphone before speaking.
+    #[tokio::test]
+    async fn the_request_after_a_pause_is_heard_from_its_first_word() {
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("hey zyris".to_string()))
+                .chain(std::iter::repeat_n(Ok("what is the time".to_string()), 8)),
+        ));
+
+        // In one delivery, so all of it is heard before the check of the phrase comes back.
+        zyris.feed(&[utterance(1.1), quiet(1.6), utterance(2.0), quiet(1.6)].concat()).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
+        zyris.stops().await;
+    }
+
+    /// **A long request in one breath with the phrase still reaches the agent.** The watch
+    /// used to give up after two takes' length, so anything past a few seconds was dropped.
+    #[tokio::test]
+    async fn a_long_request_said_with_the_phrase_is_heard() {
+        let (mut zyris, _traces) =
+            running_and_listening(Scribe::always("Hey Zyris, read me everything on the calendar"));
+
+        // All of the recording, past the two takes' length the watch used to stop at.
+        let said = utterance(10.5);
+        assert!(said.len() > crate::stt::samples_in(crate::wake::MAX_TAKE) * 2);
+        zyris.feed(&said).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(
+            zyris.next().await,
+            VoiceEvent::Heard { text: "read me everything on the calendar".into() }
+        );
+        // The whole utterance was read in one piece, not its last few seconds.
+        let heard = zyris.scribe.heard.lock().expect("not poisoned").clone();
+        assert_eq!(heard.len(), 1, "one reading of one utterance");
+        assert!(
+            heard[0].len() + crate::stt::samples_in(std::time::Duration::from_millis(500)) >= said.len(),
+            "only {} of {} samples were read",
+            heard[0].len(),
+            said.len()
         );
         zyris.stops().await;
     }
