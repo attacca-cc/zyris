@@ -147,7 +147,9 @@ export function Conversation({ hidden }: { hidden: boolean }) {
             <MessageCircleIcon className="size-6 text-subtle" aria-hidden="true" />
             <p className="m-0 text-[0.9375rem] font-medium text-heading">Start a conversation</p>
             <p className="m-0 max-w-sm text-[0.8125rem] text-muted-foreground">
-              Type a message below, or talk to the agent with the push-to-talk key or the wake word.
+              {PHONE
+                ? "Type a message below, or turn on the microphone and hold the button to talk."
+                : "Type a message below, or talk to the agent with the push-to-talk key or the wake word."}
             </p>
           </div>
         ) : (
@@ -200,13 +202,13 @@ function HoldToTalk() {
         "h-12 w-full touch-none rounded-xl border text-sm font-medium transition-colors select-none " +
         (down ? "border-primary bg-primary text-primary-foreground" : "bg-card text-heading")
       }
-      onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        press(true);
-      }}
+      // No pointer capture: some Android WebViews report the capture lost as soon as it is
+      // taken, which ended every turn the moment it began. A finger that slides off still ends
+      // it, through `pointerleave`.
+      onPointerDown={() => press(true)}
       onPointerUp={() => press(false)}
       onPointerCancel={() => press(false)}
-      onLostPointerCapture={() => press(false)}
+      onPointerLeave={() => press(false)}
       onContextMenu={(event) => event.preventDefault()}
     >
       {down ? "Listening — let go to send" : "Hold to talk"}
