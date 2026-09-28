@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { KeyRoundIcon, WifiIcon, WifiOffIcon } from "lucide-react";
 import { PHONE, type State } from "./state";
 import { PhoneAccess } from "./PhoneAccess";
@@ -19,6 +20,13 @@ import { Page, PageHeader } from "@/components/PageHeader";
 type Fingerprint = string | null | undefined;
 
 export function Status({ state }: { state: State }) {
+  // Which Zyris this is, for a bug report and for knowing whether an update has landed.
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(null));
+  }, []);
   const [fingerprint, setFingerprint] = useState<Fingerprint>(undefined);
   const [fingerprintProblem, setFingerprintProblem] = useState<string | null>(null);
 
@@ -51,7 +59,10 @@ export function Status({ state }: { state: State }) {
 
   return (
     <Page>
-      <PageHeader title="Status" description="This computer's link to Attacca." />
+      <PageHeader
+        title="Status"
+        description={`${PHONE ? "This phone's" : "This computer's"} link to Attacca.${version ? ` Zyris ${version}.` : ""}`}
+      />
 
       <Card
         className={

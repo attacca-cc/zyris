@@ -104,6 +104,8 @@ pub fn run() {
                 Err(error) => tracing::error!(%error, "could not write the root certificates; the connection will fail"),
             }
 
+            #[cfg(target_os = "android")]
+            tracing::info!(name = ?zyris::machine_name(), "this phone is known to Attacca as");
             let voice = Arc::new(zyris_voice::start(Some(&data)));
             let identity =
                 zyris_runtime::identity::Identity::new(zyris_runtime::secret::SecretStore::new(INSTANCE));
@@ -162,8 +164,16 @@ pub extern "system" fn Java_cc_attacca_zyris_mobile_ZyrisPlugin_initTls<'caller>
     mut env: jni::EnvUnowned<'caller>,
     _plugin: jni::objects::JObject<'caller>,
     context: jni::objects::JObject<'caller>,
+    device_name: jni::objects::JString<'caller>,
 ) {
     env.with_env(|env| -> Result<(), jni::errors::Error> {
+        // The name Attacca's approval page and node list show. `zyris::machine_name` reads
+        // `HOSTNAME` first, and an Android app's own hostname is always "localhost".
+        let name = device_name.to_string();
+        if !name.trim().is_empty() {
+            // SAFETY: set while the plugin loads, before the connector reads it.
+            unsafe { std::env::set_var("HOSTNAME", name.trim()) };
+        }
         // The audio stack (cpal on AAudio) finds the JVM through `ndk-context`, which Tauri
         // leaves unset; a global reference keeps the Context valid for the life of the process.
         // Once per process: the plugin, and so this call, comes again whenever Android recreates

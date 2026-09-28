@@ -19,7 +19,12 @@ import android.os.HandlerThread
 import android.provider.Settings
 import android.util.Base64
 import android.util.DisplayMetrics
+import android.view.View
 import android.view.WindowManager
+import android.webkit.WebView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.activity.result.ActivityResult
 import androidx.core.content.FileProvider
 import app.tauri.annotation.ActivityCallback
@@ -77,12 +82,36 @@ class PathArgs {
     ]
 )
 class ZyrisPlugin(private val activity: Activity) : Plugin(activity) {
-    /** In the app's Rust library (`mobile.rs`): hands TLS verification the JVM and a Context. */
-    private external fun initTls(context: Context)
+    /**
+     * In the app's Rust library (`mobile.rs`): hands TLS verification the JVM and a Context, and
+     * names this phone. An app's hostname on Android is always "localhost", which is what the
+     * approval page showed until the phone's own name was passed down.
+     */
+    private external fun initTls(context: Context, deviceName: String)
 
     init {
         // Before the connection's first handshake, which the Rust side starts after plugins load.
-        initTls(activity.applicationContext)
+        initTls(activity.applicationContext, deviceName())
+    }
+
+    /** The name the person gave the phone in its settings ("Galaxy S23"), else its model. */
+    private fun deviceName(): String {
+        val given = Settings.Global.getString(activity.contentResolver, "device_name")
+        return if (given.isNullOrBlank()) Build.MODEL else given
+    }
+
+    /** Below the status bar: the app draws edge to edge, and its header sat under the clock. */
+    override fun load(webView: WebView) {
+        val content = activity.findViewById<View>(android.R.id.content)
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            val top = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()).top
+            view.setPadding(view.paddingLeft, top, view.paddingRight, view.paddingBottom)
+            insets
+        }
+        content.setBackgroundColor(0xFF0F0C0A.toInt())
+        // Light icons: the app is dark, and dark icons on it were nearly invisible.
+        WindowCompat.getInsetsController(activity.window, content).isAppearanceLightStatusBars = false
+        ViewCompat.requestApplyInsets(content)
     }
 
     /** Where every blocking answer is worked out, so the main thread stays free for callbacks. */
