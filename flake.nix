@@ -15,6 +15,8 @@
         default = zyris;
       };
 
+      devShells.${system}.default = pkgs.callPackage ./nix/shell.nix { };
+
       # For a NixOS configuration: `nixpkgs.overlays = [ zyris.overlays.default ];`, then
       # `environment.systemPackages = [ pkgs.zyris ];`.
       overlays.default = final: prev: { zyris = final.callPackage ./nix/package.nix { }; };

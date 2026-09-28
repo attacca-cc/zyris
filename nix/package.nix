@@ -32,7 +32,6 @@
   wayland,
   libGL,
   vulkan-loader,
-  pkg-config,
 }:
 
 stdenv.mkDerivation (finalAttrs: {
@@ -48,7 +47,6 @@ stdenv.mkDerivation (finalAttrs: {
     dpkg
     autoPatchelfHook
     wrapGAppsHook3
-    pkg-config
   ];
 
   buildInputs = [
