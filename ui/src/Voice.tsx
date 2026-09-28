@@ -17,6 +17,7 @@ import {
 import { PHONE, subscribeVoice, type VoiceEvent } from "./state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Kbd } from "@/components/ui/kbd";
 import { Progress } from "@/components/ui/progress";
@@ -172,6 +173,8 @@ export type VoiceScreen = {
     volume: number;
     // How much the microphone is amplified, 1 as the device delivers it.
     inputGain: number;
+    // The phrase the wake word listens for.
+    wakePhrase: string;
     compute: Compute;
     model: ModelView;
     models: SpeechModel[];
@@ -308,9 +311,17 @@ function LevelSlider({
 
 // The speeds offered, and the stored one if it is not among them — a hand-edited file must not
 // show as some other speed.
+//
+// Rounded first: the rate is an `f32` on the Rust side, so 1.4 arrives as 1.399999976 and was
+// shown as a fifth speed of its own beside 1.4.
 function rateChoices(current: number): number[] {
   const offered = [1, 1.1, 1.25, 1.4];
-  return offered.includes(current) ? offered : [...offered, current].sort((a, b) => a - b);
+  const rate = roundRate(current);
+  return offered.includes(rate) ? offered : [...offered, rate].sort((a, b) => a - b);
+}
+
+function roundRate(rate: number): number {
+  return Math.round(rate * 100) / 100;
 }
 
 // Which kind of device an entry is. **On many computers two entries carry the same name**, one of
@@ -794,6 +805,12 @@ export function Voice() {
               <>
                 {/* The sentence that must not drift, carried from the Rust side. */}
                 <Note className="text-foreground">{voice.wake.note}</Note>
+                <WakePhrase
+                  phrase={voice.wakePhrase}
+                  busy={isBusy("wakePhrase")}
+                  onSave={(phrase) => act("wakePhrase", "set_wake_phrase", { phrase })}
+                />
+                {refused.wakePhrase && <Problem>{refused.wakePhrase}</Problem>}
                 {voice.wake.state.state === "unreadable" && (
                   <Problem>The recordings could not be read. {voice.wake.state.reason}</Problem>
                 )}
@@ -971,7 +988,7 @@ export function Voice() {
               <div className="max-w-60">
                 <Field label="Reading speed">
                   <Select
-                    value={String(voice.speakingRate)}
+                    value={String(roundRate(voice.speakingRate))}
                     disabled={isBusy("rate")}
                     onValueChange={(value) => act("rate", "set_speaking_rate", { rate: Number(value) })}
                   >
@@ -1125,6 +1142,32 @@ export function Voice() {
         Speech is turned into text on this computer; only the text is sent, and no audio is kept.
       </p>
     </Page>
+  );
+}
+
+// The phrase listened for, typed. It has to be what the takes say: "Hey Agent" on a phone, say,
+// so the computer beside it listening for "Hey Zyris" does not wake too.
+function WakePhrase({ phrase, busy, onSave }: { phrase: string; busy: boolean; onSave: (phrase: string) => void }) {
+  const [typed, setTyped] = useState(phrase);
+  useEffect(() => setTyped(phrase), [phrase]);
+  return (
+    <form
+      className="flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(typed);
+      }}
+    >
+      <Input
+        aria-label="The wake phrase"
+        value={typed}
+        onChange={(event) => setTyped(event.target.value)}
+        className="h-8 flex-1"
+      />
+      <Button type="submit" size="sm" variant="outline" disabled={busy || typed.trim() === phrase}>
+        Save
+      </Button>
+    </form>
   );
 }
 

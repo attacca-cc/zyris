@@ -694,6 +694,17 @@ impl Voice {
         }
     }
 
+    /// Choose the wake phrase, now and at the next launch. An empty one is the default.
+    pub async fn choose_wake_phrase(&self, phrase: String) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_wake_phrase(phrase).await?;
+            return Ok(self.look().await);
+        }
+        let _ = phrase;
+        Ok(self.look().await)
+    }
+
     /// Choose how much the microphone is amplified, now and at the next launch.
     pub async fn choose_input_gain(&self, gain: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

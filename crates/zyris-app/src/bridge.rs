@@ -395,6 +395,16 @@ pub async fn set_voice_volume(
     Ok(voice_screen(voice.choose_volume(volume).await, &hotkey))
 }
 
+/// The phrase the wake word listens for.
+#[tauri::command]
+pub async fn set_wake_phrase(
+    phrase: String,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_wake_phrase(phrase).await?, &hotkey))
+}
+
 /// How much the microphone is amplified. Takes effect on the session listening now.
 #[tauri::command]
 pub async fn set_input_gain(

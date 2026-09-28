@@ -409,6 +409,8 @@ pub struct VoiceView {
     /// why a file of the wrong size is not called damaged — see `stt::inspect`.
     pub model_env: Option<String>,
     pub wake: WakeView,
+    /// The phrase listened for: the one typed on the Voice screen, else `wake::DEFAULT_PHRASE`.
+    pub wake_phrase: String,
     /// Whether anything is read aloud, and what stops it if not.
     pub speaking: SpeakingState,
     /// What is on disk where the voice should be. Read every time, like [`VoiceView::model`].
@@ -460,6 +462,7 @@ impl VoiceView {
             voice_model: VoiceModelView::NotHere { reason: reason.clone() },
             voice_model_env: None,
             downloads: Vec::new(),
+            wake_phrase: String::new(),
             wake: WakeView {
                 state: WakeState::NotHere { reason },
                 dir: None,

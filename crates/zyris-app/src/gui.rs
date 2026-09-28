@@ -275,6 +275,7 @@ pub fn run(
             bridge::stop_speaking,
             bridge::set_voice_volume,
             bridge::set_input_gain,
+            bridge::set_wake_phrase,
             bridge::set_voice_compute,
             bridge::set_speech_model,
             bridge::fetch_speech_model,

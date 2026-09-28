@@ -39,7 +39,7 @@ use std::sync::atomic::AtomicU64;
 
 use crate::apm::Apm;
 use crate::capture::{
-    APM_FRAME, Capture, Captured, Choice, Chunker, VAD_FRAME, read_delay,
+    APM_FRAME, Capture, Captured, Choice, Chunker, Recovery, VAD_FRAME, read_delay,
 };
 use crate::playback::{Playback, Render, Speaker};
 use crate::answers::Answers;
@@ -590,6 +590,7 @@ impl Engine {
                 }
             },
             wake: wake_view(),
+            wake_phrase: settings.wake_phrase.clone().unwrap_or_else(|| wake::DEFAULT_PHRASE.to_string()),
             voice_model: voice_model_view(crate::tts::state()),
             voice_model_env: std::env::var(crate::tts::MODELS_ENV).ok().filter(|n| !n.is_empty()),
             downloads: self.downloads.lock().expect("downloads is never poisoned").values().cloned().collect(),
@@ -710,6 +711,23 @@ impl Engine {
         if !on && let Some(speaking) = self.answers.speaking() {
             speaking.hush();
         }
+    }
+
+    /// Choose the phrase listened for, and listen for it now if listening is on. The takes are
+    /// kept: they are what the phrase is checked against, so a phrase that matches what was
+    /// recorded ("Hey Agent", so as not to wake the computer beside it) makes them work.
+    pub async fn choose_wake_phrase(&self, phrase: String) -> Result<(), String> {
+        let phrase = phrase.trim().to_string();
+        if !phrase.is_empty() && wake::Phrase::new(&phrase).is_none() {
+            return Err(format!("\"{phrase}\" has no letters to listen for"));
+        }
+        let mut live = self.live.lock().await;
+        live.settings.wake_phrase = (!phrase.is_empty() && phrase != wake::DEFAULT_PHRASE).then_some(phrase);
+        self.store(&live.settings);
+        // Checked again against the new phrase, and the log says whether the takes match it.
+        self.takes_checked.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.restart_if_running(&mut live).await;
+        Ok(())
     }
 
     /// Choose how much the microphone is amplified. Takes effect at once, on the session that is
@@ -1202,6 +1220,12 @@ fn no_model(state: &stt::ModelState) -> String {
 /// Hold a `cpal::Stream` on a thread of its own and hand the audio back.
 ///
 /// Returns the device's name, the receiver the session reads, and the handle that closes it.
+/// How long the microphone thread waits before reopening a stream the system disconnected.
+const REOPEN_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
+/// How often the microphone thread looks for audio to pass on: a fraction of one 10 ms frame's
+/// worth of delay, and nothing a person hears.
+const POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
 async fn open_on_a_thread(
     choice: Choice,
 ) -> Result<
@@ -1218,20 +1242,62 @@ async fn open_on_a_thread(
 
     std::thread::Builder::new()
         .name("zyris-microphone".to_string())
-        .spawn(move || match Capture::open(&choice, APM_FRAME) {
-            Ok((capture, audio)) => {
-                let device = capture.device().to_string();
-                // The `Capture` cannot leave this thread, so what leaves is the one number
-                // anything outside wants from it: `callback - capture`, for the echo canceller.
-                if ready.send(Ok((device, audio, capture.delay_slot()))).is_err() {
+        .spawn(move || {
+            let (capture, mut audio) = match Capture::open(&choice, APM_FRAME) {
+                Ok(opened) => opened,
+                Err(problem) => {
+                    let _ = ready.send(Err(problem.reason));
                     return;
                 }
-                // Blocks until `stop` is sent or dropped. The `Capture` is dropped on the way
-                // out of this closure, which is what stops and closes the stream.
-                let _ = told_to_stop.recv();
+            };
+            // **The session reads one channel for as long as it runs, whatever stream feeds it.**
+            // A stream the system disconnects (Android does whenever the audio route changes: a
+            // call ending, a headset, another app letting go of the microphone) is reopened
+            // here, and the session never sees more than the one turn it cut short. Before this,
+            // a disconnected phone microphone went on "listening" to nothing.
+            let (forward, received) = tokio::sync::mpsc::unbounded_channel();
+            let device = capture.device().to_string();
+            // The `Capture` cannot leave this thread, so what leaves is the one number anything
+            // outside wants from it: `callback - capture`, for the echo canceller.
+            if ready.send(Ok((device, received, capture.delay_slot()))).is_err() {
+                return;
             }
-            Err(problem) => {
-                let _ = ready.send(Err(problem.reason));
+            let mut capture = Some(capture);
+            loop {
+                // `stop` sent or dropped: the `Capture` goes with this closure, closing the stream.
+                if !matches!(told_to_stop.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+                    return;
+                }
+                match audio.try_recv() {
+                    Ok(captured) => {
+                        let rebuild = matches!(
+                            &captured,
+                            Captured::Problem(problem)
+                                if matches!(problem.recovery, Recovery::Rebuild | Recovery::Retry)
+                        );
+                        if forward.send(captured).is_err() {
+                            return;
+                        }
+                        if rebuild {
+                            drop(capture.take());
+                            // ponytail: reopens every half second until it works; back off if a
+                            // device ever fails to come back for minutes.
+                            loop {
+                                if !matches!(told_to_stop.recv_timeout(REOPEN_AFTER), Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                                    return;
+                                }
+                                if let Ok((reopened, fresh)) = Capture::open(&choice, APM_FRAME) {
+                                    tracing::info!("the microphone was reopened after the system disconnected it");
+                                    capture = Some(reopened);
+                                    audio = fresh;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::sleep(POLL),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return,
+                }
             }
         })
         .map_err(|error| format!("a thread for the microphone could not be started: {error}"))?;

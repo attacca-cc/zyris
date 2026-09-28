@@ -79,6 +79,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       readAloud: over.readAloud ?? true,
       volume: over.volume ?? 1,
       inputGain: over.inputGain ?? 1,
+      wakePhrase: over.wakePhrase ?? "Hey Zyris",
       compute: over.compute ?? {
         transcribe: [
           { id: "cpu", name: "Processor — Intel Core i5" },
@@ -662,6 +663,16 @@ describe("Voice", () => {
     expect(await screen.findByText(/downloading the speech models — 25%/i)).toBeTruthy();
   });
 
+  it("saves a typed wake phrase", async () => {
+    render(<Voice />);
+
+    const field = await screen.findByRole<HTMLInputElement>("textbox", { name: /wake phrase/i });
+    expect(field.value).toBe("Hey Zyris");
+    fireEvent.change(field, { target: { value: "Hey Agent" } });
+    fireEvent.submit(field.closest("form")!);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_wake_phrase", { phrase: "Hey Agent" }));
+  });
+
   it("sets the microphone's gain when the slider is let go", async () => {
     render(<Voice />);
 
@@ -671,6 +682,15 @@ describe("Voice", () => {
     expect(invoke).not.toHaveBeenCalledWith("set_input_gain", expect.anything());
     fireEvent.pointerUp(slider);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_input_gain", { gain: 2.5 }));
+  });
+
+  it("shows a stored speed as the speed it is, not the float it arrives as", async () => {
+    answers(machine({ speakingRate: 1.399999976158142 }));
+    render(<Voice />);
+
+    await screen.findByText(/talk to your agent/i);
+    expect(readable()).toMatch(/1\.4×/);
+    expect(readable()).not.toMatch(/1\.3999/);
   });
 
   it("sets how fast answers are read", async () => {
