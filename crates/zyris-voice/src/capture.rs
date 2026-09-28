@@ -803,6 +803,16 @@ impl Capture {
 
         // Streams come back stopped, input ones included.
         stream.play().map_err(|error| classify(&error))?;
+        // What was opened, for a log read from a phone: a stream that opens and then delivers
+        // only silence (a privacy switch, a permission granted after the open) looks healthy
+        // from here, and this line with the turn's levels is what tells the two apart.
+        tracing::info!(
+            device = %name,
+            rate = source.sample_rate(),
+            channels = source.channels(),
+            format = %source.sample_format(),
+            "the microphone is open"
+        );
 
         Ok((Capture { stream, source, device: name, follows_default, delay }, receiver))
     }

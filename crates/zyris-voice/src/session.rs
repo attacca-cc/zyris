@@ -1004,6 +1004,15 @@ impl Session {
             // Not enough was said for it to be a turn. Nothing is sent to whisper: the floor
             // here is the one that keeps "nobody spoke" from arriving as an invented sentence.
             Ended::TooShort { speech, .. } => {
+                // How loud the recording got, so a log can tell a quiet voice from a microphone
+                // that delivered nothing (no audio at all) or silence (a blocked input).
+                let peak = turn.buffer.iter().fold(0f32, |peak, sample| peak.max(sample.abs()));
+                tracing::info!(
+                    seconds = seconds(turn.buffer.len()),
+                    speech_seconds = speech.as_secs_f32(),
+                    peak,
+                    "a turn had too little speech to send"
+                );
                 self.trace(crate::Trace::Recorded {
                     seconds: seconds(turn.buffer.len()),
                     speech_seconds: speech.as_secs_f32(),

@@ -103,6 +103,15 @@
     height: 100%;
   }
 
+  /* **The page never scrolls; only the panes inside it do.** On a phone the keyboard pushed the
+     whole document up to keep the text box in view and left it there, so the session picker
+     went off the top and the thread could not be scrolled back to it. */
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   body {
     @apply bg-background text-foreground font-sans text-sm antialiased;
     margin: 0;
