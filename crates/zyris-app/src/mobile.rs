@@ -122,6 +122,9 @@ pub fn run() {
 
             forward_core(app.handle().clone(), setup_bus.clone(), &handle);
             forward_traces(app.handle().clone(), voice.traces(), &handle);
+            // Listening as it was left, and on the first launch the models it needs.
+            let resume = voice.clone();
+            handle.spawn(async move { resume.resume().await });
             app.manage(voice);
             handle.spawn(connector.run());
             // The foreground service that keeps the connection up off screen. Off the main

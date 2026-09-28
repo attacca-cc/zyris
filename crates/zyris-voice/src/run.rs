@@ -108,6 +108,10 @@ pub struct Settings {
     /// with the system volume at 47% heard Base hallucinate, 2026-09-28).
     #[serde(default)]
     pub input_gain: Option<f32>,
+    /// Whether Base and the voice have been fetched once without anyone asking. Set after the
+    /// first launch that got them, so a model somebody deletes later is not brought back.
+    #[serde(default)]
+    pub defaults_fetched: bool,
     /// Where speech is transcribed: `cpu` or `gpu:N`, as [`stt::Device::id`] writes it. `None`
     /// is [`stt::default_device`].
     #[serde(default)]
@@ -466,6 +470,49 @@ impl Engine {
         if wanted {
             self.set_listening(true).await;
         }
+        // Listening that failed for want of Base starts once Base has arrived.
+        if self.fetch_defaults().await && wanted && self.live.lock().await.running.is_none() {
+            self.set_listening(true).await;
+        }
+    }
+
+    /// **The first launch downloads Base and the voice, without a click.** An installer carrying
+    /// them was 540 MB, and every update would have carried them again; so they come from the
+    /// network once, in the background, with the Voice screen's progress bars showing it. Once
+    /// both are on disk this is never tried again, so a model deleted later stays deleted.
+    /// Answers whether Base was fetched.
+    async fn fetch_defaults(&self) -> bool {
+        if self.live.lock().await.settings.defaults_fetched {
+            return false;
+        }
+        let named = |var: &str| std::env::var_os(var).is_some_and(|n| !n.is_empty());
+        let mut fetched_base = false;
+        let base_missing = matches!(
+            stt::cached_state(&stt::BASE),
+            stt::ModelState::Absent { .. } | stt::ModelState::Damaged { .. }
+        );
+        if !named(stt::MODEL_ENV) && base_missing {
+            let Some(dir) = stt::cache_dir() else { return false };
+            let key = "model:base";
+            let fetched = stt::fetch(&stt::BASE, &dir, |progress| self.progressed(key, progress)).await;
+            self.finished(key);
+            if let Err(fault) = fetched {
+                tracing::warn!(%fault, "could not download Base; the next launch tries again");
+                return false;
+            }
+            fetched_base = true;
+        }
+        if !named(crate::tts::MODELS_ENV)
+            && !matches!(crate::tts::state(), crate::tts::VoiceState::Ready { .. })
+            && let Err(error) = self.fetch_voice().await
+        {
+            tracing::warn!(%error, "could not download the voice; the next launch tries again");
+            return fetched_base;
+        }
+        let mut live = self.live.lock().await;
+        live.settings.defaults_fetched = true;
+        self.store(&live.settings);
+        fetched_base
     }
 
     /// Everything the Voice screen reads off this machine, in one answer.

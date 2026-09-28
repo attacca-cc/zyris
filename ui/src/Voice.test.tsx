@@ -621,6 +621,22 @@ describe("Voice", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_voice_volume", { volume: 1.5 }));
   });
 
+  it("says the first launch is downloading the models, and how far along", async () => {
+    invoke.mockImplementation(() =>
+      Promise.resolve(
+        machine({
+          downloads: [
+            { id: "model:base", received: 50, total: 100 },
+            { id: "voice", received: 0, total: 100 },
+          ],
+        }),
+      ),
+    );
+    render(<Voice />);
+
+    expect(await screen.findByText(/downloading the speech models — 25%/i)).toBeTruthy();
+  });
+
   it("sets the microphone's gain when the slider is let go", async () => {
     render(<Voice />);
 

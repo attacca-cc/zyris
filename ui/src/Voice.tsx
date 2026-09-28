@@ -625,7 +625,11 @@ export function Voice() {
 
   // While something downloads, read the machine twice a second so its bar moves (#31). The
   // command that started it answers only when the file is whole.
-  const downloading = isBusy("voiceModel") || fetching || Object.keys(loading).length > 0;
+  // The first launch fetches Base and the voice by itself (`fetch_defaults`), with no button
+  // pressed here, so what the machine reports downloading counts too.
+  const inFlight = screen?.voice.downloads ?? [];
+  const downloading =
+    isBusy("voiceModel") || fetching || Object.keys(loading).length > 0 || inFlight.length > 0;
   useEffect(() => {
     if (!downloading) return;
     const timer = setInterval(() => {
@@ -665,7 +669,8 @@ export function Voice() {
       <LoadingBar
         what={
           Object.values(loading)[0] ??
-          (voice.listening.state === "starting" ? voice.listening.detail : null)
+          (voice.listening.state === "starting" ? voice.listening.detail : null) ??
+          downloadingLabel(inFlight)
         }
       />
 
@@ -1111,6 +1116,15 @@ export function Voice() {
       </p>
     </Page>
   );
+}
+
+// What the bar says while models download, with how far along they are together.
+function downloadingLabel(downloads: { received: number; total: number | null }[]): string | null {
+  if (downloads.length === 0) return null;
+  const received = downloads.reduce((sum, d) => sum + d.received, 0);
+  const total = downloads.reduce((sum, d) => sum + (d.total ?? 0), 0);
+  const percent = total > 0 ? ` — ${Math.floor((received / total) * 100)}%` : "";
+  return `Downloading the speech models${percent}. Speech is ready when this finishes.`;
 }
 
 // What the bar says while a model moves between the processor and a graphics card.
