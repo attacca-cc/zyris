@@ -78,6 +78,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       speakingRate: over.speakingRate ?? 1.25,
       readAloud: over.readAloud ?? true,
       volume: over.volume ?? 1,
+      inputGain: over.inputGain ?? 1,
       compute: over.compute ?? {
         transcribe: [
           { id: "cpu", name: "Processor — Intel Core i5" },
@@ -461,9 +462,10 @@ describe("Voice", () => {
     );
   });
 
-  it("will not let a button that is already working be pressed again", async () => {
+  it("will not let a button that is already working be pressed again, and leaves the rest usable", async () => {
     // Starting to listen loads a 141 MB model and downloading one takes minutes. A second press
-    // in the meantime is a second download, and nothing below this screen refuses it.
+    // in the meantime is a second download, and nothing below this screen refuses it. The rest of
+    // the screen is not held hostage by it: the machine takes requests one at a time on its own.
     invoke.mockImplementation((command: string) =>
       command === "voice_state"
         ? Promise.resolve(machine({ model: { state: "absent", path: MODEL, bytes: 147951465 } }))
@@ -478,10 +480,8 @@ describe("Voice", () => {
 
     await waitFor(() => expect(readable()).toMatch(/downloading/i));
     expect(download.disabled).toBe(true);
-    // And every other button on the screen, because they all go through the same machine.
-    for (const button of screen.getAllByRole<HTMLButtonElement>("button")) {
-      expect(button.disabled).toBe(true);
-    }
+    const others = screen.getAllByRole<HTMLButtonElement>("button").filter((button) => button !== download);
+    expect(others.some((button) => !button.disabled)).toBe(true);
   });
 
   // ------------------------------------------------------------------------------------------
@@ -573,7 +573,9 @@ describe("Voice", () => {
 
     fireEvent.click(await screen.findByText("Accurate."));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }));
-    expect((await screen.findByRole("status")).textContent).toMatch(/switching to this model/i);
+    expect(await screen.findByText(/switching to this model/i)).toBeTruthy();
+    // And the bar at the top says what is loading, while everything else stays usable.
+    expect(screen.getByText("Loading Turbo…")).toBeTruthy();
     expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
 
     await act(async () =>
@@ -585,7 +587,8 @@ describe("Voice", () => {
         },
       }),
     );
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText(/switching to this model/i)).toBeNull();
+    expect(screen.queryByText("Loading Turbo…")).toBeNull();
     expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
   });
 
@@ -616,6 +619,17 @@ describe("Voice", () => {
     expect(invoke).not.toHaveBeenCalledWith("set_voice_volume", expect.anything());
     fireEvent.pointerUp(slider);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_voice_volume", { volume: 1.5 }));
+  });
+
+  it("sets the microphone's gain when the slider is let go", async () => {
+    render(<Voice />);
+
+    const slider = await screen.findByRole<HTMLInputElement>("slider", { name: /microphone is amplified/i });
+    expect(slider.value).toBe("100");
+    fireEvent.change(slider, { target: { value: "250" } });
+    expect(invoke).not.toHaveBeenCalledWith("set_input_gain", expect.anything());
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_input_gain", { gain: 2.5 }));
   });
 
   it("sets how fast answers are read", async () => {

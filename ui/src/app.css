@@ -152,10 +152,23 @@
 @utility animate-soft-pulse {
   animation: zy-pulse 1.4s ease-in-out infinite;
 }
+/* A bar with no percentage to show: whisper and ONNX Runtime say nothing while they load. */
+@keyframes zy-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+@utility animate-indeterminate {
+  animation: zy-indeterminate 1.3s ease-in-out infinite;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .animate-caret,
   .animate-soft-pulse,
+  .animate-indeterminate,
   .animate-spin {
     animation: none;
   }
