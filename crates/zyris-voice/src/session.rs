@@ -118,6 +118,10 @@ use crate::vad::{Ended, Endpointer, Listening, Rule, frames_in};
 ///
 /// [`crate::stt::FULL_WINDOW`] rather than a `30` of its own — the whisper encoder's window is
 /// the longest turn that is still one pass.
+/// What a turn that recorded only exact silence says.
+pub const SILENCED: &str = "The microphone gave Zyris only silence. Another app may be using it \
+    (a call, or Discord in a voice channel), or microphone access may be switched off or muted.";
+
 pub const MAX_TURN: Duration = stt::FULL_WINDOW;
 
 /// What to tell a person when a turn was discarded for running past [`MAX_TURN`].
@@ -1018,7 +1022,16 @@ impl Session {
                     speech_seconds: speech.as_secs_f32(),
                     kept: false,
                 });
-                self.publish(VoiceEvent::HeardNothing)
+                // **Exact zeros are not a quiet room.** Every real microphone hisses a little; a
+                // recording that is all 0.0 is one the system silenced: another app capturing
+                // for a call (Android gives everyone else silence while Discord is in a voice
+                // channel, measured on a Galaxy S23 Ultra, 2026-09-29), a privacy switch, or a
+                // muted input. Said, so the person does not keep talking into it.
+                if peak == 0.0 && !turn.buffer.is_empty() {
+                    self.publish(VoiceEvent::Failed { reason: SILENCED.to_string() });
+                } else {
+                    self.publish(VoiceEvent::HeardNothing)
+                }
             }
             Ended::Utterance { first, last, speech } => {
                 self.trace(crate::Trace::Recorded {
@@ -1915,8 +1928,10 @@ mod tests {
         (SAMPLE_RATE as f32 * count) as usize
     }
 
+    /// A quiet room: a hiss far below speech, as every real microphone delivers. Exact zeros
+    /// are a silenced microphone, which a session reports differently (`SILENCED`).
     fn silence(secs: f32) -> Vec<f32> {
-        vec![0.0; seconds(secs)]
+        (0..seconds(secs)).map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 }).collect()
     }
 
     /// A 440 Hz tone. Used where the point is that *something* fills a turn, not that a sine is
@@ -2148,7 +2163,9 @@ mod tests {
 
     /// Digital silence, long enough for the watch's hangover to end an utterance.
     fn quiet(seconds: f32) -> Vec<f32> {
-        vec![0.0; (crate::capture::SAMPLE_RATE as f32 * seconds) as usize]
+        (0..(crate::capture::SAMPLE_RATE as f32 * seconds) as usize)
+            .map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 })
+            .collect()
     }
 
     /// The same, with somebody subscribed to the diagnostic stream.
@@ -2412,6 +2429,22 @@ mod tests {
         assert!((rms_at(&zyris).await - 0.2).abs() < 1e-3, "half the gain is half the level");
         gain.store(4.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
         assert!((rms_at(&zyris).await - 1.0).abs() < 1e-3, "four times 0.4 is clipped at full scale");
+        zyris.stops().await;
+    }
+
+    /// **A microphone the system silenced says so**, rather than "too little speech". Android
+    /// hands every other app exact zeros while one captures for a call.
+    #[tokio::test]
+    async fn a_recording_of_exact_zeros_says_the_microphone_was_silenced() {
+        let mut zyris = running(Scribe::always("something invented"));
+
+        zyris.press().await;
+        zyris.feed(&vec![0.0; seconds(2.0)]).await;
+        zyris.release().await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Failed { reason: SILENCED.to_string() });
+        assert_eq!(zyris.scribe.calls(), 0);
         zyris.stops().await;
     }
 

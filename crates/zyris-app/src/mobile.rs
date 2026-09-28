@@ -18,6 +18,12 @@ use zyris_runtime::{CoreEvent, EventBus};
 const EVENT_NAME: &str = "core-event";
 /// Has to match `VOICE_TRACE_NAME` in `bridge.rs` and `state.ts`.
 const VOICE_TRACE_NAME: &str = "voice-trace";
+/// Has to match `VOICE_LEVEL_NAME` in `bridge.rs` and `state.ts`: the microphone and speaker
+/// levels the conversation's backdrop moves with.
+const VOICE_LEVEL_NAME: &str = "voice-level";
+/// Has to match `VOICE_EVENT_NAME` in `bridge.rs` and `state.ts`: what the Voice screen's last
+/// line says (listening, heard, heard nothing).
+const VOICE_EVENT_NAME: &str = "voice-event";
 /// The desktop's, for the same reason: `broadcast` needs a number.
 const EVENT_CAPACITY: usize = 256;
 /// The instance name the keychain and the data directory are known by.
@@ -124,6 +130,8 @@ pub fn run() {
 
             forward_core(app.handle().clone(), setup_bus.clone(), &handle);
             forward_traces(app.handle().clone(), voice.traces(), &handle);
+            forward_levels(app.handle().clone(), voice.levels(), &handle);
+            forward_events(app.handle().clone(), voice.events(), &handle);
             // Listening as it was left, and on the first launch the models it needs.
             let resume = voice.clone();
             handle.spawn(async move { resume.resume().await });
@@ -238,6 +246,42 @@ fn forward_traces(
             match traces.recv().await {
                 Ok(step) => {
                     let _ = app.emit(VOICE_TRACE_NAME, &step);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+fn forward_events(
+    app: tauri::AppHandle,
+    mut events: tokio::sync::broadcast::Receiver<zyris_voice::VoiceEvent>,
+    runtime: &tokio::runtime::Handle,
+) {
+    runtime.spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let _ = app.emit(VOICE_EVENT_NAME, &event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
+fn forward_levels(
+    app: tauri::AppHandle,
+    mut levels: tokio::sync::broadcast::Receiver<zyris_voice::Level>,
+    runtime: &tokio::runtime::Handle,
+) {
+    runtime.spawn(async move {
+        loop {
+            match levels.recv().await {
+                Ok(level) => {
+                    let _ = app.emit(VOICE_LEVEL_NAME, &level);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
