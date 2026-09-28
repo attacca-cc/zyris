@@ -46,5 +46,8 @@ GEMINI.md
 .aider*
 .windsurfrules
 
+#nix
+.direnv/
+
 # Design notes and documentation drafts
 docs/
