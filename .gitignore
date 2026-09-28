@@ -51,6 +51,3 @@ GEMINI.md
 
 # Design notes and documentation drafts
 docs/
-
-# The models a release installer carries, downloaded by release.yml.
-crates/zyris-app/models/

@@ -622,32 +622,6 @@ mod tests {
 
     /// A directory that goes away with the test. `tempfile` is not a dependency of this crate
     /// and one download test is not a reason to make it one.
-    /// **A model the installer carried becomes a cached one**, once, and a cached copy is never
-    /// overwritten by it.
-    #[test]
-    fn a_bundled_model_is_copied_into_the_cache_once() {
-        let dir = tempdir();
-        let model = Model { url: "", file: "m.bin", bytes: 4, sha256: "" };
-        let (from, to) = (dir.join("bundled/m.bin"), dir.join("cache/m.bin"));
-
-        adopt(&from, &to, &model).expect("nothing bundled is not an error");
-        assert!(!to.exists());
-
-        std::fs::create_dir_all(from.parent().unwrap()).unwrap();
-        std::fs::write(&from, b"abcd").unwrap();
-        adopt(&from, &to, &model).unwrap();
-        assert_eq!(std::fs::read(&to).unwrap(), b"abcd");
-
-        std::fs::write(&from, b"wxyz").unwrap();
-        adopt(&from, &to, &model).unwrap();
-        assert_eq!(std::fs::read(&to).unwrap(), b"abcd", "a cached model was replaced");
-
-        std::fs::write(&from, b"short").unwrap();
-        std::fs::remove_file(&to).unwrap();
-        assert!(adopt(&from, &to, &model).is_err(), "a bundled copy of the wrong size was taken");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
     fn tempdir() -> PathBuf {
         // **A counter, not only the clock.** Windows' clock is coarse enough that two tests
         // starting together read the same instant, got the same directory, and one test's
@@ -746,24 +720,4 @@ mod tests {
         });
         (url, handle)
     }
-}
-
-/// Copy `from` to `to` for [`crate::adopt_bundled_models`], unless `to` is already the model.
-/// `from` missing is not an error: an installer without models carries none.
-pub fn adopt(from: &Path, to: &Path, model: &Model) -> std::io::Result<()> {
-    if matches!(inspect(to, Some(model.bytes)), ModelState::Ready { .. }) {
-        return Ok(());
-    }
-    match std::fs::metadata(from) {
-        Ok(found) if found.len() == model.bytes => {}
-        Ok(_) => return Err(std::io::Error::other("the bundled copy is not the size the model is")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error),
-    }
-    if let Some(dir) = to.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let partial = to.with_extension("bundled-partial");
-    std::fs::copy(from, &partial)?;
-    std::fs::rename(&partial, to)
 }
