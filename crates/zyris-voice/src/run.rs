@@ -300,6 +300,8 @@ impl Engine {
         // the part somebody is watching for.
         let settings_path = dir.map(|dir| dir.join(SETTINGS_FILE));
         let settings = settings_path.as_deref().map(read_settings).unwrap_or_default();
+        // In the background from the first moment: see `stt::warm_the_gpu`.
+        stt::warm_the_gpu();
 
         // **A feed either way now.** Before this, no session in the settings meant no feed at
         // all and a machine that could hear and never answer; the spec's loop begins *get a
