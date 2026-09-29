@@ -985,10 +985,12 @@ impl Engine {
 
         let apm = Apm::new().map_err(|fault| fault.to_string())?;
         let (stt, checker): (Arc<dyn crate::session::Transcribe>, Option<Arc<stt::Stt>>) = match on_npu {
-            // Turns on the NPU; the wake word on whisper.cpp Base on the processor, when it is
-            // there, since it reads every utterance in the room and the NPU's 30-second encoder
-            // is a waste on a one-second phrase.
-            Some(npu) => (npu, self.base_on(stt::Device::Cpu).await),
+            // **Turns and the wake word both on the NPU.** A separate checker on the processor
+            // meant two passes for "Agent, <request>": whisper.cpp Base found the phrase (2-4 s
+            // on the test phone's CPU), then the NPU wrote the whole utterance again (about 3 s);
+            // with no checker the session checks on the NPU, and a request said in one breath is
+            // already written by the model that turns use (measured on SM8550, 2026-09-30).
+            Some(npu) => (npu, None),
             None => {
                 let path = match stt::state(&chosen_model(settings).model) {
                     stt::ModelState::Ready { path, .. } => path,
@@ -1087,12 +1089,6 @@ impl Engine {
             return chosen.clone();
         };
         self.stt_at(&path, device).await.unwrap_or_else(|_| chosen.clone())
-    }
-
-    /// whisper.cpp Base on `device`, if Base is in the cache.
-    async fn base_on(&self, device: stt::Device) -> Option<Arc<stt::Stt>> {
-        let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else { return None };
-        self.stt_at(&path, device).await.ok()
     }
 
     /// The NPU transcriber: loaded and warmed up once, and not tried again this run after a
