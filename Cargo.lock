@@ -6867,7 +6867,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-zyris-mobile"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -9239,7 +9239,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-app"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -9291,7 +9291,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-autostart"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -9370,7 +9370,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-mcp"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "rmcp",
@@ -9418,7 +9418,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-runtime"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "apple-native-keyring-store",
  "directories",
@@ -9463,7 +9463,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-tools"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -9507,7 +9507,7 @@ dependencies = [
 
 [[package]]
 name = "zyris-voice"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "directories",
