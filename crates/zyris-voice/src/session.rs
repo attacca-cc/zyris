@@ -1330,6 +1330,7 @@ impl Session {
     /// One step onto the diagnostic stream. Discarded when nobody is watching, like
     /// [`Session::publish`].
     fn trace(&self, step: crate::Trace) {
+        log_timing(&step);
         let _ = self.traces.send(step);
     }
 }
@@ -1494,6 +1495,15 @@ impl Ledger {
             }
         }
         interruption
+    }
+}
+
+/// The steps a person tuning latency on a phone needs, in the log as well: the trace goes only
+/// to the window, and a phone has no other way to read it.
+fn log_timing(step: &crate::Trace) {
+    use crate::Trace::*;
+    if matches!(step, Woke { .. } | Transcribed { .. } | Synthesised { .. } | Sent { .. }) {
+        tracing::info!(?step, "voice timing");
     }
 }
 
@@ -2010,6 +2020,7 @@ impl Speaking {
 
     /// One step onto the diagnostic stream.
     fn trace(&self, step: crate::Trace) {
+        log_timing(&step);
         let _ = self.traces.send(step);
     }
 
