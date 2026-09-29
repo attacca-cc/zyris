@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/card";
 import { CopyButton } from "@/components/CopyButton";
 import { Note, Problem } from "@/components/IconTile";
 import { Mark } from "@/components/Wordmark";
-import type { State } from "./state";
+import { PHONE, type State } from "./state";
 
 export function Onboarding({ state }: { state: State }) {
   const code = state.code;
@@ -60,7 +60,7 @@ export function Onboarding({ state }: { state: State }) {
         <div className="flex flex-col items-center gap-3.5 text-center">
           <Mark className="h-10" />
           <h1 className="m-0 font-display text-[1.75rem] font-semibold tracking-tight text-heading">
-            Authorize this computer
+            Authorize this {PHONE ? "phone" : "computer"}
           </h1>
           <p className="m-0 text-[0.90625rem] leading-relaxed text-muted-foreground">
             Zyris hands this machine to your Attacca agents. Approve it once and it reconnects on its own from

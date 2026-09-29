@@ -2,10 +2,21 @@ name: CI
 
 # Pull requests, and main once they land. Not every branch push as well: a pull request's
 # branch was tested twice for each commit, once as a push and once as the pull request.
+#
+# Not for a change to documentation alone: it cannot break a build, and the full suite on two
+# runners is most of an hour of machine time spent proving that.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -190,3 +201,34 @@ jobs:
         run: |
           cargo test -p zyris-voice --features voice
           cargo build -p zyris-app --features voice
+
+  # The Mac the release ships to, built the way the release builds it (`voice,metal`), so a
+  # change that breaks it is seen before the tag rather than at it. Build only: the suite above
+  # already runs the tests, and they do not differ by operating system beyond these two.
+  macos:
+    name: build (macos-latest)
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      GGML_NATIVE: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter zyris-ui build
+
+      - run: cargo build -p zyris-app --features voice,metal

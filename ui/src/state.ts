@@ -93,7 +93,11 @@ export type Tab = (typeof TABS)[number]["id"];
 // speech settings, the tools and MCP servers a computer announces, autostart — belongs to the
 // desktop app, and its commands are not in the phone build at all.
 export const PHONE = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-export const SHOWN_TABS = PHONE ? TABS.filter((tab) => tab.id === "conversation" || tab.id === "status") : TABS;
+// Android hears and speaks on the phone itself, so it gets the Voice screen too; iOS does not yet.
+export const ANDROID = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+export const SHOWN_TABS = PHONE
+  ? TABS.filter((tab) => tab.id === "conversation" || tab.id === "status" || (ANDROID && tab.id === "voice"))
+  : TABS;
 
 export type Screen = "starting" | "onboarding" | Tab;
 

@@ -176,7 +176,10 @@ async fn a_recording_held_under_the_key_reaches_whisper_as_the_sentence_that_was
 /// matters more here than the usual.
 #[tokio::test]
 async fn a_key_held_over_a_quiet_room_reaches_whisper_not_at_all() {
-    let silence = vec![0.0f32; SAMPLE_RATE as usize * 2];
+    // A room's hiss, far below speech. Exact zeros would be a silenced microphone, which the
+    // session reports as that (`session::SILENCED`) rather than as nobody speaking.
+    let silence: Vec<f32> =
+        (0..SAMPLE_RATE as usize * 2).map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 }).collect();
     let bench = Arc::new(Bench::new("nobody should ever see this"));
     let events =
         hold_the_key_over(&as_a_device_hands_it_over(&silence, Wiring::Both), bench.clone())

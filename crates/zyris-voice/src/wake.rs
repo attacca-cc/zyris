@@ -89,8 +89,11 @@ pub const WHAT_THE_TAKES_DO: &str =
 pub struct Phrase {
     /// As it was written, for whisper's prompt, a screen and a log.
     said: String,
-    /// Only its letters and digits, lowercased: what is compared.
-    letters: Vec<char>,
+    /// Each spelling's letters and digits, lowercased: what is compared. More than one when the
+    /// phrase was written as alternatives, "Agent / 에이전트": whisper writes an English name in
+    /// Hangul when the request after it is Korean (measured on a Galaxy S23 Ultra, 2026-09-29:
+    /// "Agent" alone came back as "Agent", "Agent, 내 목소리…" as "에이전트").
+    spellings: Vec<Vec<char>>,
 }
 
 /// The phrase listened for when `voice.json` names none: the name of the thing being addressed.
@@ -114,8 +117,12 @@ impl Phrase {
         // Handed to whisper as a C string, which a NUL would end early — or, in whisper-rs,
         // panic on.
         let said = said.replace('\0', "");
-        let letters: Vec<char> = letters_of(&said).into_iter().map(|letter| letter.c).collect();
-        (!letters.is_empty()).then(|| Phrase { said: said.trim().to_string(), letters })
+        let spellings: Vec<Vec<char>> = said
+            .split('/')
+            .map(|one| letters_of(one).into_iter().map(|letter| letter.c).collect::<Vec<_>>())
+            .filter(|letters| !letters.is_empty())
+            .collect();
+        (!spellings.is_empty()).then(|| Phrase { said: said.trim().to_string(), spellings })
     }
 
     /// As it was written.
@@ -136,17 +143,21 @@ impl Phrase {
     pub fn in_(&self, heard: &str) -> Heard {
         let found = letters_of(heard);
         let chars: Vec<char> = found.iter().map(|letter| letter.c).collect();
-        let length = self.letters.len();
-        let allowed = length / 4;
-        let mut best: Option<(usize, usize)> = None;
-        for start in 0..=LEAD_IN.min(chars.len()) {
-            for taken in length.saturating_sub(allowed).max(1)..=length + allowed {
-                let Some(window) = chars.get(start..start + taken) else { break };
-                let cost = edit_distance(window, &self.letters);
-                let word = found[start + taken - 1].word;
-                let more = found[start + taken..].iter().take_while(|l| l.word == word).count();
-                if cost <= allowed && more <= 1 && best.is_none_or(|(_, was)| cost < was) {
-                    best = Some((start + taken + more, cost));
+        // (end, cost relative to what the spelling allows), best over every spelling.
+        let mut best: Option<(usize, f32)> = None;
+        for spelling in &self.spellings {
+            let length = spelling.len();
+            let allowed = length / 4;
+            for start in 0..=LEAD_IN.min(chars.len()) {
+                for taken in length.saturating_sub(allowed).max(1)..=length + allowed {
+                    let Some(window) = chars.get(start..start + taken) else { break };
+                    let cost = edit_distance(window, spelling);
+                    let word = found[start + taken - 1].word;
+                    let more = found[start + taken..].iter().take_while(|l| l.word == word).count();
+                    let relative = cost as f32 / length as f32;
+                    if cost <= allowed && more <= 1 && best.is_none_or(|(_, was)| relative < was) {
+                        best = Some((start + taken + more, relative));
+                    }
                 }
             }
         }
@@ -955,6 +966,18 @@ mod tests {
     }
 
     /// Somebody naming the machine in the middle of talking to someone else has not addressed it.
+    #[test]
+    fn any_of_the_spellings_written_is_the_phrase() {
+        let phrase = Phrase::new("Agent / 에이전트").expect("letters");
+        assert_eq!(phrase.in_("Agent."), Heard::Phrase);
+        assert_eq!(
+            phrase.in_("에이전트, 내 목소리 잘 들리니?"),
+            Heard::PhraseThen("내 목소리 잘 들리니?".to_string())
+        );
+        assert_eq!(phrase.in_("에어컨 켜줘"), Heard::Other);
+        assert!(Phrase::new(" / ").is_none(), "no spelling has letters");
+    }
+
     #[test]
     fn the_phrase_later_in_a_sentence_is_not_a_wake() {
         let phrase = Phrase::new("자이리스").unwrap();

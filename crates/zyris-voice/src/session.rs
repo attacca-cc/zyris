@@ -118,6 +118,10 @@ use crate::vad::{Ended, Endpointer, Listening, Rule, frames_in};
 ///
 /// [`crate::stt::FULL_WINDOW`] rather than a `30` of its own — the whisper encoder's window is
 /// the longest turn that is still one pass.
+/// What a turn that recorded only exact silence says.
+pub const SILENCED: &str = "The microphone gave Zyris only silence. Another app may be using it \
+    (a call, or Discord in a voice channel), or microphone access may be switched off or muted.";
+
 pub const MAX_TURN: Duration = stt::FULL_WINDOW;
 
 /// What to tell a person when a turn was discarded for running past [`MAX_TURN`].
@@ -260,8 +264,12 @@ impl Watch {
 /// A room the detector never hears silence in — a fan, a television, a conversation across it
 /// — would otherwise grow this buffer for as long as the machine is on. Anything longer than
 /// a take could have been is not the phrase, so there is nothing to lose by forgetting it.
+///
+/// **Long enough for the phrase and a whole request after it**, said in one breath: "Hey Zyris,
+/// what is on my calendar tomorrow and …" is one utterance, and a cap of two takes cut every
+/// request longer than a few seconds, so only the pause-and-wait form ever worked.
 fn watch_cap() -> usize {
-    crate::stt::samples_in(crate::wake::MAX_TAKE) * 2
+    crate::stt::samples_in(crate::wake::MAX_TAKE) + crate::stt::samples_in(MAX_TURN)
 }
 
 /// One voice session, driven by a key and a microphone.
@@ -302,6 +310,12 @@ pub struct Session {
     /// The whisper those checks use, when it is not the one turns are transcribed with. See
     /// `run::Engine::wake_checker`.
     checker: Option<Arc<dyn Transcribe>>,
+    /// The utterance the check in flight is reading, kept so a request said in the same breath
+    /// as the phrase can be written down again by the turn's own whisper.
+    checked_audio: Option<Vec<f32>>,
+    /// The transcription in flight is of a whole utterance, phrase included, and the phrase
+    /// comes off the front before it is sent.
+    after_phrase: bool,
     /// Names whisper is told to expect in every turn, so it spells them as written rather than as
     /// it heard them: "깃허브" comes back "기토부" without it (zyris#18). `None` reads plainly.
     vocabulary: Option<Arc<str>>,
@@ -325,6 +339,12 @@ pub struct Session {
     /// machine that has stopped keeping up, not a person talking, and a growing queue of
     /// 30-second recordings is how a 3.6 GB machine dies quietly.
     queued: Option<Vec<f32>>,
+
+    /// How much the microphone is amplified, shared with the engine so the Voice screen's
+    /// slider reaches this session while it listens. An `f32`'s bits; `None` is 1.0.
+    input_gain: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// The amplified copy of a callback's samples, reused like the two buffers below.
+    amplified: Vec<f32>,
 
     /// Reused across callbacks so the steady state allocates nothing.
     staged: Vec<f32>,
@@ -381,6 +401,8 @@ impl Session {
             partial_next: PARTIAL_EVERY,
             checking: None,
             checker: None,
+            checked_audio: None,
+            after_phrase: false,
             vocabulary: None,
             // Replaced on every press, which is where the sizes are decided and where a
             // mutation of them is caught; these two are what a session holds before the first
@@ -392,6 +414,8 @@ impl Session {
             turn: None,
             pending: None,
             queued: None,
+            input_gain: None,
+            amplified: Vec::new(),
             staged: Vec::new(),
             ready: Vec::new(),
             watch: None,
@@ -460,6 +484,13 @@ impl Session {
     /// Publish how loud the microphone is while a turn is open.
     pub fn metering(mut self, levels: broadcast::Sender<crate::Level>) -> Session {
         self.levels = Some(levels);
+        self
+    }
+
+    /// Multiply the microphone by this gain before anything reads it. Read on every callback,
+    /// so a change takes effect at once.
+    pub fn amplified_by(mut self, gain: Arc<std::sync::atomic::AtomicU32>) -> Session {
+        self.input_gain = Some(gain);
         self
     }
 
@@ -591,6 +622,23 @@ impl Session {
     }
 
     fn heard(&mut self, samples: &[f32]) {
+        let gain = self
+            .input_gain
+            .as_ref()
+            .map_or(1.0, |gain| f32::from_bits(gain.load(std::sync::atomic::Ordering::Relaxed)));
+        if gain != 1.0 {
+            // Clipped at full scale: past it the echo canceller and whisper read distortion.
+            let mut amplified = std::mem::take(&mut self.amplified);
+            amplified.clear();
+            amplified.extend(samples.iter().map(|sample| (sample * gain).clamp(-1.0, 1.0)));
+            self.gained(&amplified);
+            self.amplified = amplified;
+        } else {
+            self.gained(samples);
+        }
+    }
+
+    fn gained(&mut self, samples: &[f32]) {
         if self.turn.is_none() && !self.should_watch() {
             // Neither recording nor listening for the phrase. The audio is dropped rather than
             // buffered, and the session.s endpointer is not advanced — which is what keeps a
@@ -687,6 +735,12 @@ impl Session {
         watch.heard.extend_from_slice(frame);
 
         match listening {
+            // While the last utterance is still being read, this one is kept rather than
+            // checked: if that one was the phrase, this is the request, and the turn it opens
+            // starts with it.
+            Listening::Ended(Ended::Utterance { .. }) if self.checking.is_some() => {
+                watch.ends.reset();
+            }
             Listening::Ended(Ended::Utterance { first, last, .. }) => {
                 let from = first * crate::capture::VAD_FRAME;
                 let to = ((last + 1) * crate::capture::VAD_FRAME).min(watch.heard.len());
@@ -720,6 +774,7 @@ impl Session {
         let Some(watch) = &self.watch else { return };
         let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
         let phrase = watch.phrase.said().to_string();
+        self.checked_audio = Some(said.clone());
         self.checking =
             Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
     }
@@ -728,6 +783,7 @@ impl Session {
     /// the request came in the same breath, send it.
     fn checked(&mut self, heard: Result<Result<String, stt::Fault>, tokio::task::JoinError>) {
         self.checking = None;
+        let checked_audio = self.checked_audio.take();
         // The key went down while whisper was reading; that turn is the one that counts.
         if self.turn.is_some() {
             return;
@@ -749,6 +805,20 @@ impl Session {
                 // `push_to_talk_rule` deliberately makes that impossible.
                 self.endpointer.use_rule(Rule::default());
                 self.pressed();
+                // **What was said while whisper was reading belongs to this turn.** The phrase
+                // ended on a pause and the request began before the check came back; the watch
+                // kept listening, and that audio is the start of the request, not a gap to lose.
+                let carried = self.watch.as_mut().map(|watch| {
+                    let heard = std::mem::take(&mut watch.heard);
+                    watch.forget();
+                    heard
+                });
+                for frame in carried.unwrap_or_default().chunks_exact(VAD_FRAME) {
+                    if self.turn.is_none() {
+                        break;
+                    }
+                    self.frame(frame);
+                }
             }
             // Said in one breath. The request is already transcribed, so it goes as it is,
             // through the same steps a turn takes, rather than asking the person to repeat it.
@@ -759,11 +829,29 @@ impl Session {
                 self.trace(crate::Trace::Recording { started: false });
                 self.publish(VoiceEvent::Thinking);
                 self.since = Some(std::time::Instant::now());
-                self.transcribed(Ok(Ok(rest)));
+                // Read by the wake word's whisper, which is Base whenever a larger model is
+                // chosen. The request deserves the chosen one: the whole utterance is written
+                // down again by it, and the phrase comes off the front in `transcribed`.
+                let checker_is_the_turns = self
+                    .checker
+                    .as_ref()
+                    .is_none_or(|checker| std::ptr::addr_eq(Arc::as_ptr(checker), Arc::as_ptr(&self.stt)));
+                match checked_audio {
+                    Some(audio) if !checker_is_the_turns && self.pending.is_none() => {
+                        self.after_phrase = true;
+                        self.pending = Some(self.spawn(audio));
+                    }
+                    _ => self.transcribed(Ok(Ok(rest))),
+                }
             }
             // Said, not dropped: a phrase that never wakes anything is otherwise
             // indistinguishable from a microphone that never heard it.
             crate::wake::Heard::Other => {
+                // What was held for a request nobody announced is let go, or the next check
+                // would read it glued to the front of whatever is said next.
+                if let Some(watch) = &mut self.watch {
+                    watch.forget();
+                }
                 tracing::info!(heard = %text, "heard something that was not the wake word");
                 self.trace(crate::Trace::Unmatched { heard: text });
             }
@@ -920,12 +1008,30 @@ impl Session {
             // Not enough was said for it to be a turn. Nothing is sent to whisper: the floor
             // here is the one that keeps "nobody spoke" from arriving as an invented sentence.
             Ended::TooShort { speech, .. } => {
+                // How loud the recording got, so a log can tell a quiet voice from a microphone
+                // that delivered nothing (no audio at all) or silence (a blocked input).
+                let peak = turn.buffer.iter().fold(0f32, |peak, sample| peak.max(sample.abs()));
+                tracing::info!(
+                    seconds = seconds(turn.buffer.len()),
+                    speech_seconds = speech.as_secs_f32(),
+                    peak,
+                    "a turn had too little speech to send"
+                );
                 self.trace(crate::Trace::Recorded {
                     seconds: seconds(turn.buffer.len()),
                     speech_seconds: speech.as_secs_f32(),
                     kept: false,
                 });
-                self.publish(VoiceEvent::HeardNothing)
+                // **Exact zeros are not a quiet room.** Every real microphone hisses a little; a
+                // recording that is all 0.0 is one the system silenced: another app capturing
+                // for a call (Android gives everyone else silence while Discord is in a voice
+                // channel, measured on a Galaxy S23 Ultra, 2026-09-29), a privacy switch, or a
+                // muted input. Said, so the person does not keep talking into it.
+                if peak == 0.0 && !turn.buffer.is_empty() {
+                    self.publish(VoiceEvent::Failed { reason: SILENCED.to_string() });
+                } else {
+                    self.publish(VoiceEvent::HeardNothing)
+                }
             }
             Ended::Utterance { first, last, speech } => {
                 self.trace(crate::Trace::Recorded {
@@ -1014,6 +1120,11 @@ impl Session {
     ) {
         self.pending = None;
         let took = self.since.take().map_or(0, |at| at.elapsed().as_millis() as u64);
+        let done = if std::mem::take(&mut self.after_phrase) {
+            done.map(|heard| heard.map(|text| self.request_after_phrase(text)))
+        } else {
+            done
+        };
         match done {
             // An empty transcript is not an empty sentence. `stt::clean` turns whisper's own
             // annotations for audio it found no speech in — `[BLANK_AUDIO]`, `(silence)` —
@@ -1035,6 +1146,18 @@ impl Session {
         if let Some(next) = self.queued.take() {
             self.since = Some(std::time::Instant::now());
             self.pending = Some(self.spawn(next));
+        }
+    }
+
+    /// The request in a transcript of the phrase and the request together. The larger model
+    /// may spell the phrase differently from the wake word's whisper, or not hear it at all;
+    /// then the whole sentence is the request, since the person was clearly talking to Zyris.
+    fn request_after_phrase(&self, text: String) -> String {
+        let Some(watch) = &self.watch else { return text };
+        match watch.phrase.in_(&text) {
+            crate::wake::Heard::PhraseThen(rest) => rest,
+            crate::wake::Heard::Phrase => String::new(),
+            crate::wake::Heard::Other => text,
         }
     }
 
@@ -1805,8 +1928,10 @@ mod tests {
         (SAMPLE_RATE as f32 * count) as usize
     }
 
+    /// A quiet room: a hiss far below speech, as every real microphone delivers. Exact zeros
+    /// are a silenced microphone, which a session reports differently (`SILENCED`).
     fn silence(secs: f32) -> Vec<f32> {
-        vec![0.0; seconds(secs)]
+        (0..seconds(secs)).map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 }).collect()
     }
 
     /// A 440 Hz tone. Used where the point is that *something* fills a turn, not that a sine is
@@ -2038,7 +2163,9 @@ mod tests {
 
     /// Digital silence, long enough for the watch's hangover to end an utterance.
     fn quiet(seconds: f32) -> Vec<f32> {
-        vec![0.0; (crate::capture::SAMPLE_RATE as f32 * seconds) as usize]
+        (0..(crate::capture::SAMPLE_RATE as f32 * seconds) as usize)
+            .map(|i| if i % 2 == 0 { 1e-4 } else { -1e-4 })
+            .collect()
     }
 
     /// The same, with somebody subscribed to the diagnostic stream.
@@ -2268,6 +2395,56 @@ mod tests {
         assert_eq!(measured.len(), crate::LEVELS_PER_SECOND as usize, "a second is 25 levels");
         assert!(measured.iter().all(|level| level.source == crate::Source::Microphone));
         assert!(measured.iter().all(|level| (level.rms - 0.5).abs() < 1e-3), "{measured:?}");
+        zyris.stops().await;
+    }
+
+    /// **The input gain multiplies what is heard, and a change reaches a session already
+    /// listening.** The meter reads the same samples the endpointer and whisper do.
+    #[tokio::test]
+    async fn the_input_gain_amplifies_the_microphone_while_it_listens() {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let (levels, mut seen) = broadcast::channel(256);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let scribe = Scribe::always("hello");
+        let gain = Arc::new(std::sync::atomic::AtomicU32::new(0.5f32.to_bits()));
+        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
+            .metering(levels)
+            .amplified_by(gain.clone());
+        let zyris = Harness { audio: Some(audio), keys, events: events_rx, scribe, session: tokio::spawn(session.run()) };
+        let steady = vec![0.4f32; crate::capture::SAMPLE_RATE as usize];
+        let mut rms_at = async |zyris: &Harness| {
+            for chunk in steady.chunks(crate::capture::APM_FRAME) {
+                zyris.feed(chunk).await;
+            }
+            let mut last = None;
+            while let Ok(level) = seen.try_recv() {
+                last = Some(level.rms);
+            }
+            last.expect("a second of audio was measured")
+        };
+
+        zyris.press().await;
+        assert!((rms_at(&zyris).await - 0.2).abs() < 1e-3, "half the gain is half the level");
+        gain.store(4.0f32.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        assert!((rms_at(&zyris).await - 1.0).abs() < 1e-3, "four times 0.4 is clipped at full scale");
+        zyris.stops().await;
+    }
+
+    /// **A microphone the system silenced says so**, rather than "too little speech". Android
+    /// hands every other app exact zeros while one captures for a call.
+    #[tokio::test]
+    async fn a_recording_of_exact_zeros_says_the_microphone_was_silenced() {
+        let mut zyris = running(Scribe::always("something invented"));
+
+        zyris.press().await;
+        zyris.feed(&vec![0.0; seconds(2.0)]).await;
+        zyris.release().await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Failed { reason: SILENCED.to_string() });
+        assert_eq!(zyris.scribe.calls(), 0);
         zyris.stops().await;
     }
 
@@ -2639,6 +2816,57 @@ mod tests {
         assert_eq!(
             zyris.next().await,
             VoiceEvent::Heard { text: "what is the time".into() }
+        );
+        zyris.stops().await;
+    }
+
+    /// **A request that starts before the phrase has been read is kept.** The phrase ends on
+    /// a pause, the person carries on talking, and whisper is still reading the phrase: that
+    /// speech is the start of the request, and a turn that opened empty after it made the
+    /// person wait for the microphone before speaking.
+    #[tokio::test]
+    async fn the_request_after_a_pause_is_heard_from_its_first_word() {
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("hey zyris".to_string()))
+                .chain(std::iter::repeat_n(Ok("what is the time".to_string()), 8)),
+        ));
+
+        // In one delivery, so all of it is heard before the check of the phrase comes back.
+        zyris.feed(&[utterance(1.1), quiet(1.6), utterance(2.0), quiet(1.6)].concat()).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
+        zyris.stops().await;
+    }
+
+    /// **A long request in one breath with the phrase still reaches the agent.** The watch
+    /// used to give up after two takes' length, so anything past a few seconds was dropped.
+    #[tokio::test]
+    async fn a_long_request_said_with_the_phrase_is_heard() {
+        let (mut zyris, _traces) =
+            running_and_listening(Scribe::always("Hey Zyris, read me everything on the calendar"));
+
+        // All of the recording, past the two takes' length the watch used to stop at.
+        let said = utterance(10.5);
+        assert!(said.len() > crate::stt::samples_in(crate::wake::MAX_TAKE) * 2);
+        zyris.feed(&said).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(
+            zyris.next().await,
+            VoiceEvent::Heard { text: "read me everything on the calendar".into() }
+        );
+        // The whole utterance was read in one piece, not its last few seconds.
+        let heard = zyris.scribe.heard.lock().expect("not poisoned").clone();
+        assert_eq!(heard.len(), 1, "one reading of one utterance");
+        assert!(
+            heard[0].len() + crate::stt::samples_in(std::time::Duration::from_millis(500)) >= said.len(),
+            "only {} of {} samples were read",
+            heard[0].len(),
+            said.len()
         );
         zyris.stops().await;
     }

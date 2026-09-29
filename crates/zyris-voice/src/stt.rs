@@ -215,6 +215,29 @@ pub fn devices() -> Vec<DeviceInfo> {
     std::iter::once(processor).chain(gpus).collect()
 }
 
+/// **The first switch to the GPU took fifteen seconds.** Measured on an RTX 3050 (2026-09-28):
+/// the first whisper load in a process on the GPU took 17.4 s for Base and 14.3 s for Large v3
+/// Turbo. The second load took 0.2-0.5 s. The time goes to building the Vulkan pipelines. The
+/// driver caches them on disk, so the cost comes back whenever the binary changes, which is
+/// every update. This pays it on a thread at launch, with the smallest model already downloaded,
+/// so a start or a switch onto the GPU does not wait for it.
+pub fn warm_the_gpu() {
+    let Some(gpu) = devices().into_iter().find(|d| d.device.is_gpu()) else { return };
+    let Some(path) = MODELS.iter().find_map(|m| match cached_state(&m.model) {
+        ModelState::Ready { path, .. } => Some(path),
+        _ => None,
+    }) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        match Stt::load_on(&path, gpu.device) {
+            Ok(_) => tracing::info!(gpu = %gpu.name, took = ?started.elapsed(), "the GPU is ready for whisper"),
+            Err(fault) => tracing::warn!(%fault, "could not prepare the GPU for whisper"),
+        }
+    });
+}
+
 /// Where whisper runs when nobody has said: the first GPU [`devices`] lists, else the processor.
 pub fn default_device() -> Device {
     let first_gpu = devices().into_iter().find(|d| d.device.is_gpu());
@@ -443,8 +466,14 @@ pub const WARM_LANGUAGE: &str = "en";
 /// Four on this machine, which is what every measurement in this module was taken with. The
 /// cap is there because whisper.cpp does not get faster past a machine's physical cores and
 /// a 32-thread server would spend the difference on contention.
+///
+/// **Four on a phone, whatever it reports.** A phone's cores are not alike: a Galaxy S23 Ultra
+/// reports eight, three of them small efficiency cores, and whisper.cpp's threads wait on each
+/// other at every step, so the small cores set the pace. The same cores also draw the screen,
+/// and eight busy-waiting threads leave it none.
 pub fn threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8)
+    let cap = if cfg!(target_os = "android") { 4 } else { 8 };
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, cap)
 }
 
 /// Everything about a transcription that is a decision rather than a default.
@@ -554,6 +583,10 @@ impl Stt {
             }
         }
 
+        // **One GPU load at a time.** The first in a process builds every Vulkan pipeline, which
+        // `warm_the_gpu` starts at launch; a second load racing it would build them again.
+        static ON_THE_GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _gpu = device.is_gpu().then(|| ON_THE_GPU.lock().unwrap_or_else(|e| e.into_inner()));
         let context = whisper_rs::WhisperContext::new_with_params(path, parameters)
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
         // Base has six encoder layers; Small twelve, Large v3 Turbo thirty-two.

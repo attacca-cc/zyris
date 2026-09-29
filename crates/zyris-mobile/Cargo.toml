@@ -1,0 +1,19 @@
+[package]
+name = "tauri-plugin-zyris-mobile"
+description = "What the phone app needs from Android that Rust cannot reach alone: the screen, touch, a foreground service and the package installer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+# Tauri's Android build finds the Kotlin project through this.
+links = "tauri-plugin-zyris-mobile"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.3", features = ["build"] }

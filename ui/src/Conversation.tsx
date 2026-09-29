@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { MessageCircleIcon } from "lucide-react";
 import { SessionPicker } from "./SessionPicker";
-import { subscribeLevels, subscribeTrace, type Trace } from "./state";
+import { PHONE, subscribeLevels, subscribeTrace, type Trace } from "./state";
 import type { VoiceScreen } from "./Voice";
 import { Backdrop, type Mode } from "./conversation/Backdrop";
 import { Composer, StatusLine, type Phase } from "./conversation/Composer";
@@ -128,7 +128,10 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col" hidden={hidden}>
+    // `min-h-0`: on a phone the sidebar stacks and this is a column item, whose height would
+    // otherwise grow to fit the whole thread — pushing the session picker off the top and leaving
+    // the thread nothing to scroll.
+    <main className="flex min-h-0 min-w-0 flex-1 flex-col" hidden={hidden}>
       <SessionPicker
         hidden={hidden}
         onAgentName={setAgentName}
@@ -147,7 +150,9 @@ export function Conversation({ hidden }: { hidden: boolean }) {
             <MessageCircleIcon className="size-6 text-subtle" aria-hidden="true" />
             <p className="m-0 text-[0.9375rem] font-medium text-heading">Start a conversation</p>
             <p className="m-0 max-w-sm text-[0.8125rem] text-muted-foreground">
-              Type a message below, or talk to the agent with the push-to-talk key or the wake word.
+              {PHONE
+                ? "Type a message below, or turn on the microphone and hold the button to talk."
+                : "Type a message below, or talk to the agent with the push-to-talk key or the wake word."}
             </p>
           </div>
         ) : (
@@ -163,6 +168,7 @@ export function Conversation({ hidden }: { hidden: boolean }) {
               readAloud={readAloud !== false}
               onStop={() => void invoke("stop_speaking").catch(() => {})}
             />
+            {PHONE && listening === true && <HoldToTalk />}
             <Composer
               onSend={send}
               readAloud={readAloud}
@@ -180,5 +186,35 @@ export function Conversation({ hidden }: { hidden: boolean }) {
         </div>
       </div>
     </main>
+  );
+}
+
+// A phone has no push-to-talk key, so this is it: held down, it records; let go, it sends. Every
+// way a finger can leave the button ends the turn, so a turn never stays open by accident.
+function HoldToTalk() {
+  const [down, setDown] = useState(false);
+  const press = (next: boolean) => {
+    if (next === down) return;
+    setDown(next);
+    void invoke("push_to_talk", { down: next }).catch(() => {});
+  };
+  return (
+    <button
+      type="button"
+      className={
+        "h-12 w-full touch-none rounded-xl border text-sm font-medium transition-colors select-none " +
+        (down ? "border-primary bg-primary text-primary-foreground" : "bg-card text-heading")
+      }
+      // No pointer capture: some Android WebViews report the capture lost as soon as it is
+      // taken, which ended every turn the moment it began. A finger that slides off still ends
+      // it, through `pointerleave`.
+      onPointerDown={() => press(true)}
+      onPointerUp={() => press(false)}
+      onPointerCancel={() => press(false)}
+      onPointerLeave={() => press(false)}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {down ? "Listening — let go to send" : "Hold to talk"}
+    </button>
   );
 }

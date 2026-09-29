@@ -3,6 +3,7 @@ import { ArrowUpIcon, MicIcon, MicOffIcon, SquareIcon, Volume2Icon, VolumeXIcon 
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/utils";
+import { PHONE } from "@/state";
 
 // Where the conversation is, for the line above the text box.
 export type Phase = "idle" | "recording" | "transcribing" | "answering" | "speaking";
@@ -54,6 +55,8 @@ export function StatusLine({
             ))}
             <span>to talk, or type below</span>
           </>
+        ) : listening && PHONE ? (
+          <span>Hold the button below to talk, or type</span>
         ) : listening ? (
           <span>Say the wake word, or type below</span>
         ) : (

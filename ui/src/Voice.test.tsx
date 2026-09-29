@@ -78,6 +78,8 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       speakingRate: over.speakingRate ?? 1.25,
       readAloud: over.readAloud ?? true,
       volume: over.volume ?? 1,
+      inputGain: over.inputGain ?? 1,
+      wakePhrase: over.wakePhrase ?? "Hey Zyris",
       compute: over.compute ?? {
         transcribe: [
           { id: "cpu", name: "Processor — Intel Core i5" },
@@ -267,7 +269,7 @@ describe("Voice", () => {
     expect(readable()).toContain("push_to_talk");
   });
 
-  it("offers no listening switch on a desktop where no key can be registered", async () => {
+  it("offers listening on a desktop with no key, because the wake word can start a turn", async () => {
     answers(
       machine({
         hotkey: {
@@ -280,10 +282,35 @@ describe("Voice", () => {
     render(<Voice />);
 
     await screen.findByText(/no GlobalShortcuts interface/i);
-    // **The rule this whole project keeps restating**: a control that cannot work is worse than
-    // an absent one. Opening a microphone here would open one nothing could ever start a turn on.
+    // The key is one way to start a turn, not the only one: the wake word needs listening on, and
+    // hiding the switch here took every way of talking away (and on a phone, all of speech).
+    expect(screen.getByRole("switch", { name: /listening/i })).toBeTruthy();
+    expect(readable()).toMatch(/use the wake word instead/i);
+  });
+
+  it("offers no listening switch where neither a key nor the wake word can work", async () => {
+    answers(
+      machine({
+        hotkey: {
+          state: "unavailable",
+          reason: "this desktop's portal has no GlobalShortcuts interface, so no application can register a global key here.",
+        },
+        wake: {
+          state: { state: "notHere", reason: "there is nowhere to keep the recordings" },
+          dir: TAKES,
+          wanted: 5,
+          seconds: 5,
+          note: "",
+        },
+      }),
+    );
+
+    render(<Voice />);
+
+    await screen.findByText(/no GlobalShortcuts interface/i);
+    // **A control that cannot work is worse than an absent one.** Here nothing could ever start a turn.
     expect(screen.queryByRole("switch", { name: /listening/i })).toBeNull();
-    expect(readable()).toMatch(/this desktop has no push-to-talk key/i);
+    expect(readable()).toMatch(/nothing could\s+start a recording/i);
   });
 
   it("keeps a key that has to be bound by hand apart from one that can never exist", async () => {
@@ -461,9 +488,10 @@ describe("Voice", () => {
     );
   });
 
-  it("will not let a button that is already working be pressed again", async () => {
+  it("will not let a button that is already working be pressed again, and leaves the rest usable", async () => {
     // Starting to listen loads a 141 MB model and downloading one takes minutes. A second press
-    // in the meantime is a second download, and nothing below this screen refuses it.
+    // in the meantime is a second download, and nothing below this screen refuses it. The rest of
+    // the screen is not held hostage by it: the machine takes requests one at a time on its own.
     invoke.mockImplementation((command: string) =>
       command === "voice_state"
         ? Promise.resolve(machine({ model: { state: "absent", path: MODEL, bytes: 147951465 } }))
@@ -478,10 +506,8 @@ describe("Voice", () => {
 
     await waitFor(() => expect(readable()).toMatch(/downloading/i));
     expect(download.disabled).toBe(true);
-    // And every other button on the screen, because they all go through the same machine.
-    for (const button of screen.getAllByRole<HTMLButtonElement>("button")) {
-      expect(button.disabled).toBe(true);
-    }
+    const others = screen.getAllByRole<HTMLButtonElement>("button").filter((button) => button !== download);
+    expect(others.some((button) => !button.disabled)).toBe(true);
   });
 
   // ------------------------------------------------------------------------------------------
@@ -573,7 +599,9 @@ describe("Voice", () => {
 
     fireEvent.click(await screen.findByText("Accurate."));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speech_model", { id: "turbo" }));
-    expect((await screen.findByRole("status")).textContent).toMatch(/switching to this model/i);
+    expect(await screen.findByText(/switching to this model/i)).toBeTruthy();
+    // And the bar at the top says what is loading, while everything else stays usable.
+    expect(screen.getByText("Loading Turbo…")).toBeTruthy();
     expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
 
     await act(async () =>
@@ -585,7 +613,8 @@ describe("Voice", () => {
         },
       }),
     );
-    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByText(/switching to this model/i)).toBeNull();
+    expect(screen.queryByText("Loading Turbo…")).toBeNull();
     expect(screen.getByRole("radio", { name: "Turbo" }).getAttribute("aria-checked")).toBe("true");
   });
 
@@ -616,6 +645,52 @@ describe("Voice", () => {
     expect(invoke).not.toHaveBeenCalledWith("set_voice_volume", expect.anything());
     fireEvent.pointerUp(slider);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_voice_volume", { volume: 1.5 }));
+  });
+
+  it("says the first launch is downloading the models, and how far along", async () => {
+    invoke.mockImplementation(() =>
+      Promise.resolve(
+        machine({
+          downloads: [
+            { id: "model:base", received: 50, total: 100 },
+            { id: "voice", received: 0, total: 100 },
+          ],
+        }),
+      ),
+    );
+    render(<Voice />);
+
+    expect(await screen.findByText(/downloading the speech models — 25%/i)).toBeTruthy();
+  });
+
+  it("saves a typed wake phrase", async () => {
+    render(<Voice />);
+
+    const field = await screen.findByRole<HTMLInputElement>("textbox", { name: /wake phrase/i });
+    expect(field.value).toBe("Hey Zyris");
+    fireEvent.change(field, { target: { value: "Hey Agent" } });
+    fireEvent.submit(field.closest("form")!);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_wake_phrase", { phrase: "Hey Agent" }));
+  });
+
+  it("sets the microphone's gain when the slider is let go", async () => {
+    render(<Voice />);
+
+    const slider = await screen.findByRole<HTMLInputElement>("slider", { name: /microphone is amplified/i });
+    expect(slider.value).toBe("100");
+    fireEvent.change(slider, { target: { value: "250" } });
+    expect(invoke).not.toHaveBeenCalledWith("set_input_gain", expect.anything());
+    fireEvent.pointerUp(slider);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_input_gain", { gain: 2.5 }));
+  });
+
+  it("shows a stored speed as the speed it is, not the float it arrives as", async () => {
+    answers(machine({ speakingRate: 1.399999976158142 }));
+    render(<Voice />);
+
+    await screen.findByText(/talk to your agent/i);
+    expect(readable()).toMatch(/1\.4×/);
+    expect(readable()).not.toMatch(/1\.3999/);
   });
 
   it("sets how fast answers are read", async () => {

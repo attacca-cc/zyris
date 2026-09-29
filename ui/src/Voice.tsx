@@ -14,9 +14,10 @@ import {
   Trash2Icon,
   Volume2Icon,
 } from "lucide-react";
-import { subscribeVoice, type VoiceEvent } from "./state";
+import { PHONE, subscribeVoice, type VoiceEvent } from "./state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Kbd } from "@/components/ui/kbd";
 import { Progress } from "@/components/ui/progress";
@@ -170,6 +171,10 @@ export type VoiceScreen = {
     readAloud: boolean;
     // A gain on the voice: 1 is as the model writes it.
     volume: number;
+    // How much the microphone is amplified, 1 as the device delivers it.
+    inputGain: number;
+    // The phrase the wake word listens for.
+    wakePhrase: string;
     compute: Compute;
     model: ModelView;
     models: SpeechModel[];
@@ -259,31 +264,40 @@ function heardLine(event: VoiceEvent): string {
   }
 }
 
-// How loud answers are read. Moves freely under the finger and is sent once it is let go, so a
-// drag is one setting rather than forty. From 10% rather than 0: drawn too small, one click saved
-// 0 and every answer went silent, which reads as the voice being broken rather than turned down.
-function VolumeSlider({
-  volume,
+// A gain as a percentage: how loud answers are read, or how much the microphone is amplified.
+// Moves freely under the finger and is sent once it is let go, so a drag is one setting rather than
+// forty. Never down to 0: drawn too small, one click saved 0 and every answer went silent, which
+// reads as the voice being broken rather than turned down.
+function LevelSlider({
+  label,
+  describes,
+  value,
+  min,
+  max,
   disabled,
   onCommit,
 }: {
-  volume: number;
+  label: string;
+  describes: string;
+  value: number;
+  min: number;
+  max: number;
   disabled: boolean;
-  onCommit: (volume: number) => void;
+  onCommit: (value: number) => void;
 }) {
-  const [shown, setShown] = useState(Math.round(volume * 100));
-  useEffect(() => setShown(Math.round(volume * 100)), [volume]);
+  const [shown, setShown] = useState(Math.round(value * 100));
+  useEffect(() => setShown(Math.round(value * 100)), [value]);
   const commit = () => {
-    if (shown !== Math.round(volume * 100)) onCommit(shown / 100);
+    if (shown !== Math.round(value * 100)) onCommit(shown / 100);
   };
   return (
-    <Field label={`Volume — ${shown}%`}>
+    <Field label={`${label} — ${shown}%`}>
       <input
         type="range"
         className="w-full accent-primary disabled:opacity-50"
-        aria-label="How loud answers are read"
-        min={10}
-        max={200}
+        aria-label={describes}
+        min={min}
+        max={max}
         step={5}
         value={shown}
         disabled={disabled}
@@ -297,9 +311,17 @@ function VolumeSlider({
 
 // The speeds offered, and the stored one if it is not among them — a hand-edited file must not
 // show as some other speed.
+//
+// Rounded first: the rate is an `f32` on the Rust side, so 1.4 arrives as 1.399999976 and was
+// shown as a fifth speed of its own beside 1.4.
 function rateChoices(current: number): number[] {
   const offered = [1, 1.1, 1.25, 1.4];
-  return offered.includes(current) ? offered : [...offered, current].sort((a, b) => a - b);
+  const rate = roundRate(current);
+  return offered.includes(rate) ? offered : [...offered, rate].sort((a, b) => a - b);
+}
+
+function roundRate(rate: number): number {
+  return Math.round(rate * 100) / 100;
 }
 
 // Which kind of device an entry is. **On many computers two entries carry the same name**, one of
@@ -527,8 +549,11 @@ function DevicePicker({
 export function Voice() {
   const [screen, setScreen] = useState<VoiceScreen | undefined>(undefined);
   const [problem, setProblem] = useState<string | null>(null);
-  // Which control is waiting on the Rust side, so it cannot be pressed twice.
-  const [busy, setBusy] = useState<string | null>(null);
+  // Which controls are waiting on the Rust side. Each is kept from being pressed twice; the others
+  // stay usable, because the machine takes the requests one at a time on its own.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(new Set());
+  const isBusy = (name: string) => busy.has(name);
+  const fetching = [...busy].some((name) => name.startsWith("model:"));
   // The model asked for, while listening restarts on it. Loading a large model onto a graphics
   // card takes seconds, and the list should say which one is on its way rather than look stuck.
   const [switchingTo, setSwitchingTo] = useState<string | null>(null);
@@ -574,8 +599,12 @@ export function Voice() {
     };
   }, []);
 
-  function act(name: string, command: string, args?: Record<string, unknown>) {
-    setBusy(name);
+  // What the loading bar says for each action that reloads a model or reopens a device.
+  const [loading, setLoading] = useState<Record<string, string>>({});
+
+  function act(name: string, command: string, args?: Record<string, unknown>, loads?: string) {
+    setBusy((all) => new Set(all).add(name));
+    if (loads) setLoading((all) => ({ ...all, [name]: loads }));
     setRefused((all) => {
       const { [name]: _gone, ...rest } = all;
       return rest;
@@ -590,12 +619,28 @@ export function Voice() {
           .then(setScreen)
           .catch(() => {});
       })
-      .finally(() => setBusy(null));
+      .finally(() =>
+        setBusy((all) => {
+          const rest = new Set(all);
+          rest.delete(name);
+          return rest;
+        }),
+      )
+      .finally(() =>
+        setLoading((all) => {
+          const { [name]: _done, ...rest } = all;
+          return rest;
+        }),
+      );
   }
 
   // While something downloads, read the machine twice a second so its bar moves (#31). The
   // command that started it answers only when the file is whole.
-  const downloading = busy === "voiceModel" || (busy?.startsWith("model:") ?? false);
+  // The first launch fetches Base and the voice by itself (`fetch_defaults`), with no button
+  // pressed here, so what the machine reports downloading counts too.
+  const inFlight = screen?.voice.downloads ?? [];
+  const downloading =
+    isBusy("voiceModel") || fetching || Object.keys(loading).length > 0 || inFlight.length > 0;
   useEffect(() => {
     if (!downloading) return;
     const timer = setInterval(() => {
@@ -617,13 +662,14 @@ export function Voice() {
 
   const { voice, hotkey } = screen;
   const canHear = voice.support.state === "ready";
-  // **No switch where there is no key.** Turning listening on would open a microphone that
-  // nothing could ever start a turn on. `needsAKeyBound` is not this case: the key may well
-  // already be bound, and Zyris cannot tell either way.
+  // **Something has to be able to start a turn** for listening to be worth turning on: a key, the
+  // hold-to-talk button a phone has in its place, or the wake word, which can be recorded on any
+  // machine that hears at all. Only a desktop with no key and no wake word has nothing, and even
+  // there the switch stays: turning listening on is how the wake word gets recorded against.
   const aKeyCouldWork = hotkey.state !== "unavailable";
+  const wakeCouldWork = voice.wake.state.state !== "notHere";
   const badge = listeningBadge(voice.listening);
   const listeningOn = voice.listening.state === "on" || voice.listening.state === "starting";
-  const idle = busy !== null;
   const offered = voice.models.filter((m) => m.state.state === "ready" || m.chosen);
 
   return (
@@ -631,6 +677,14 @@ export function Voice() {
       <PageHeader
         title="Voice"
         description="Talk to your agent and hear it answer."
+      />
+
+      <LoadingBar
+        what={
+          Object.values(loading)[0] ??
+          (voice.listening.state === "starting" ? voice.listening.detail : null) ??
+          downloadingLabel(inFlight)
+        }
       />
 
       {problem && <Problem>{problem}</Problem>}
@@ -658,12 +712,17 @@ export function Voice() {
           canHear && (
             <div className="flex items-center gap-3">
               <Badge variant={badge.variant}>{badge.label}</Badge>
-              {aKeyCouldWork && (
+              {(aKeyCouldWork || PHONE || wakeCouldWork) && (
                 <Switch
                   aria-label="Listening"
                   checked={listeningOn}
-                  disabled={idle}
-                  onCheckedChange={(on) => act("listening", "set_voice_listening", { listening: on })}
+                  disabled={isBusy("listening")}
+                  onCheckedChange={(on) => act(
+                      "listening",
+                      "set_voice_listening",
+                      { listening: on },
+                      on ? "Opening the microphone and loading the speech model…" : "Closing the microphone…",
+                    )}
                 />
               )}
             </div>
@@ -672,9 +731,10 @@ export function Voice() {
       >
         {!canHear && <Problem>{(voice.support as { reason: string }).reason}</Problem>}
         {canHear && voice.listening.state === "failed" && <Problem>{voice.listening.reason}</Problem>}
-        {canHear && !aKeyCouldWork && (
+        {canHear && !aKeyCouldWork && !PHONE && !wakeCouldWork && (
           <Problem>
-            This desktop has no push-to-talk key, so nothing could start a recording. See below.
+            This desktop has no push-to-talk key and cannot listen for a wake word, so nothing could
+            start a recording. See below.
           </Problem>
         )}
         {refused.listening && <Problem>{refused.listening}</Problem>}
@@ -718,12 +778,19 @@ export function Voice() {
                 )}
               </>
             )}
-            {hotkey.state === "unavailable" && (
-              <Problem>{hotkey.reason} Nothing on this screen can start a turn until that changes.</Problem>
-            )}
+            {hotkey.state === "unavailable" &&
+              (PHONE ? (
+                <p className="m-0 text-sm text-heading">
+                  On a phone, hold the <strong>Hold to talk</strong> button on the Conversation screen.
+                </p>
+              ) : (
+                <Problem>
+                  {hotkey.reason} {wakeCouldWork ? "Use the wake word instead." : "Nothing here can start a turn."}
+                </Problem>
+              ))}
             {(hotkey.state === "working" || (hotkey.state === "needsAKeyBound" && hotkey.line !== null)) && (
               <KeyChanger
-                busy={busy !== null}
+                busy={isBusy("hotkey")}
                 onChoose={(trigger) => act("hotkey", "set_push_to_talk_key", { trigger })}
               />
             )}
@@ -738,6 +805,13 @@ export function Voice() {
               <>
                 {/* The sentence that must not drift, carried from the Rust side. */}
                 <Note className="text-foreground">{voice.wake.note}</Note>
+                <WakePhrase
+                  phrase={voice.wakePhrase}
+                  busy={isBusy("wakePhrase")}
+                  onSave={(phrase) => act("wakePhrase", "set_wake_phrase", { phrase })}
+                />
+                {refused.wakePhrase && <Problem>{refused.wakePhrase}</Problem>}
+                <Note>Separate other spellings with a slash, such as Agent / 에이전트.</Note>
                 {voice.wake.state.state === "unreadable" && (
                   <Problem>The recordings could not be read. {voice.wake.state.reason}</Problem>
                 )}
@@ -756,14 +830,14 @@ export function Voice() {
                 )}
                 <div className="flex flex-wrap gap-2">
                   {canHear && voice.wake.state.state !== "complete" && (
-                    <Button size="sm" disabled={idle} onClick={() => act("wake", "record_wake_take")}>
+                    <Button size="sm" disabled={isBusy("wake")} onClick={() => act("wake", "record_wake_take")}>
                       <CircleIcon className="size-3 fill-current" />
-                      {busy === "wake" ? "Recording — say it now" : "Record a take"}
+                      {isBusy("wake") ? "Recording — say it now" : "Record a take"}
                     </Button>
                   )}
                   {(voice.wake.state.state === "partial" || voice.wake.state.state === "complete") && (
-                    <Button size="sm" variant="outline" disabled={idle} onClick={() => act("wakeClear", "clear_wake_word")}>
-                      {busy === "wakeClear" ? "Clearing" : "Clear them"}
+                    <Button size="sm" variant="outline" disabled={isBusy("wakeClear")} onClick={() => act("wakeClear", "clear_wake_word")}>
+                      {isBusy("wakeClear") ? "Clearing" : "Clear them"}
                     </Button>
                   )}
                 </div>
@@ -789,20 +863,40 @@ export function Voice() {
               list={voice.devices}
               chosen={voice.chosen}
               noun="microphone"
-              disabled={idle}
-              onChoose={(device) => act("device", "set_voice_device", { device })}
+              disabled={isBusy("device")}
+              onChoose={(device) => act("device", "set_voice_device", { device }, "Switching the microphone…")}
             />
             {refused.device && <Problem>{refused.device}</Problem>}
+            <LevelSlider
+              label="Input gain"
+              describes="How much the microphone is amplified"
+              value={voice.inputGain}
+              min={25}
+              max={400}
+              disabled={isBusy("gain")}
+              onCommit={(gain) => act("gain", "set_input_gain", { gain })}
+            />
+            {refused.gain && <Problem>{refused.gain}</Problem>}
           </Field>
           <Field label="Speaker">
             <DevicePicker
               list={voice.speakers}
               chosen={voice.speaker}
               noun="speaker"
-              disabled={idle}
-              onChoose={(speaker) => act("speaker", "set_voice_speaker", { speaker })}
+              disabled={isBusy("speaker")}
+              onChoose={(speaker) => act("speaker", "set_voice_speaker", { speaker }, "Switching the speaker…")}
             />
             {refused.speaker && <Problem>{refused.speaker}</Problem>}
+            <LevelSlider
+              label="Volume"
+              describes="How loud answers are read"
+              value={voice.volume}
+              min={10}
+              max={200}
+              disabled={isBusy("volume")}
+              onCommit={(volume) => act("volume", "set_voice_volume", { volume })}
+            />
+            {refused.volume && <Problem>{refused.volume}</Problem>}
           </Field>
         </div>
       </Section>
@@ -830,9 +924,9 @@ export function Voice() {
             {voice.voiceModelEnv === null ? (
               <>
                 <div>
-                  <Button size="sm" disabled={idle} onClick={() => act("voiceModel", "fetch_voice_model")}>
+                  <Button size="sm" disabled={isBusy("voiceModel")} onClick={() => act("voiceModel", "fetch_voice_model")}>
                     <DownloadIcon />
-                    {busy === "voiceModel" ? "Downloading" : "Download the voice"}
+                    {isBusy("voiceModel") ? "Downloading" : "Download the voice"}
                   </Button>
                 </div>
                 <DownloadBar download={voice.downloads?.find((d) => d.id === "voice")} />
@@ -843,7 +937,7 @@ export function Voice() {
                 are yours to manage and Zyris does not download into them.
               </Note>
             )}
-            {busy === "voiceModel" && (
+            {isBusy("voiceModel") && (
               <Note>Each file is checked against its digest as it arrives. This takes a few minutes.</Note>
             )}
           </Panel>
@@ -895,8 +989,8 @@ export function Voice() {
               <div className="max-w-60">
                 <Field label="Reading speed">
                   <Select
-                    value={String(voice.speakingRate)}
-                    disabled={idle}
+                    value={String(roundRate(voice.speakingRate))}
+                    disabled={isBusy("rate")}
                     onValueChange={(value) => act("rate", "set_speaking_rate", { rate: Number(value) })}
                   >
                     <SelectTrigger aria-label="How fast answers are read">
@@ -914,16 +1008,6 @@ export function Voice() {
               </div>
             )}
             {refused.rate && <Problem>{refused.rate}</Problem>}
-            {voice.voiceModel.state === "ready" && (
-              <div className="max-w-80">
-                <VolumeSlider
-                  volume={voice.volume}
-                  disabled={idle}
-                  onCommit={(volume) => act("volume", "set_voice_volume", { volume })}
-                />
-              </div>
-            )}
-            {refused.volume && <Problem>{refused.volume}</Problem>}
           </>
         )}
       </Section>
@@ -956,11 +1040,12 @@ export function Voice() {
           <>
             <RadioGroup
               aria-label="Speech model"
-              value={(busy === "model" && switchingTo) || (voice.models.find((m) => m.chosen)?.id ?? "")}
-              disabled={idle}
+              value={(isBusy("model") && switchingTo) || (voice.models.find((m) => m.chosen)?.id ?? "")}
+              disabled={isBusy("model")}
               onValueChange={(id) => {
                 setSwitchingTo(id);
-                act("model", "set_speech_model", { id });
+                const name = voice.models.find((m) => m.id === id)?.name ?? id;
+                act("model", "set_speech_model", { id }, `Loading ${name}…`);
               }}
               className="gap-2"
             >
@@ -968,8 +1053,8 @@ export function Voice() {
                 <ModelRow
                   key={model.id}
                   model={model}
-                  busy={busy}
-                  switching={busy === "model" && switchingTo === model.id}
+                  busy={isBusy(`model:${model.id}`)}
+                  switching={isBusy("model") && switchingTo === model.id}
                   download={voice.downloads?.find((d) => d.id === `model:${model.id}`)}
                   refused={refused[`model:${model.id}`]}
                   onFetch={() => act(`model:${model.id}`, "fetch_speech_model", { id: model.id })}
@@ -982,7 +1067,7 @@ export function Voice() {
             )}
           </>
         )}
-        {busy?.startsWith("model:") && (
+        {fetching && (
           <Note>This takes a few minutes on a slow connection. Nothing is kept until the whole file has arrived and been checked.</Note>
         )}
         {refused.model && <Problem>{refused.model}</Problem>}
@@ -999,8 +1084,13 @@ export function Voice() {
             <Field label="Transcribing what you say">
               <Select
                 value={voice.compute.transcribeOn}
-                disabled={idle}
-                onValueChange={(transcribe) => act("compute", "set_voice_compute", { transcribe, speak: null })}
+                disabled={isBusy("compute")}
+                onValueChange={(transcribe) => act(
+                    "compute",
+                    "set_voice_compute",
+                    { transcribe, speak: null },
+                    movingTo("Transcription", voice.compute.transcribe, transcribe),
+                  )}
               >
                 <SelectTrigger aria-label="Where speech is transcribed">
                   <SelectValue />
@@ -1017,8 +1107,13 @@ export function Voice() {
             <Field label="Reading answers aloud">
               <Select
                 value={voice.compute.speakOn}
-                disabled={idle}
-                onValueChange={(speak) => act("compute", "set_voice_compute", { transcribe: null, speak })}
+                disabled={isBusy("compute")}
+                onValueChange={(speak) => act(
+                    "compute",
+                    "set_voice_compute",
+                    { transcribe: null, speak },
+                    movingTo("Reading aloud", voice.compute.speak, speak),
+                  )}
               >
                 <SelectTrigger aria-label="Where answers are read aloud">
                   <SelectValue />
@@ -1051,6 +1146,68 @@ export function Voice() {
   );
 }
 
+// The phrase listened for, typed. It has to be what the takes say: "Hey Agent" on a phone, say,
+// so the computer beside it listening for "Hey Zyris" does not wake too.
+function WakePhrase({ phrase, busy, onSave }: { phrase: string; busy: boolean; onSave: (phrase: string) => void }) {
+  const [typed, setTyped] = useState(phrase);
+  useEffect(() => setTyped(phrase), [phrase]);
+  return (
+    <form
+      className="flex items-center gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSave(typed);
+      }}
+    >
+      <Input
+        aria-label="The wake phrase"
+        value={typed}
+        onChange={(event) => setTyped(event.target.value)}
+        placeholder="Hey Zyris"
+        title="Separate spellings with /, such as Agent / 에이전트"
+        className="h-8 flex-1"
+      />
+      <Button type="submit" size="sm" variant="outline" disabled={busy || typed.trim() === phrase}>
+        Save
+      </Button>
+    </form>
+  );
+}
+
+// What the bar says while models download, with how far along they are together.
+function downloadingLabel(downloads: { received: number; total: number | null }[]): string | null {
+  if (downloads.length === 0) return null;
+  const received = downloads.reduce((sum, d) => sum + d.received, 0);
+  const total = downloads.reduce((sum, d) => sum + (d.total ?? 0), 0);
+  const percent = total > 0 ? ` — ${Math.floor((received / total) * 100)}%` : "";
+  return `Downloading the speech models${percent}. Speech is ready when this finishes.`;
+}
+
+// What the bar says while a model moves between the processor and a graphics card.
+function movingTo(what: string, options: { id: string; name: string }[], id: string): string {
+  const name = options.find((option) => option.id === id)?.name ?? id;
+  const gpu = id.startsWith("gpu") ? " The first time on a graphics card after an update takes up to 20 seconds." : "";
+  return `${what} is moving to ${name}.${gpu}`;
+}
+
+// **Something is loading, and the screen says so rather than going still.** Whisper and ONNX
+// Runtime report no progress while they load, so the bar moves without a percentage; every other
+// control stays usable meanwhile.
+function LoadingBar({ what }: { what: string | null }) {
+  if (!what) return null;
+  return (
+    <div role="status" className="flex flex-col gap-1.5 rounded-lg border border-primary/40 bg-primary/5 px-3.5 py-3">
+      <span className="flex items-center gap-2 text-[0.8125rem] text-heading">
+        <LoaderCircleIcon className="size-3.5 animate-spin text-primary" aria-hidden="true" />
+        {what}
+      </span>
+      <div className="relative h-1 w-full overflow-hidden rounded-full bg-border">
+        <div className="absolute inset-y-0 left-0 w-2/5 rounded-full bg-primary animate-indeterminate" />
+      </div>
+    </div>
+  );
+}
+
 // The wake word's takes, as a row of marks and a sentence.
 function Takes({ recorded, wanted, children }: { recorded: number; wanted: number; children: ReactNode }) {
   return (
@@ -1076,7 +1233,8 @@ function ModelRow({
   onForget,
 }: {
   model: SpeechModel;
-  busy: string | null;
+  // This model's own download or deletion is waiting on the Rust side.
+  busy: boolean;
   switching: boolean;
   download?: Download;
   refused: string | undefined;
@@ -1084,7 +1242,7 @@ function ModelRow({
   onForget: () => void;
 }) {
   const ready = model.state.state === "ready";
-  const mine = busy === `model:${model.id}`;
+  const mine = busy;
   return (
     <div
       className={cn(
@@ -1129,7 +1287,7 @@ function ModelRow({
             size="icon-sm"
             aria-label={`Delete ${model.name}`}
             title={mine ? "Deleting" : "Delete it from this computer"}
-            disabled={busy !== null}
+            disabled={busy}
             onClick={onForget}
           >
             <Trash2Icon />
@@ -1141,7 +1299,7 @@ function ModelRow({
             size="sm"
             aria-label={`Download ${model.name}`}
             title={`Downloaded once and kept at ${model.state.path}`}
-            disabled={busy !== null}
+            disabled={busy}
             onClick={onFetch}
           >
             <DownloadIcon />

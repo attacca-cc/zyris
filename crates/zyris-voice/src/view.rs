@@ -392,6 +392,8 @@ pub struct VoiceView {
     pub read_aloud: bool,
     /// How loud answers are read, as a gain on the voice.
     pub volume: f32,
+    /// How much the microphone is amplified, 1.0 as delivered.
+    pub input_gain: f32,
     /// Where speech is transcribed and answers are read.
     pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
@@ -407,6 +409,8 @@ pub struct VoiceView {
     /// why a file of the wrong size is not called damaged — see `stt::inspect`.
     pub model_env: Option<String>,
     pub wake: WakeView,
+    /// The phrase listened for: the one typed on the Voice screen, else `wake::DEFAULT_PHRASE`.
+    pub wake_phrase: String,
     /// Whether anything is read aloud, and what stops it if not.
     pub speaking: SpeakingState,
     /// What is on disk where the voice should be. Read every time, like [`VoiceView::model`].
@@ -449,6 +453,7 @@ impl VoiceView {
             speaking_rate: 1.0,
             read_aloud: false,
             volume: 1.0,
+            input_gain: 1.0,
             compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),
@@ -457,6 +462,7 @@ impl VoiceView {
             voice_model: VoiceModelView::NotHere { reason: reason.clone() },
             voice_model_env: None,
             downloads: Vec::new(),
+            wake_phrase: String::new(),
             wake: WakeView {
                 state: WakeState::NotHere { reason },
                 dir: None,
