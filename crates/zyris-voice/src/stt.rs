@@ -140,20 +140,25 @@ pub fn choosable_on(id: Option<&str>, device: Device) -> &'static Choosable {
 pub enum Device {
     Cpu,
     Gpu(u32),
+    /// A phone's NPU, through LiteRT (`crate::npu`). Never listed by [`devices`], which is
+    /// whisper.cpp's; the engine offers it when `crate::npu::probe` finds a bundle for the SoC.
+    Npu,
 }
 
 impl Device {
-    /// How it is written in `voice.json` and on the wire: `cpu`, `gpu:0`, `gpu:1`.
+    /// How it is written in `voice.json` and on the wire: `cpu`, `gpu:0`, `gpu:1`, `npu`.
     pub fn id(self) -> String {
         match self {
             Device::Cpu => "cpu".to_string(),
             Device::Gpu(index) => format!("gpu:{index}"),
+            Device::Npu => "npu".to_string(),
         }
     }
 
     pub fn from_id(id: &str) -> Option<Device> {
         match id {
             "cpu" => Some(Device::Cpu),
+            "npu" => Some(Device::Npu),
             _ => id.strip_prefix("gpu:")?.parse().ok().map(Device::Gpu),
         }
     }
@@ -576,7 +581,8 @@ impl Stt {
 
         let mut parameters = whisper_rs::WhisperContextParameters::default();
         match device {
-            Device::Cpu => parameters.use_gpu = false,
+            // whisper.cpp never runs on the NPU; the engine loads it on the CPU there.
+            Device::Cpu | Device::Npu => parameters.use_gpu = false,
             Device::Gpu(index) => {
                 parameters.use_gpu = true;
                 parameters.gpu_device = index as std::ffi::c_int;
@@ -736,6 +742,15 @@ pub fn clean(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::Device;
+
+    #[test]
+    fn the_npu_is_written_npu() {
+        assert_eq!(Device::Npu.id(), "npu");
+        assert_eq!(Device::from_id("npu"), Some(Device::Npu));
+        assert!(!Device::Npu.is_gpu());
+    }
+
     use super::*;
 
     /// A setting written by a later version, or by hand, must not stop listening from starting.

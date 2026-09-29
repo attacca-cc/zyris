@@ -126,7 +126,7 @@ pub struct Settings {
 }
 
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
-fn compute_view(settings: &Settings) -> crate::view::ComputeView {
+fn compute_view(settings: &Settings, npu: Option<crate::view::NpuView>) -> crate::view::ComputeView {
     use crate::view::ComputeOption;
     let devices = stt::devices();
     let processor = devices.first().map_or("Processor".to_string(), |cpu| cpu.name.clone());
@@ -142,8 +142,13 @@ fn compute_view(settings: &Settings) -> crate::view::ComputeView {
                     d.name,
                     if d.integrated { " (integrated)" } else { "" }
                 ),
+                stt::Device::Npu => format!("NPU — {}", d.name),
             },
         })
+        .chain(npu.as_ref().map(|npu| ComputeOption {
+            id: stt::Device::Npu.id(),
+            name: format!("NPU — Qualcomm {} (whisper-small)", npu.soc),
+        }))
         .collect();
     let mut speak = vec![ComputeOption { id: "cpu".into(), name: format!("Processor — {processor}") }];
     if crate::tts::GPU_BUILT_IN {
@@ -157,12 +162,33 @@ fn compute_view(settings: &Settings) -> crate::view::ComputeView {
         transcribe_on: transcribe_on(settings).id(),
         speak,
         speak_on: if speak_on_gpu(settings) { "gpu" } else { "cpu" }.into(),
+        npu,
     }
 }
 
 /// Where this run transcribes.
+/// The download id the NPU bundle's progress is kept under.
+const NPU_DOWNLOAD: &str = "npu";
+
+/// Load the NPU transcriber from a bundle directory: LiteRT on Android with `npu`, nowhere else.
+fn npu_load(dir: &Path) -> Result<crate::onnx_stt::OnnxStt, stt::Fault> {
+    #[cfg(all(feature = "npu", target_os = "android"))]
+    return crate::npu::load(dir);
+    #[cfg(not(all(feature = "npu", target_os = "android")))]
+    {
+        let _ = dir;
+        Err(stt::Fault::Whisper { detail: "this build has no NPU support".into() })
+    }
+}
+
 fn transcribe_on(settings: &Settings) -> stt::Device {
-    settings.transcribe_on.as_deref().and_then(stt::Device::from_id).unwrap_or_else(stt::default_device)
+    settings
+        .transcribe_on
+        .as_deref()
+        .and_then(stt::Device::from_id)
+        // `npu` only where there is one: a file copied from a phone, or a bundle gone, is today's default.
+        .filter(|device| *device != stt::Device::Npu || crate::npu::probe().is_some())
+        .unwrap_or_else(stt::default_device)
 }
 
 /// Whether this run reads answers on the GPU.
@@ -268,6 +294,10 @@ pub struct Engine {
     /// Whisper models already in memory, by path. Reopening a microphone or a speaker used to
     /// load and warm them again, which is seconds per model and most of a restart.
     loaded: std::sync::Mutex<Vec<(PathBuf, stt::Device, Arc<stt::Stt>)>>,
+    /// The phone's NPU transcriber, loaded and warmed up once (`crate::npu`).
+    npu: std::sync::Mutex<Option<Arc<dyn crate::session::Transcribe>>>,
+    /// Whether that load failed on this run, and why: tried once per run.
+    npu_warm: Arc<crate::npu::WarmUp>,
     /// The voice, loaded once per place it runs: the same directory and voice on every start.
     voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
@@ -340,6 +370,8 @@ impl Engine {
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
             downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             loaded: std::sync::Mutex::new(Vec::new()),
+            npu: std::sync::Mutex::new(None),
+            npu_warm: Arc::new(crate::npu::WarmUp::default()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
             input_gain: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(gain.to_bits())),
@@ -555,7 +587,7 @@ impl Engine {
             read_aloud: read_aloud(settings),
             volume: volume(settings),
             input_gain: input_gain(settings),
-            compute: compute_view(settings),
+            compute: compute_view(settings, self.npu_view()),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
                 let chosen = chosen_model(settings).id;
@@ -946,20 +978,38 @@ impl Engine {
         let choice = &settings.device;
         let typed_phrase = settings.wake_phrase.clone();
         let device = transcribe_on(settings);
-        let path = match stt::state(&chosen_model(settings).model) {
-            stt::ModelState::Ready { path, .. } => path,
-            // Everything else is the screen's business: it renders the same `ModelState` and has
-            // a button for the one case a button fixes. The sentence here is about listening.
-            other => return Err(no_model(&other)),
-        };
+        // The NPU, when chosen and it loads; whisper.cpp on the processor when it does not, with
+        // the reason on the Voice screen (`npu_view`). whisper.cpp itself never runs on the NPU.
+        let on_npu = if device == stt::Device::Npu { self.npu_transcriber().await } else { None };
+        let whisper_on = if device == stt::Device::Npu { stt::Device::Cpu } else { device };
 
         let apm = Apm::new().map_err(|fault| fault.to_string())?;
-        let stt = self.stt_at(&path, device).await?;
-        let checker = self.wake_checker(settings, &stt).await;
+        let (stt, checker): (Arc<dyn crate::session::Transcribe>, Option<Arc<stt::Stt>>) = match on_npu {
+            // Turns on the NPU; the wake word on whisper.cpp Base on the processor, when it is
+            // there, since it reads every utterance in the room and the NPU's 30-second encoder
+            // is a waste on a one-second phrase.
+            Some(npu) => (npu, self.base_on(stt::Device::Cpu).await),
+            None => {
+                let path = match stt::state(&chosen_model(settings).model) {
+                    stt::ModelState::Ready { path, .. } => path,
+                    // Everything else is the screen's business: it renders the same `ModelState` and
+                    // has a button for the one case a button fixes. The sentence here is about listening.
+                    other => return Err(no_model(&other)),
+                };
+                let stt = self.stt_at(&path, whisper_on).await?;
+                let checker = self.wake_checker(settings, &stt, whisper_on).await;
+                (stt, Some(checker))
+            }
+        };
         // Only what this start uses stays in memory: a model chosen away from is let go.
-        lock(&self.loaded).retain(|(_, _, kept)| Arc::ptr_eq(kept, &stt) || Arc::ptr_eq(kept, &checker));
+        let in_use = |kept: &Arc<stt::Stt>| {
+            std::ptr::addr_eq(Arc::as_ptr(kept), Arc::as_ptr(&stt))
+                || checker.as_ref().is_some_and(|c| Arc::ptr_eq(kept, c))
+        };
+        lock(&self.loaded).retain(|(_, _, kept)| in_use(kept));
         let phrase = enrolled_phrase(typed_phrase);
         if let Some(phrase) = &phrase
+            && let Some(checker) = &checker
             && !self.takes_checked.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             // In the background: it only logs, and with a large model it took most of a minute
@@ -1011,7 +1061,9 @@ impl Engine {
             session = session.listening_for(phrase);
         }
         // Also when the wake word is off: the preview while somebody speaks runs on it.
-        session = session.checking_with(checker);
+        if let Some(checker) = checker {
+            session = session.checking_with(checker);
+        }
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
@@ -1026,7 +1078,7 @@ impl Engine {
     /// machine this was measured on it answers in half a second where Large v3 Turbo takes ten
     /// — ten seconds of every core for each sentence somebody says to someone else. The chosen
     /// model is kept for what matters: the request.
-    async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>) -> Arc<stt::Stt> {
+    async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>, device: stt::Device) -> Arc<stt::Stt> {
         let named = std::env::var_os(stt::MODEL_ENV).is_some_and(|n| !n.is_empty());
         if named || chosen_model(settings).model == stt::BASE {
             return chosen.clone();
@@ -1034,7 +1086,65 @@ impl Engine {
         let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else {
             return chosen.clone();
         };
-        self.stt_at(&path, transcribe_on(settings)).await.unwrap_or_else(|_| chosen.clone())
+        self.stt_at(&path, device).await.unwrap_or_else(|_| chosen.clone())
+    }
+
+    /// whisper.cpp Base on `device`, if Base is in the cache.
+    async fn base_on(&self, device: stt::Device) -> Option<Arc<stt::Stt>> {
+        let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else { return None };
+        self.stt_at(&path, device).await.ok()
+    }
+
+    /// The NPU transcriber: loaded and warmed up once, and not tried again this run after a
+    /// failure. `None` when there is no NPU here, its bundle is not on disk, or it failed.
+    async fn npu_transcriber(&self) -> Option<Arc<dyn crate::session::Transcribe>> {
+        if let Some(loaded) = lock(&self.npu).clone() {
+            return Some(loaded);
+        }
+        let probe = crate::npu::probe()?;
+        let root = stt::cache_dir()?;
+        let crate::npu::BundleState::Ready { dir } = crate::npu::state(probe.bundle, &root) else {
+            return None;
+        };
+        let warm = self.npu_warm.clone();
+        let loaded = tokio::task::spawn_blocking(move || warm.try_once(|| npu_load(&dir))).await.ok()?;
+        match loaded {
+            Ok(npu) => {
+                let npu: Arc<dyn crate::session::Transcribe> = Arc::new(npu);
+                *lock(&self.npu) = Some(npu.clone());
+                Some(npu)
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "the NPU did not load; transcribing on the processor");
+                None
+            }
+        }
+    }
+
+    /// This phone's NPU, as the Voice screen shows it.
+    fn npu_view(&self) -> Option<crate::view::NpuView> {
+        use crate::view::{NpuState, NpuView};
+        let probe = crate::npu::probe()?;
+        let state = if let Some(reason) = self.npu_warm.reason() {
+            NpuState::Unavailable { reason }
+        } else if self.downloads.lock().expect("downloads is never poisoned").contains_key(NPU_DOWNLOAD) {
+            NpuState::Downloading
+        } else {
+            match stt::cache_dir().map(|root| crate::npu::state(probe.bundle, &root)) {
+                Some(crate::npu::BundleState::Ready { .. }) => NpuState::Ready,
+                _ => NpuState::Absent,
+            }
+        };
+        Some(NpuView { soc: probe.soc, bytes: crate::npu::total_bytes(probe.bundle), state })
+    }
+
+    /// Download this phone's NPU bundle, every file checked against its size and SHA-256.
+    pub async fn fetch_npu(&self) -> Result<(), String> {
+        let probe = crate::npu::probe().ok_or_else(|| "this device has no NPU Zyris can use".to_string())?;
+        let root = stt::cache_dir().ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
+        let fetched = crate::npu::fetch(probe.bundle, &root, |progress| self.progressed(NPU_DOWNLOAD, progress)).await;
+        self.finished(NPU_DOWNLOAD);
+        fetched.map(|_| ()).map_err(|fault| fault.to_string())
     }
 
     /// The whisper at `path`, loaded once and kept for the next start.
@@ -1661,6 +1771,15 @@ fn write_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A `voice.json` saying `npu` on a machine with no NPU (every desktop, and a phone whose SoC
+    /// has no bundle) transcribes where it would have with nothing chosen.
+    #[test]
+    fn npu_in_the_settings_without_an_npu_here_is_todays_default() {
+        let settings = super::Settings { transcribe_on: Some("npu".into()), ..super::Settings::default() };
+        assert!(crate::npu::probe().is_none());
+        assert_eq!(super::transcribe_on(&settings), crate::stt::default_device());
+    }
+
     use super::*;
 
     pub(super) fn tempdir() -> PathBuf {

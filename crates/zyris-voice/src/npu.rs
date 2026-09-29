@@ -176,6 +176,130 @@ pub async fn fetch(
     Ok(dir)
 }
 
+/// Whether this run's NPU warm-up has failed, and why: tried once per run, never again after a
+/// failure, so a phone whose DSP refuses does not pay a failing load on every start.
+#[derive(Default)]
+pub struct WarmUp {
+    failed: std::sync::Mutex<Option<String>>,
+}
+
+impl WarmUp {
+    /// Run `load` unless an earlier attempt this run failed; remember a failure.
+    pub fn try_once<T>(&self, load: impl FnOnce() -> Result<T, Fault>) -> Result<T, String> {
+        let mut failed = self.failed.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(reason) = failed.as_ref() {
+            return Err(reason.clone());
+        }
+        load().map_err(|fault| {
+            let reason = fault.to_string();
+            *failed = Some(reason.clone());
+            reason
+        })
+    }
+
+    /// Why the NPU is not in use this run, if it failed.
+    pub fn reason(&self) -> Option<String> {
+        self.failed
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+/// This phone's SoC and the bundle compiled for it.
+pub struct Probe {
+    pub soc: String,
+    pub bundle: &'static Bundle,
+}
+
+/// The NPU this build can use here: an Android phone at API 31 or later (LiteRT's NPU floor)
+/// whose `ro.soc.model` has a bundle. `None` everywhere else, and in a build without `npu`.
+pub fn probe() -> Option<Probe> {
+    #[cfg(all(feature = "npu", target_os = "android"))]
+    {
+        static FOUND: std::sync::OnceLock<Option<(String, &'static Bundle)>> =
+            std::sync::OnceLock::new();
+        let (soc, bundle) = FOUND
+            .get_or_init(|| {
+                let prop = |name: &str| {
+                    std::process::Command::new("getprop")
+                        .arg(name)
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default()
+                };
+                let api: u32 = prop("ro.build.version.sdk").parse().unwrap_or(0);
+                let soc = prop("ro.soc.model");
+                let bundle = bundle_for(&soc).filter(|_| api >= 31)?;
+                tracing::info!(%soc, api, "this phone's NPU has a whisper bundle");
+                Some((soc, bundle))
+            })
+            .as_ref()?;
+        return Some(Probe {
+            soc: soc.clone(),
+            bundle,
+        });
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// The whisper transcriber on this phone's NPU, from a bundle on disk, warmed up: one silent turn
+/// through all three graphs, since a graph that opens is not yet one that runs.
+#[cfg(all(feature = "npu", target_os = "android"))]
+pub fn load(dir: &std::path::Path) -> Result<crate::onnx_stt::OnnxStt, Fault> {
+    let native = native_lib_dir().ok_or_else(|| Fault::Whisper {
+        detail: "the app's native library directory was not found".into(),
+    })?;
+    // The DSP loads the Hexagon skel by path. Set before LiteRT opens the dispatch library, once.
+    static ADSP: std::sync::Once = std::sync::Once::new();
+    ADSP.call_once(|| {
+        let path = format!(
+            "{};/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp;/system/lib/rfsa/adsp",
+            native.display()
+        );
+        // SAFETY: set once, before the NPU is first opened; nothing else here reads it concurrently.
+        unsafe { std::env::set_var("ADSP_LIBRARY_PATH", path) };
+    });
+    let mut graphs = crate::litert::LiteRtGraphs::open(dir, &native, 12, 12, 64)?;
+    tracing::info!(
+        fully_accelerated = graphs.fully_accelerated(),
+        "the NPU graphs are open"
+    );
+    let started = std::time::Instant::now();
+    graphs.warm_up()?;
+    tracing::info!(
+        ms = started.elapsed().as_millis() as u64,
+        "the NPU answered its warm-up"
+    );
+    let read = |name: &str| {
+        std::fs::read_to_string(dir.join(name)).map_err(|e| Fault::Whisper {
+            detail: format!("{name}: {e}"),
+        })
+    };
+    let specials =
+        crate::onnx_stt::Specials::from_generation_config(&read("generation_config.json")?)?;
+    let tokenizer = crate::bpe::Tokenizer::from_json(&read("tokenizer.json")?)
+        .map_err(|detail| Fault::Whisper { detail })?;
+    Ok(crate::onnx_stt::OnnxStt::with(
+        Box::new(NpuRuntime::new(graphs)),
+        specials,
+        tokenizer,
+        80,
+    ))
+}
+
+/// Where Android extracted this app's native libraries (legacy packaging): the directory of the
+/// app's own library, read from the process's memory map.
+#[cfg(all(feature = "npu", target_os = "android"))]
+fn native_lib_dir() -> Option<std::path::PathBuf> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    let line = maps.lines().find(|l| l.ends_with("/libzyris_app_lib.so"))?;
+    let path = std::path::Path::new(line.split_whitespace().last()?);
+    path.parent().map(std::path::Path::to_path_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +411,30 @@ mod tests {
         std::fs::write(dir.join(small.file), vec![0u8; small.bytes as usize]).unwrap();
         assert!(matches!(state(b, &root), BundleState::Partial { .. }));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_failed_warm_up_is_remembered_for_the_run() {
+        let gate = WarmUp::default();
+        assert!(
+            gate.try_once(|| Err::<(), _>(Fault::Whisper {
+                detail: "dsp".into()
+            }))
+            .is_err()
+        );
+        let mut called = false;
+        assert!(
+            gate.try_once(|| {
+                called = true;
+                Ok(())
+            })
+            .is_err(),
+            "the first failure stands"
+        );
+        assert!(!called, "no second attempt in the same run");
+        assert_eq!(
+            gate.reason().as_deref(),
+            Some("speech recognition failed: dsp")
+        );
     }
 }

@@ -136,5 +136,8 @@ aec = ["voice", "zyris-voice/aec-bundled"]
 # Transcription and synthesis on the GPU, or either half alone. Forward; see `zyris-voice`.
 gpu = ["voice", "zyris-voice/gpu"]
 gpu-stt = ["voice", "zyris-voice/gpu-stt"]
+# Whisper on a phone's NPU through LiteRT (zyris-voice/src/npu.rs). Android builds only: the
+# phone APK carries LiteRT and the Qualcomm libraries (scripts/android/npu-libs.sh).
+npu = ["voice", "zyris-voice/npu"]
 gpu-tts = ["voice", "zyris-voice/gpu-tts"]
 metal = ["voice", "zyris-voice/metal"]

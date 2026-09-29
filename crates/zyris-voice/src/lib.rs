@@ -781,6 +781,17 @@ impl Voice {
         self.look().await
     }
 
+    /// Download this phone's NPU bundle. Answers `Err` with a sentence when it could not be had,
+    /// including on every machine without an NPU Zyris can use.
+    pub async fn fetch_npu(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_npu().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
+    }
+
     /// Download a speech model, by id. Answers `Err` with a sentence when it could not be had.
     pub async fn fetch_model(&self, id: String) -> Result<view::VoiceView, String> {
         #[cfg(feature = "voice")]

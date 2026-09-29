@@ -279,6 +279,7 @@ pub fn run(
             bridge::set_voice_compute,
             bridge::set_speech_model,
             bridge::fetch_speech_model,
+            bridge::fetch_npu_model,
             bridge::fetch_voice_model,
             bridge::forget_speech_model,
             bridge::record_wake_take,

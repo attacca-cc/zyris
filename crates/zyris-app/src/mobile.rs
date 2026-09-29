@@ -74,6 +74,7 @@ pub fn run() {
             set_speaking_rate,
             set_speech_model,
             fetch_speech_model,
+            fetch_npu_model,
             fetch_voice_model,
             forget_speech_model,
             record_wake_take,
@@ -539,6 +540,12 @@ async fn set_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_jso
 #[tauri::command]
 async fn fetch_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
     Ok(screen(voice.fetch_model(id).await?))
+}
+
+/// Download this phone's NPU bundle (about 630 MB); the screen shows its progress.
+#[tauri::command]
+async fn fetch_npu_model(voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.fetch_npu().await?))
 }
 
 #[tauri::command]
