@@ -160,6 +160,167 @@ pub fn greedy(
     Ok(out)
 }
 
+use std::path::Path;
+use std::sync::Mutex;
+
+/// The directory an exported whisper lives in, for the tests that need a real one.
+pub const MODEL_ENV: &str = "ZYRIS_ONNX_WHISPER";
+
+/// ONNX Runtime on the CPU: `encoder_model.onnx` and `decoder_model.onnx` as `optimum` exports
+/// them. The decoder has no KV cache, so each step reruns every token so far; for whisper's short
+/// turns on base that costs less than the cache's forty extra inputs.
+pub struct Ort {
+    encoder: ort::session::Session,
+    decoder: ort::session::Session,
+    bins: usize,
+    hidden: Vec<f32>,
+    hidden_shape: Vec<usize>,
+}
+
+impl Ort {
+    pub fn load(dir: &Path, bins: usize) -> Result<Ort, Fault> {
+        Ok(Ort {
+            encoder: session(&dir.join("onnx/encoder_model.onnx"))?,
+            decoder: session(&dir.join("onnx/decoder_model.onnx"))?,
+            bins,
+            hidden: Vec::new(),
+            hidden_shape: Vec::new(),
+        })
+    }
+}
+
+fn session(path: &Path) -> Result<ort::session::Session, Fault> {
+    if !path.is_file() {
+        return Err(fault(format!("{} is missing", path.display())));
+    }
+    ort::session::Session::builder()
+        .and_then(|b| b.with_intra_threads(crate::stt::threads()))
+        .and_then(|b| b.commit_from_file(path))
+        .map_err(|e| fault(format!("{}: {e}", path.display())))
+}
+
+impl Runtime for Ort {
+    fn encode(&mut self, mel: &[f32]) -> Result<(), Fault> {
+        let features =
+            ort::value::TensorRef::from_array_view((vec![1, self.bins, crate::mel::FRAMES], mel))
+                .map_err(fault)?;
+        let out = self
+            .encoder
+            .run(ort::inputs!["input_features" => features])
+            .map_err(fault)?;
+        let (shape, data) = out["last_hidden_state"]
+            .try_extract_tensor::<f32>()
+            .map_err(fault)?;
+        self.hidden_shape = shape.iter().map(|d| *d as usize).collect();
+        self.hidden = data.to_vec();
+        Ok(())
+    }
+
+    fn next_logits(&mut self, tokens: &[i64]) -> Result<Vec<f32>, Fault> {
+        let ids = ort::value::TensorRef::from_array_view((vec![1, tokens.len()], tokens))
+            .map_err(fault)?;
+        let hidden =
+            ort::value::TensorRef::from_array_view((self.hidden_shape.clone(), &self.hidden[..]))
+                .map_err(fault)?;
+        let out = self
+            .decoder
+            .run(ort::inputs!["input_ids" => ids, "encoder_hidden_states" => hidden])
+            .map_err(fault)?;
+        let (shape, data) = out["logits"].try_extract_tensor::<f32>().map_err(fault)?;
+        let vocab = *shape
+            .last()
+            .ok_or_else(|| fault("the decoder returned no logits"))? as usize;
+        Ok(data[data.len() - vocab..].to_vec())
+    }
+}
+
+/// Whisper as an exported model, behind the same trait whisper.cpp's `Stt` is.
+pub struct OnnxStt {
+    runtime: Mutex<Box<dyn Runtime>>,
+    specials: Specials,
+    tokenizer: crate::bpe::Tokenizer,
+    bins: usize,
+}
+
+impl OnnxStt {
+    /// An `optimum` export of whisper: `config.json`, `generation_config.json`, `tokenizer.json`,
+    /// and `onnx/encoder_model.onnx` and `onnx/decoder_model.onnx`.
+    pub fn load(dir: &Path) -> Result<OnnxStt, Fault> {
+        let read = |name: &str| {
+            let path = dir.join(name);
+            std::fs::read_to_string(&path).map_err(|e| fault(format!("{}: {e}", path.display())))
+        };
+        let config: serde_json::Value =
+            serde_json::from_str(&read("config.json")?).map_err(fault)?;
+        let bins = config["num_mel_bins"]
+            .as_u64()
+            .ok_or_else(|| fault("config.json has no num_mel_bins"))? as usize;
+        let specials = Specials::from_generation_config(&read("generation_config.json")?)?;
+        let tokenizer =
+            crate::bpe::Tokenizer::from_json(&read("tokenizer.json")?).map_err(fault)?;
+        Ok(OnnxStt::with(
+            Box::new(Ort::load(dir, bins)?),
+            specials,
+            tokenizer,
+            bins,
+        ))
+    }
+
+    pub fn with(
+        runtime: Box<dyn Runtime>,
+        specials: Specials,
+        tokenizer: crate::bpe::Tokenizer,
+        bins: usize,
+    ) -> OnnxStt {
+        OnnxStt {
+            runtime: Mutex::new(runtime),
+            specials,
+            tokenizer,
+            bins,
+        }
+    }
+
+    fn run(&self, audio: &[f32], expecting: Option<&str>) -> Result<String, Fault> {
+        if audio.is_empty() {
+            return Ok(String::new());
+        }
+        let mel = crate::mel::log_mel(audio, self.bins);
+        let mut runtime = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        runtime.encode(&mel)?;
+        let language = detect_language(&mut **runtime, &self.specials)?;
+        if let Some((code, _)) = self
+            .specials
+            .languages
+            .iter()
+            .find(|(_, id)| *id == language)
+        {
+            tracing::debug!(language = %code, "whisper detected the language");
+        }
+        let prompt = expecting
+            .map(|words| self.tokenizer.encode(&format!(" {}", words.trim())))
+            .unwrap_or_default();
+        let ids = greedy(
+            &mut **runtime,
+            &self.specials,
+            prefix(&self.specials, language, &prompt),
+        )?;
+        Ok(crate::stt::clean(&self.tokenizer.decode(&ids)))
+    }
+}
+
+impl crate::session::Transcribe for OnnxStt {
+    fn transcribe(&self, audio: &[f32]) -> Result<String, Fault> {
+        self.run(audio, None)
+    }
+
+    fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, Fault> {
+        self.run(audio, Some(phrase))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -306,5 +467,52 @@ pub(crate) mod tests {
         let mut runtime = Scripted::saying(vec![vec![(50359, 9.0), (2, 8.0), (1911, 5.0)]]);
         let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[])).expect("decodes");
         assert_eq!(out, vec![1911]);
+    }
+
+    use crate::session::Transcribe;
+
+    fn tiny_tokenizer() -> crate::bpe::Tokenizer {
+        crate::bpe::Tokenizer::from_json(
+            r#"{"added_tokens": [], "model": {"type": "BPE",
+                "vocab": {"Ġhello": 1911}, "merges": []}}"#,
+        )
+        .expect("reads")
+    }
+
+    #[test]
+    fn a_turn_is_encoded_once_detected_and_decoded() {
+        let runtime = Scripted::saying(vec![vec![(EN, 5.0)], vec![(1911, 5.0)]]);
+        let stt = OnnxStt::with(Box::new(runtime), specials(), tiny_tokenizer(), 80);
+        assert_eq!(
+            stt.transcribe(&vec![0.1; 16_000]).expect("transcribes"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn no_audio_is_no_text_and_no_model_run() {
+        struct Untouchable;
+        impl Runtime for Untouchable {
+            fn encode(&mut self, _mel: &[f32]) -> Result<(), Fault> {
+                panic!("the model ran on no audio")
+            }
+            fn next_logits(&mut self, _tokens: &[i64]) -> Result<Vec<f32>, Fault> {
+                panic!("the model ran on no audio")
+            }
+        }
+        let stt = OnnxStt::with(Box::new(Untouchable), specials(), tiny_tokenizer(), 80);
+        assert_eq!(stt.transcribe(&[]).expect("answers"), "");
+    }
+
+    #[test]
+    fn a_directory_missing_a_file_says_which() {
+        let dir = std::env::temp_dir().join(format!("zyris-onnx-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let error = OnnxStt::load(&dir)
+            .err()
+            .expect("an empty directory is not a model")
+            .to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(error.contains("config.json"), "{error}");
     }
 }
