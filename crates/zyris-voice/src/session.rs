@@ -1526,6 +1526,10 @@ pub struct Speaking {
     /// [`crate::answers::Answers`], which reads the feed whether or not anything is speaking.
     traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
+    /// The runtime this was made on, which [`Speaking::interrupt`] spawns the cancel onto. **Not
+    /// the caller's**: the Stop button is a synchronous app command, run on a thread with no
+    /// runtime, and spawning there aborted the phone app.
+    runtime: tokio::runtime::Handle,
 }
 
 #[derive(Default)]
@@ -1548,7 +1552,8 @@ struct SpeakingState {
 }
 
 impl Speaking {
-    /// The voice, the speaker, the conversation, and where events go.
+    /// The voice, the speaker, the conversation, and where events go. Made on a Tokio runtime,
+    /// which is where it later spawns work from any thread.
     pub fn new(
         tts: Arc<dyn Synthesise>,
         out: Arc<dyn Play>,
@@ -1562,6 +1567,7 @@ impl Speaking {
             events,
             traces: broadcast::channel(1).0,
             state: std::sync::Mutex::new(Default::default()),
+            runtime: tokio::runtime::Handle::current(),
         })
     }
 
@@ -1577,6 +1583,7 @@ impl Speaking {
             events: self.events.clone(),
             traces,
             state: std::sync::Mutex::new(Default::default()),
+            runtime: self.runtime.clone(),
         })
     }
 
@@ -1831,7 +1838,7 @@ impl Speaking {
         });
         self.publish(VoiceEvent::Interrupted);
         let speaking = self.clone();
-        tokio::spawn(async move { speaking.cancel().await });
+        self.runtime.spawn(async move { speaking.cancel().await });
     }
 
     fn generation(&self) -> u64 {
@@ -3920,6 +3927,23 @@ mod barge_in {
         rig.speaking.interrupt();
         settle().await;
         assert_eq!(rig.conversation.told(), Vec::new(), "nothing was said to Attacca");
+    }
+
+    /// **An interruption from a thread with no runtime.** The Stop button is a synchronous app
+    /// command, which Tauri runs on its IPC thread; `interrupt` spawned the cancel on whatever
+    /// runtime the caller was in, and there was none: the phone app aborted (measured on a Galaxy
+    /// S23 Ultra, 2026-09-30).
+    #[tokio::test]
+    async fn an_interruption_from_outside_any_runtime_still_cancels_the_turn() {
+        let mut rig = rig(Voicebox::plain());
+        rig.say("Yes.").await;
+        rig.play(1000);
+
+        let speaking = rig.speaking.clone();
+        std::thread::spawn(move || speaking.interrupt()).join().expect("interrupt did not panic");
+        settle().await;
+
+        assert_eq!(rig.conversation.told(), vec![Told::Cancel]);
     }
 
     /// **One message, not two.** Attacca answers a message that arrives while a turn is running
