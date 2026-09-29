@@ -98,6 +98,11 @@ pub mod stt;
 #[cfg(feature = "voice")]
 pub mod mel;
 
+// Whisper's byte-level BPE, read from a Hugging Face `tokenizer.json`: what `onnx_stt` decodes a
+// transcript with and encodes a prompt with.
+#[cfg(feature = "voice")]
+pub mod bpe;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]

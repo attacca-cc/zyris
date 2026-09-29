@@ -9515,6 +9515,7 @@ dependencies = [
  "futures-util",
  "ort",
  "realfft",
+ "regex",
  "reqwest",
  "rubato",
  "rustls",

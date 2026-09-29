@@ -38,6 +38,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.regex]
+workspace = true
+optional = true
+
 [dependencies.earshot]
 workspace = true
 optional = true
@@ -196,6 +200,7 @@ voice = [
     "dep:cpal",
     "dep:rubato",
     "dep:realfft",
+    "dep:regex",
     "dep:earshot",
     "dep:whisper-rs",
     "dep:whisper-rs-sys",
