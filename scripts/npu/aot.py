@@ -10,8 +10,8 @@ SRC = pathlib.Path("out/whisper-small")
 OUT = pathlib.Path("out/bundles")
 GRAPHS = ("encoder", "cross", "decoder")
 # The HTP generation each SoC's compiled graphs run on; the skel and stub that go with them.
-HTP = {"SM8450": 69, "SM8475": 69, "SM8550": 73, "SM8650": 75, "SM8750": 79, "SM8845": 81, "SM8850": 81,
-       "SA8255": 73, "SA8295": 73}
+# Phones only: LiteRT's own AI-pack export treats the SA automotive parts as non-Android targets.
+HTP = {"SM8450": 69, "SM8475": 69, "SM8550": 73, "SM8650": 75, "SM8750": 79, "SM8845": 81, "SM8850": 81}
 
 def sha256(path):
     h = hashlib.sha256()
@@ -27,7 +27,7 @@ def main(only):
     if only and manifest_path.exists():  # a partial run adds to what an earlier run found
         manifest = json.loads(manifest_path.read_text())
     for soc in qnn.SocModel:
-        if soc == qnn.SocModel.ALL or (only and soc.value not in only):
+        if soc == qnn.SocModel.ALL or soc.value.startswith("SA") or (only and soc.value not in only):
             continue
         name = soc.value
         dest = OUT / f"whisper-small-npu-{name}"

@@ -8,7 +8,7 @@ SDK=$(ls -d /nix/store/*-androidsdk/libexec/android-sdk | head -1); BT=$SDK/buil
 spike=${SPIKE:-$npu/../../spikes/npu-litert}
 P=cc.attacca.npugate; T=/data/local/tmp/npugate; F=/data/data/$P/files
 soc=$(adb shell getprop ro.soc.model | tr -d '\r')
-case "$soc" in SM8450|SM8475) v=69;; SM8550|SA8255|SA8295) v=73;; SM8650) v=75;; SM8750) v=79;; SM8845|SM8850) v=81;; *) echo "no HTP for $soc"; exit 1;; esac
+case "$soc" in SM8450|SM8475) v=69;; SM8550) v=73;; SM8650) v=75;; SM8750) v=79;; SM8845|SM8850) v=81;; *) echo "no HTP for $soc"; exit 1;; esac
 skel="$npu/out/qairt/hexagon-v$v/unsigned/libQnnHtpV${v}Skel.so"; stub="$npu/out/qairt/aarch64-android/libQnnHtpV${v}Stub.so"
 bench() { # <ld path> <adsp path> <dispatch dir>
   echo "cd $F && LD_LIBRARY_PATH=$1 ADSP_LIBRARY_PATH='$2;/vendor/lib/rfsa/adsp;/vendor/dsp/cdsp' NPU_BENCH_DISPATCH=$3 ./npu-bench --model-dir $F/m --clips $F/clips 2>&1 | grep -E '^soc=|^clip=ko1|error|denied|fastrpc|Failed' | head -8"

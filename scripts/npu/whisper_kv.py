@@ -56,7 +56,9 @@ class Decoder(torch.nn.Module):
         return out.transpose(1, 2).reshape(1, 1, -1)
 
     def forward(self, token, position, self_k, self_v, cross_k, cross_v):
-        x = self.embed(token.long()) + self.positions.weight[position.long()].unsqueeze(0)
+        # An int32 embedding lookup for both: indexing the table with `position.long()` exported as
+        # int64 wrap-around arithmetic the HTP does not run, splitting the decoder in two per step.
+        x = self.embed(token) + torch.nn.functional.embedding(position, self.positions.weight).unsqueeze(0)
         here = (self.slots == position).to(x.dtype).view(1, 1, CACHE, 1)
         mask = torch.where(self.slots <= position, 0.0, MASKED).to(x.dtype).view(1, 1, 1, CACHE)
         new_k, new_v = [], []

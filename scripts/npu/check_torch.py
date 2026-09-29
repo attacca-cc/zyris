@@ -52,6 +52,14 @@ def main():
             diff = (ours - reference).abs().max().item()
             print(f"{name}: {len(generated)} tokens, max |logit diff| = {diff:.2e}")
             assert diff < 1e-2, f"{name}: the step decoder disagrees with transformers"
+        # Every position up to the last slot, against transformers: a teacher-forced 448-token
+        # sequence (the plain prefix, then text tokens), so no slot is only checked for finiteness.
+        long = prefixes["plain"] + [(1000 + 7 * i) % 50000 for i in range(kv.CACHE - len(prefixes["plain"]))]
+        reference = model(input_features=feats, decoder_input_ids=torch.tensor([long])).logits[0]
+        ours, _ = run_steps(model, feats, long)
+        diff = (ours - reference).abs().max().item()
+        print(f"all {kv.CACHE} positions: max |logit diff| = {diff:.2e}")
+        assert diff < 1e-2, "the step decoder disagrees with transformers somewhere up to the last slot"
         # The last slot: a step at position CACHE-1 attends to every slot and writes nothing past it.
         _, (sk, sv, ck, cv, dec) = run_steps(model, feats, prefixes["plain"])
         logits, nk, _ = dec(torch.tensor([[50363]], dtype=torch.int32), torch.tensor([kv.CACHE - 1], dtype=torch.int32), sk, sv, ck, cv)
