@@ -359,6 +359,9 @@ pub struct LiteRtGraphs {
     layers: usize,
     heads: usize,
     head_dim: usize,
+    /// This turn so far, for the one line each turn logs: encoder and cross milliseconds, then
+    /// decoder steps and their milliseconds.
+    turn: (u64, u64, u64),
 }
 
 impl LiteRtGraphs {
@@ -380,6 +383,7 @@ impl LiteRtGraphs {
             layers,
             heads,
             head_dim,
+            turn: (0, 0, 0),
         })
     }
 
@@ -402,6 +406,11 @@ impl LiteRtGraphs {
 
 impl Graphs for LiteRtGraphs {
     fn begin_turn(&mut self, mel: &[f32]) -> Result<(), Fault> {
+        // The turn before this one, in one line: what a person tuning this needs, at INFO.
+        let (encode_ms, steps, step_ms) = std::mem::take(&mut self.turn);
+        if steps > 0 {
+            tracing::info!(encode_ms, steps, step_ms_avg = step_ms / steps, "an NPU turn");
+        }
         let started = std::time::Instant::now();
         self.encoder.write(0, 0, &bytes_of(mel))?;
         self.encoder.run()?;
@@ -411,7 +420,8 @@ impl Graphs for LiteRtGraphs {
         // Cross K and V, once per turn, into the decoder's inputs 4 and 5.
         self.decoder.write(4, 0, &self.cross.read(0)?)?;
         self.decoder.write(5, 0, &self.cross.read(1)?)?;
-        tracing::debug!(target: "zyris_voice::npu", ms = started.elapsed().as_millis() as u64, "encoder and cross");
+        self.turn.0 = started.elapsed().as_millis() as u64;
+        tracing::debug!(target: "zyris_voice::npu", ms = self.turn.0, "encoder and cross");
         Ok(())
     }
 
@@ -440,7 +450,10 @@ impl Graphs for LiteRtGraphs {
             });
             self.decoder.write_pieces(input, pieces)?;
         }
-        tracing::debug!(target: "zyris_voice::npu", position, ms = started.elapsed().as_millis() as u64, "decoder step");
+        let ms = started.elapsed().as_millis() as u64;
+        self.turn.1 += 1;
+        self.turn.2 += ms;
+        tracing::debug!(target: "zyris_voice::npu", position, ms, "decoder step");
         Ok(logits)
     }
 }
