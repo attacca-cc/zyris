@@ -59,7 +59,9 @@ cargo test -p zyris-voice --features voice
 ```
 
 The tests that need real models are skipped unless you point them at the model files:
-`ZYRIS_WHISPER_MODEL` for a whisper `.bin`, and `ZYRIS_TTS_MODELS` for the Supertonic directory.
+`ZYRIS_WHISPER_MODEL` for a whisper `.bin`, `ZYRIS_TTS_MODELS` for the Supertonic directory, and
+`ZYRIS_ONNX_WHISPER` for an exported ONNX whisper directory (`onnx-community/whisper-base`; the
+revision and file list are at the top of `tests/onnx_whisper_hears_what_whisper_cpp_hears.rs`).
 Run them with `--release`; a debug whisper takes minutes per sentence.
 
 **Say how you checked a change that no test covers.** A microphone, a push-to-talk key, a tray, a

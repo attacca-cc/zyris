@@ -121,6 +121,11 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # says so in its own comment. So the conversion is ours on every platform, and a test that runs
 # only on Linux would never see the bug. 48k -> 16k costs 26 us per 1024-frame block.
 rubato = "5.0.0"
+# Whisper's log-mel features for the ONNX transcriber (`zyris-voice/src/mel.rs`). Already in the
+# tree through `rubato`, so this adds no download.
+realfft = "3.5.0"
+# Whisper's pre-tokenizer split (`zyris-voice/src/bpe.rs`). Already in the tree, so no download.
+regex = "1.13.1"
 # Only for `CryptoProvider::install_default`: see `reqwest` above. `ring` is the provider
 # `iroh` already builds, so this adds no native code to any platform.
 rustls = { version = "0.23.44", default-features = false, features = ["ring"] }

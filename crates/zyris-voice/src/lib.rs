@@ -93,6 +93,21 @@ pub mod model;
 #[cfg(feature = "voice")]
 pub mod stt;
 
+// Whisper's log-mel features, for transcribers that run an exported model rather than
+// whisper.cpp: the NPU runtimes of `onnx_stt`.
+#[cfg(feature = "voice")]
+pub mod mel;
+
+// Whisper's byte-level BPE, read from a Hugging Face `tokenizer.json`: what `onnx_stt` decodes a
+// transcript with and encodes a prompt with.
+#[cfg(feature = "voice")]
+pub mod bpe;
+
+// Whisper run as an exported model behind a two-method runtime: ONNX Runtime now, and the NPU
+// runtimes (LiteRT, Windows ML, OpenVINO) later.
+#[cfg(feature = "voice")]
+pub mod onnx_stt;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]

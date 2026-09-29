@@ -9514,6 +9514,8 @@ dependencies = [
  "earshot",
  "futures-util",
  "ort",
+ "realfft",
+ "regex",
  "reqwest",
  "rubato",
  "rustls",
