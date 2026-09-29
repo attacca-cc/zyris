@@ -30,6 +30,6 @@ if [ ! -f "$cache/done" ]; then
 fi
 mkdir -p "$jni" "$notices"
 cp -f "$cache"/lib*.so "$jni/"
-chmod u+w "$jni"/lib*.so
+chmod u+w "$jni"/libQnn*.so "$jni"/libLiteRt*.so
 cp -f "$cache/QNN_NOTICE.txt" "$cache/NOTICE.txt" "$notices/"
 echo "npu libraries: $(ls "$jni" | grep -cE 'Qnn|LiteRt')"
