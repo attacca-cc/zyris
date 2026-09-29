@@ -34,6 +34,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.realfft]
+workspace = true
+optional = true
+
 [dependencies.earshot]
 workspace = true
 optional = true
@@ -191,6 +195,7 @@ voice = [
     "conversation",
     "dep:cpal",
     "dep:rubato",
+    "dep:realfft",
     "dep:earshot",
     "dep:whisper-rs",
     "dep:whisper-rs-sys",

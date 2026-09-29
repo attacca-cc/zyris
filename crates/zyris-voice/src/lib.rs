@@ -93,6 +93,11 @@ pub mod model;
 #[cfg(feature = "voice")]
 pub mod stt;
 
+// Whisper's log-mel features, for transcribers that run an exported model rather than
+// whisper.cpp: the NPU runtimes of `onnx_stt`.
+#[cfg(feature = "voice")]
+pub mod mel;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]
