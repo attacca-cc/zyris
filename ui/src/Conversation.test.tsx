@@ -98,6 +98,28 @@ describe("the Conversation screen", () => {
     expect(said[said.length - 1]).toMatch(/지금 말한 것/);
   });
 
+  // Measured on a phone (2026-09-29): the screen opens before the machine has connected, the
+  // read fails, and the thread stayed empty until another tab was opened and closed.
+  it("reads the session's messages once the machine connects, without leaving the screen", async () => {
+    let connected = false;
+    invoke.mockImplementation((command: string, args?: unknown) =>
+      command === "conversation_history"
+        ? connected
+          ? Promise.resolve({ session: "s1", lines: [{ who: "you", text: "들리니?" }] })
+          : Promise.reject("this machine is not connected to Attacca yet")
+        : answering(command, args),
+    );
+    const { rerender } = render(<Conversation hidden={false} connected={false} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("들리니?")).toBeNull();
+
+    connected = true;
+    rerender(<Conversation hidden={false} connected={true} />);
+    await screen.findByText("들리니?");
+  });
+
   it("says the agent is thinking at once, then what it is doing, with the tools of that step", async () => {
     await open();
     await steps({ step: "sent", text: "찾아줘" }, { step: "answering", aloud: false });

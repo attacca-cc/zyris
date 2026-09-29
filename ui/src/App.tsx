@@ -122,7 +122,7 @@ export function App() {
         {state.screen === "voice" && <Voice />}
         {/* Mounted for the life of the window and hidden when another screen is showing: the
             turns live nowhere else, and what is said while another screen is open still counts. */}
-        <Conversation hidden={state.screen !== "conversation"} />
+        <Conversation hidden={state.screen !== "conversation"} connected={state.connected} />
         {/* No props: what this screen shows is read off the machine through a command, not
             folded into core state, because nothing outside it needs the answer. */}
         {state.screen === "settings" && <Settings />}

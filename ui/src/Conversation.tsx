@@ -32,7 +32,7 @@ function phaseOf(turns: Turn[], speaking: boolean): Phase {
 // Mounted for the life of the window and hidden when another screen is showing, because the turns
 // live nowhere else: unmounting it threw the conversation away on every change of screen, and
 // missed whatever was said while another screen was open.
-export function Conversation({ hidden }: { hidden: boolean }) {
+export function Conversation({ hidden, connected = true }: { hidden: boolean; connected?: boolean }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   // Whether the speaker is playing an answer: from its first sentence queued to the end of it.
   const [speaking, setSpeaking] = useState(false);
@@ -47,8 +47,9 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   const dispatch = useCallback((action: Action) => setTurns((turns) => fold(turns, action)), []);
 
   // What the session already holds, put in front of anything said since the screen opened. An
-  // answer for a session the picker has since left is dropped by its ticket. Read again the next
-  // time the screen is shown if it could not be read — before the machine has connected, say.
+  // answer for a session the picker has since left is dropped by its ticket. Read again when the
+  // machine connects if it could not be read before: the screen opens first, and waiting for
+  // another tab to be opened and closed left the thread empty (measured on a phone, 2026-09-29).
   const historyTicket = useRef(0);
   const historyRead = useRef(false);
   const readHistory = useCallback(() => {
@@ -99,8 +100,8 @@ export function Conversation({ hidden }: { hidden: boolean }) {
   }, []);
   useEffect(() => {
     if (!hidden) readVoice();
-    if (!hidden && !historyRead.current) readHistory();
-  }, [hidden, readVoice, readHistory]);
+    if (!hidden && connected && !historyRead.current) readHistory();
+  }, [hidden, connected, readVoice, readHistory]);
 
   const phase = phaseOf(turns, speaking);
   const recording = phase === "recording" || keyDown;
