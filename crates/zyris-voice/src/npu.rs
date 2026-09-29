@@ -81,6 +81,101 @@ impl<G: Graphs> Runtime for NpuRuntime<G> {
     }
 }
 
+/// One SoC's bundle: its HTP generation and the files it downloads.
+pub struct Bundle {
+    pub soc: &'static str,
+    pub htp: u32,
+    pub files: &'static [crate::model::Model],
+}
+
+/// Where a bundle stands on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleState {
+    Ready {
+        dir: std::path::PathBuf,
+    },
+    Partial {
+        dir: std::path::PathBuf,
+        have: u64,
+        bytes: u64,
+    },
+    Absent {
+        dir: std::path::PathBuf,
+        bytes: u64,
+    },
+}
+
+/// The bundle compiled for `soc` (`ro.soc.model`), if there is one.
+pub fn bundle_for(soc: &str) -> Option<&'static Bundle> {
+    crate::npu_catalog::BUNDLES.iter().find(|b| b.soc == soc)
+}
+
+/// Every byte a bundle downloads.
+pub fn total_bytes(bundle: &Bundle) -> u64 {
+    bundle.files.iter().map(|f| f.bytes).sum()
+}
+
+/// Where `bundle` lives under `root` (the models cache directory).
+pub fn bundle_dir(bundle: &Bundle, root: &std::path::Path) -> std::path::PathBuf {
+    root.join("npu")
+        .join(format!("whisper-small-npu-{}", bundle.soc))
+}
+
+/// Ready only when every file is there at its size; a download cut short leaves only `.part`
+/// files, which are never read as whole (`model::fetch`), so a killed app comes back `Partial`.
+pub fn state(bundle: &Bundle, root: &std::path::Path) -> BundleState {
+    use crate::model::{ModelState, inspect};
+    let dir = bundle_dir(bundle, root);
+    let bytes = total_bytes(bundle);
+    let (mut have, mut ready, mut any) = (0, 0, false);
+    for file in bundle.files {
+        match inspect(&dir.join(file.file), Some(file.bytes)) {
+            ModelState::Ready { bytes, .. } => {
+                have += bytes;
+                ready += 1;
+                any = true;
+            }
+            ModelState::Absent { .. } | ModelState::Nowhere { .. } => {}
+            _ => any = true,
+        }
+    }
+    if ready == bundle.files.len() {
+        BundleState::Ready { dir }
+    } else if any {
+        BundleState::Partial { dir, have, bytes }
+    } else {
+        BundleState::Absent { dir, bytes }
+    }
+}
+
+/// Download every file of `bundle` that is not already whole, each checked against its size and
+/// SHA-256 by `model::fetch`. `progress` sees the bytes of the whole bundle.
+pub async fn fetch(
+    bundle: &Bundle,
+    root: &std::path::Path,
+    mut progress: impl FnMut(crate::model::Progress),
+) -> Result<std::path::PathBuf, crate::model::Fault> {
+    use crate::model::{ModelState, Progress, inspect};
+    let dir = bundle_dir(bundle, root);
+    let total = total_bytes(bundle);
+    let mut done = 0;
+    for file in bundle.files {
+        if let ModelState::Ready { .. } = inspect(&dir.join(file.file), Some(file.bytes)) {
+            done += file.bytes;
+            continue;
+        }
+        crate::model::fetch(file, &dir, |p| {
+            progress(Progress {
+                received: done + p.received,
+                total: Some(total),
+            })
+        })
+        .await?;
+        done += file.bytes;
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +260,32 @@ mod tests {
         assert_eq!(slot_offset(0, 0, 1, 12, 64), 64);
         assert_eq!(slot_offset(0, 1, 0, 12, 64), CACHE * 64);
         assert_eq!(slot_offset(1, 0, 0, 12, 64), 12 * CACHE * 64);
+    }
+
+    #[test]
+    fn every_phone_soc_the_bundles_were_built_for_has_a_bundle_and_nothing_else_does() {
+        for soc in [
+            "SM8450", "SM8475", "SM8550", "SM8650", "SM8750", "SM8845", "SM8850",
+        ] {
+            let b = bundle_for(soc).unwrap_or_else(|| panic!("{soc}"));
+            assert_eq!(b.files.len(), 6);
+            assert!(b.files.iter().any(|f| f.file == "decoder.tflite"));
+        }
+        for soc in ["SM8350", "SA8295", "MT6989", "", "sm8550"] {
+            assert!(bundle_for(soc).is_none(), "{soc}");
+        }
+    }
+
+    #[test]
+    fn a_bundle_is_ready_only_when_every_file_is_whole() {
+        let root = std::env::temp_dir().join(format!("zyris-npu-state-{}", std::process::id()));
+        let b = bundle_for("SM8550").unwrap();
+        assert!(matches!(state(b, &root), BundleState::Absent { .. }));
+        let dir = root.join("npu/whisper-small-npu-SM8550");
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = b.files.iter().min_by_key(|f| f.bytes).unwrap();
+        std::fs::write(dir.join(small.file), vec![0u8; small.bytes as usize]).unwrap();
+        assert!(matches!(state(b, &root), BundleState::Partial { .. }));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

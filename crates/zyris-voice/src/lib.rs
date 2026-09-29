@@ -112,6 +112,12 @@ pub mod onnx_stt;
 // The LiteRT binding it runs on is `litert`, Android only.
 #[cfg(feature = "voice")]
 pub mod npu;
+#[cfg(feature = "voice")]
+mod npu_catalog;
+
+// LiteRT's C API on Android: the NPU transcriber's three compiled graphs (`npu::Graphs`).
+#[cfg(all(feature = "npu", target_os = "android"))]
+pub mod litert;
 
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
