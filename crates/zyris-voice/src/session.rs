@@ -1500,10 +1500,23 @@ impl Ledger {
 
 /// The steps a person tuning latency on a phone needs, in the log as well: the trace goes only
 /// to the window, and a phone has no other way to read it.
+///
+/// **Times and lengths only, never the words**: what somebody said stays out of log files.
 fn log_timing(step: &crate::Trace) {
     use crate::Trace::*;
-    if matches!(step, Woke { .. } | Transcribed { .. } | Synthesised { .. } | Sent { .. }) {
-        tracing::info!(?step, "voice timing");
+    match step {
+        Woke { .. } => tracing::info!("voice timing: woke"),
+        Transcribed { text, took_ms } => {
+            tracing::info!(took_ms, chars = text.chars().count(), "voice timing: transcribed")
+        }
+        Sent { text } => tracing::info!(chars = text.chars().count(), "voice timing: sent"),
+        Synthesised { text, seconds, took_ms } => tracing::info!(
+            took_ms,
+            seconds,
+            chars = text.chars().count(),
+            "voice timing: synthesised"
+        ),
+        _ => {}
     }
 }
 
