@@ -16,5 +16,9 @@ exec nix-shell -p jdk17 rustup cmake ninja pkg-config openssl perl nodejs_24 pnp
   export ANDROID_HOME=$SDK ANDROID_SDK_ROOT=$SDK NDK_HOME=$SDK/ndk-bundle ANDROID_NDK=$SDK/ndk-bundle
   export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--sysroot=$SDK/ndk-bundle/toolchains/llvm/prebuilt/linux-x86_64/sysroot
   export LIBCLANG_PATH=$clang/lib GGML_NATIVE=OFF ORT_LIB_LOCATION=unused CMAKE_GENERATOR=Ninja
+  # What the tauri CLI sets for its own builds, so a plain cargo build for the phone works too.
+  tc=$SDK/ndk-bundle/toolchains/llvm/prebuilt/linux-x86_64/bin
+  export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=\$tc/aarch64-linux-android26-clang
+  export CC_aarch64_linux_android=\$tc/aarch64-linux-android26-clang CXX_aarch64_linux_android=\$tc/aarch64-linux-android26-clang++ AR_aarch64_linux_android=\$tc/llvm-ar
   cd $root && $*
 "

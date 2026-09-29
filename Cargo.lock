@@ -9509,6 +9509,7 @@ dependencies = [
 name = "zyris-voice"
 version = "0.2.0"
 dependencies = [
+ "bindgen",
  "cpal",
  "directories",
  "earshot",
