@@ -280,10 +280,20 @@ impl OnnxStt {
         }
     }
 
+    /// Thirty seconds at a time, as whisper reads: the wake-word check hands over up to
+    /// `session::watch_cap()`, 35 s, and what is past the first window is a second one.
     fn run(&self, audio: &[f32], expecting: Option<&str>) -> Result<String, Fault> {
-        if audio.is_empty() {
-            return Ok(String::new());
+        let mut heard = Vec::new();
+        for window in audio.chunks(crate::mel::SAMPLES) {
+            let text = self.window(window, expecting)?;
+            if !text.is_empty() {
+                heard.push(text);
+            }
         }
+        Ok(heard.join(" "))
+    }
+
+    fn window(&self, audio: &[f32], expecting: Option<&str>) -> Result<String, Fault> {
         let mel = crate::mel::log_mel(audio, self.bins);
         let mut runtime = self
             .runtime
@@ -487,6 +497,24 @@ pub(crate) mod tests {
             stt.transcribe(&vec![0.1; 16_000]).expect("transcribes"),
             "hello"
         );
+    }
+
+    /// The wake-word check hands over up to `watch_cap()`, 35 s: the phrase and a whole request
+    /// after it. Whisper reads 30 s at a time, so the rest is a second window, not dropped.
+    #[test]
+    fn more_than_thirty_seconds_is_read_in_windows() {
+        let runtime = Scripted::saying(vec![
+            vec![(EN, 5.0)],
+            vec![(1911, 5.0)],
+            vec![(50_257, 10.0)],
+            vec![(EN, 5.0)],
+            vec![(1911, 5.0)],
+        ]);
+        let stt = OnnxStt::with(Box::new(runtime), specials(), tiny_tokenizer(), 80);
+        let heard = stt
+            .transcribe(&vec![0.1; crate::mel::SAMPLES + 16_000])
+            .expect("transcribes");
+        assert_eq!(heard, "hello hello");
     }
 
     #[test]
