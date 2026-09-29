@@ -9513,6 +9513,7 @@ dependencies = [
  "directories",
  "earshot",
  "futures-util",
+ "libloading 0.8.9",
  "ort",
  "realfft",
  "regex",

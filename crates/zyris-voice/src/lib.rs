@@ -108,6 +108,11 @@ pub mod bpe;
 #[cfg(feature = "voice")]
 pub mod onnx_stt;
 
+// Whisper on a phone's NPU: the cache logic, the SoC table and the bundles, testable anywhere.
+// The LiteRT binding it runs on is `litert`, Android only.
+#[cfg(feature = "voice")]
+pub mod npu;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]
