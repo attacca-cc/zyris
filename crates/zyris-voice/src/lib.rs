@@ -103,6 +103,11 @@ pub mod mel;
 #[cfg(feature = "voice")]
 pub mod bpe;
 
+// Whisper run as an exported model behind a two-method runtime: ONNX Runtime now, and the NPU
+// runtimes (LiteRT, Windows ML, OpenVINO) later.
+#[cfg(feature = "voice")]
+pub mod onnx_stt;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]
