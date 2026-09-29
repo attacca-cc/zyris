@@ -115,16 +115,22 @@ pub fn prefix(specials: &Specials, language: u32, prompt: &[u32]) -> Vec<i64> {
 ///
 /// ponytail: greedy with a cap is the only guard against a repeating decoder; add whisper.cpp's
 /// temperature fallback if phase 0 shows loops on real speech.
+///
+/// `stop` set gives up before the next step with a fault: the reading is no longer wanted.
 pub fn greedy(
     runtime: &mut dyn Runtime,
     specials: &Specials,
     prefix: Vec<i64>,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<u32>, Fault> {
     let mut tokens = prefix;
     let mut out = Vec::new();
     for step in 0..MAX_TOKENS {
         if tokens.len() >= MAX_POSITIONS {
             break;
+        }
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(fault("the reading was abandoned"));
         }
         let mut logits = runtime.next_logits(&tokens)?;
         // At the first step only, the begin-suppressed tokens too.
@@ -240,6 +246,8 @@ pub struct OnnxStt {
     specials: Specials,
     tokenizer: crate::bpe::Tokenizer,
     bins: usize,
+    /// Set by [`crate::session::Transcribe::abandon`]; cleared as each window starts.
+    stop: std::sync::atomic::AtomicBool,
 }
 
 impl OnnxStt {
@@ -277,6 +285,7 @@ impl OnnxStt {
             specials,
             tokenizer,
             bins,
+            stop: Default::default(),
         }
     }
 
@@ -299,6 +308,9 @@ impl OnnxStt {
             .runtime
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Cleared here, under the lock, rather than when a reading ends: a stop meant for a
+        // reading that had already finished must not end the one after it.
+        self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
         runtime.encode(&mel)?;
         let language = detect_language(&mut **runtime, &self.specials)?;
         if let Some((code, _)) = self
@@ -316,6 +328,7 @@ impl OnnxStt {
             &mut **runtime,
             &self.specials,
             prefix(&self.specials, language, &prompt),
+            &self.stop,
         )?;
         Ok(crate::stt::clean(&self.tokenizer.decode(&ids)))
     }
@@ -329,11 +342,16 @@ impl crate::session::Transcribe for OnnxStt {
     fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, Fault> {
         self.run(audio, Some(phrase))
     }
+
+    fn abandon(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     pub(crate) const VOCAB: usize = 51_865;
     const KO: u32 = 50_264;
@@ -444,16 +462,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn decoding_told_to_stop_stops_with_a_fault() {
+        let mut runtime = Scripted::saying(vec![vec![(1911, 5.0)]; 1000]);
+        let stop = AtomicBool::new(true);
+        assert!(greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[]), &stop).is_err());
+        assert!(runtime.lengths.is_empty(), "not one step was run");
+    }
+
+    #[test]
     fn decoding_stops_at_end_of_text() {
         let mut runtime = Scripted::saying(vec![vec![(1911, 5.0)], vec![(1176, 5.0)]]);
-        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[])).expect("decodes");
+        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[]), &AtomicBool::new(false)).expect("decodes");
         assert_eq!(out, vec![1911, 1176]);
     }
 
     #[test]
     fn decoding_that_never_ends_stops_at_the_cap() {
         let mut runtime = Scripted::saying(vec![vec![(1911, 5.0)]; 1000]);
-        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[])).expect("decodes");
+        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[]), &AtomicBool::new(false)).expect("decodes");
         assert_eq!(out.len(), MAX_TOKENS);
     }
 
@@ -461,21 +487,21 @@ pub(crate) mod tests {
     fn a_long_prompt_and_a_long_answer_stay_inside_the_context() {
         let prompt: Vec<u32> = (0..500).collect();
         let mut runtime = Scripted::saying(vec![vec![(1911, 5.0)]; 1000]);
-        greedy(&mut runtime, &specials(), prefix(&specials(), EN, &prompt)).expect("decodes");
+        greedy(&mut runtime, &specials(), prefix(&specials(), EN, &prompt), &AtomicBool::new(false)).expect("decodes");
         assert!(runtime.lengths.iter().all(|n| *n <= MAX_POSITIONS));
     }
 
     #[test]
     fn the_first_token_is_never_a_space_or_the_end() {
         let mut runtime = Scripted::saying(vec![vec![(220, 9.0), (50257, 8.0), (1911, 5.0)]]);
-        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[])).expect("decodes");
+        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[]), &AtomicBool::new(false)).expect("decodes");
         assert_eq!(out, vec![1911]);
     }
 
     #[test]
     fn special_and_suppressed_tokens_are_never_written() {
         let mut runtime = Scripted::saying(vec![vec![(50359, 9.0), (2, 8.0), (1911, 5.0)]]);
-        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[])).expect("decodes");
+        let out = greedy(&mut runtime, &specials(), prefix(&specials(), EN, &[]), &AtomicBool::new(false)).expect("decodes");
         assert_eq!(out, vec![1911]);
     }
 

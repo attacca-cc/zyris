@@ -195,6 +195,13 @@ pub trait Transcribe: Send + Sync + 'static {
     fn transcribe_expecting(&self, audio: &[f32], _phrase: &str) -> Result<String, stt::Fault> {
         self.transcribe(audio)
     }
+
+    /// Give up on the reading in flight, if one is, as soon as it can: it answers with a fault.
+    /// For a look nobody will see, so that the reading somebody is waiting for starts sooner.
+    ///
+    /// ponytail: whisper.cpp ignores it (a look there is 0.3–0.6 s); wire its abort callback if
+    /// a slow processor makes the wait matter.
+    fn abandon(&self) {}
 }
 
 impl Transcribe for stt::Stt {
@@ -1187,7 +1194,15 @@ impl Session {
             // thread, and two whisper passes at once each spin a full thread pool: measured end to
             // end, a 3.7 s turn took 15 s to transcribe that way against 0.6 s alone. Waiting for
             // the look costs at most one look.
-            let look = self.partial.take().or_else(|| self.checking.take());
+            let look = match self.partial.take() {
+                // On the NPU a look is seconds of decoding; told to stop, it ends at the next
+                // token.
+                Some(look) => {
+                    self.checker.as_ref().unwrap_or(&self.stt).abandon();
+                    Some(look)
+                }
+                None => self.checking.take(),
+            };
             self.pending = Some(self.spawn_after(look, audio));
         } else if self.queued.is_none() {
             self.publish(VoiceEvent::Thinking);
@@ -1530,7 +1545,7 @@ pub enum Cue {
     Heard,
 }
 
-/// The cue's audio, made here rather than shipped: two 70 ms sine notes at the speaker's rate,
+/// The cue's audio, made here rather than shipped: two 110 ms sine notes at the speaker's rate,
 /// each faded in and out so that neither clicks.
 ///
 /// **On the speaker's queue, not the window's audio**, because only what goes through the
@@ -1542,14 +1557,14 @@ fn cue(cue: Cue) -> Vec<f32> {
         Cue::Heard => [880.0, 660.0],
     };
     let rate = crate::tts::SAMPLE_RATE as f32;
-    let len = (rate * 0.07) as usize;
+    let len = (rate * 0.11) as usize;
     let fade = (rate * 0.005) as usize;
     notes
         .iter()
         .flat_map(|&hz| {
             (0..len).map(move |i| {
                 let edge = i.min(len - 1 - i).min(fade) as f32 / fade as f32;
-                0.2 * edge * (std::f32::consts::TAU * hz * i as f32 / rate).sin()
+                0.5 * edge * (std::f32::consts::TAU * hz * i as f32 / rate).sin()
             })
         })
         .collect()
@@ -2184,6 +2199,8 @@ mod tests {
         gate: Option<Mutex<std::sync::mpsc::Receiver<()>>>,
         /// What each call was told to expect, `None` for a plain `transcribe`.
         expected: Mutex<Vec<Option<String>>>,
+        /// How many times it was told to abandon what it was reading.
+        abandoned: std::sync::atomic::AtomicUsize,
     }
 
     impl Scribe {
@@ -2195,6 +2212,7 @@ mod tests {
                 answers: Mutex::new(answers.into_iter().collect()),
                 gate: None,
                 expected: Mutex::new(Vec::new()),
+                abandoned: Default::default(),
             })
         }
 
@@ -2209,6 +2227,7 @@ mod tests {
                 answers: Mutex::new(std::iter::repeat_n(Ok(text.to_string()), 8).collect()),
                 gate: Some(Mutex::new(gate)),
                 expected: Mutex::new(Vec::new()),
+                abandoned: Default::default(),
             });
             (scribe, open)
         }
@@ -2228,6 +2247,10 @@ mod tests {
             *self.expected.lock().expect("not poisoned").last_mut().expect("just recorded") =
                 Some(words.to_string());
             answer
+        }
+
+        fn abandon(&self) {
+            self.abandoned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
         fn transcribe(&self, audio: &[f32]) -> Result<String, stt::Fault> {
@@ -2917,6 +2940,11 @@ mod tests {
         assert_eq!(zyris.next().await, VoiceEvent::Thinking);
         tokio::time::sleep(QUIET).await;
         assert_eq!(zyris.scribe.calls(), 1, "only the look may be running while it is");
+        assert_eq!(
+            zyris.scribe.abandoned.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "and the look was told to stop, so the wait is short"
+        );
 
         open.send(()).expect("the look is waiting on the gate");
         open.send(()).expect("the transcription is waiting on the gate");
