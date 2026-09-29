@@ -247,6 +247,13 @@ struct Watch {
     ends: Endpointer,
     /// The audio `ends` is indexing, from its last reset.
     heard: Vec<f32>,
+    /// Where in `heard` the utterance in progress began, margin included.
+    began: Option<usize>,
+    /// Whether that utterance has had its early look. One each: see [`EARLY_LOOK`].
+    looked: bool,
+    /// The utterance, if it ended while its early look was still being read: checked whole if
+    /// the look was not the phrase.
+    ended: Option<Vec<f32>>,
 }
 
 impl Watch {
@@ -255,8 +262,21 @@ impl Watch {
     fn forget(&mut self) {
         self.ends.reset();
         self.heard.clear();
+        self.began = None;
+        self.looked = false;
+        self.ended = None;
     }
 }
+
+/// How long an utterance runs before the watch reads what it has so far, rather than waiting
+/// for it to end.
+///
+/// The phrase is at its front and takes about a second to say, so by now it has been said. A
+/// look that finds it opens the turn there, with the cue, while the person is still talking or
+/// pausing after it: the whole of the hangover and a reading of the utterance are no longer
+/// waited out in silence. A look that does not find it decides nothing (it may have cut the
+/// phrase in two), and the utterance is checked whole when it ends, exactly as before.
+const EARLY_LOOK: Duration = Duration::from_millis(1500);
 
 /// The longest the watch will hold before giving up on the utterance in progress.
 ///
@@ -313,6 +333,9 @@ pub struct Session {
     /// The utterance the check in flight is reading, kept so a request said in the same breath
     /// as the phrase can be written down again by the turn's own whisper.
     checked_audio: Option<Vec<f32>>,
+    /// The check in flight is an early look at an utterance still in progress, and read this
+    /// many samples of it from where it began.
+    early: Option<usize>,
     /// The transcription in flight is of a whole utterance, phrase included, and the phrase
     /// comes off the front before it is sent.
     after_phrase: bool,
@@ -402,6 +425,7 @@ impl Session {
             checking: None,
             checker: None,
             checked_audio: None,
+            early: None,
             after_phrase: false,
             vocabulary: None,
             // Replaced on every press, which is where the sizes are decided and where a
@@ -444,6 +468,9 @@ impl Session {
             phrase,
             ends: Endpointer::new(),
             heard: Vec::new(),
+            began: None,
+            looked: false,
+            ended: None,
         });
         self
     }
@@ -733,12 +760,24 @@ impl Session {
             }
         };
         watch.heard.extend_from_slice(frame);
+        if watch.began.is_none() && listening == Listening::Speech {
+            // The detector says speech only once there has been enough of it.
+            let lead = crate::stt::samples_in(crate::vad::MIN_SPEECH + crate::vad::MARGIN);
+            watch.began = Some(watch.heard.len().saturating_sub(frame.len() + lead));
+        }
 
         match listening {
             // While the last utterance is still being read, this one is kept rather than
             // checked: if that one was the phrase, this is the request, and the turn it opens
             // starts with it.
-            Listening::Ended(Ended::Utterance { .. }) if self.checking.is_some() => {
+            Listening::Ended(Ended::Utterance { first, last, .. }) if self.checking.is_some() => {
+                // Unless what is being read is this utterance's own early look: then this is
+                // the utterance to check whole if the look was not the phrase.
+                if self.early.is_some() && watch.ended.is_none() {
+                    let from = first * crate::capture::VAD_FRAME;
+                    let to = ((last + 1) * crate::capture::VAD_FRAME).min(watch.heard.len());
+                    watch.ended = Some(watch.heard[from.min(to)..to].to_vec());
+                }
                 watch.ends.reset();
             }
             Listening::Ended(Ended::Utterance { first, last, .. }) => {
@@ -755,8 +794,66 @@ impl Session {
                 // A room the detector never hears silence in would grow this forever.
                 if watch.heard.len() > watch_cap() {
                     watch.forget();
+                    return;
+                }
+                let due = watch.began.filter(|&began| {
+                    !watch.looked
+                        && watch.heard.len() - began >= crate::stt::samples_in(EARLY_LOOK)
+                });
+                if let Some(began) = due {
+                    self.look_early(began);
                 }
             }
+        }
+    }
+
+    /// Read the utterance in progress so far, for the phrase. See [`EARLY_LOOK`].
+    fn look_early(&mut self, began: usize) {
+        if self.checking.is_some() || self.pending.is_some() || self.partial.is_some() {
+            return;
+        }
+        let Some(watch) = &mut self.watch else { return };
+        watch.looked = true;
+        let said = watch.heard[began..].to_vec();
+        let phrase = watch.phrase.said().to_string();
+        let stt = self.checker.clone().unwrap_or_else(|| self.stt.clone());
+        self.early = Some(said.len());
+        self.checking =
+            Some(tokio::task::spawn_blocking(move || stt.transcribe_expecting(&said, &phrase)));
+    }
+
+    /// What the early look heard. The phrase opens the turn now; anything else waits for the
+    /// utterance to end and be checked whole.
+    fn looked_early(&mut self, text: Option<String>, looked: usize) {
+        let Some(watch) = &mut self.watch else { return };
+        let verdict = text.as_deref().map(|text| watch.phrase.in_(text));
+        let (Some(began), Some(text)) = (watch.began, text) else { return };
+        // The phrase alone: what follows the look is the request, or the pause before it.
+        // With more after it: the look caught the start of the request, so the turn is the whole
+        // utterance and the phrase comes off the front of its transcript.
+        let (from, then) = match verdict {
+            Some(crate::wake::Heard::Phrase) => (began + looked, false),
+            Some(crate::wake::Heard::PhraseThen(_)) => (began, true),
+            _ => {
+                if let Some(said) = watch.ended.take() {
+                    watch.forget();
+                    self.check(said);
+                }
+                return;
+            }
+        };
+        let carried = watch.heard.get(from..).unwrap_or_default().to_vec();
+        watch.forget();
+        self.trace(crate::Trace::Woke { heard: text });
+        self.endpointer.use_rule(Rule::default());
+        self.pressed();
+        self.cue(Cue::Listening);
+        self.after_phrase = then;
+        for frame in carried.chunks_exact(VAD_FRAME) {
+            if self.turn.is_none() {
+                break;
+            }
+            self.frame(frame);
         }
     }
 
@@ -784,9 +881,17 @@ impl Session {
     fn checked(&mut self, heard: Result<Result<String, stt::Fault>, tokio::task::JoinError>) {
         self.checking = None;
         let checked_audio = self.checked_audio.take();
+        let early = self.early.take();
         // The key went down while whisper was reading; that turn is the one that counts.
         if self.turn.is_some() {
             return;
+        }
+        if let Some(looked) = early {
+            let text = match heard {
+                Ok(Ok(text)) => Some(text),
+                _ => None,
+            };
+            return self.looked_early(text, looked);
         }
         let Some(watch) = &self.watch else { return };
         let text = match heard {
@@ -2884,7 +2989,72 @@ mod tests {
 
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
         assert_eq!(zyris.next().await, VoiceEvent::Thinking);
-        assert_eq!(*out.0.lock().unwrap(), [cue(Cue::Heard).len()]);
+        // The early look heard the phrase first, so the person heard that too.
+        assert_eq!(
+            *out.0.lock().unwrap(),
+            [cue(Cue::Listening).len(), cue(Cue::Heard).len()]
+        );
+        zyris.stops().await;
+    }
+
+    /// **The phrase is heard while the person is still talking.** The turn opens a second and a
+    /// half in, with the cue, rather than after the sentence and a silence and a reading of it;
+    /// the request is then read once, with the phrase taken off its front.
+    #[tokio::test]
+    async fn the_phrase_is_heard_before_the_talking_stops() {
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("Hey Zyris, what".to_string()))
+                .chain(std::iter::repeat_n(Ok("Hey Zyris, what is the time?".to_string()), 8)),
+        ));
+
+        zyris.feed(&utterance(2.0)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening, "the turn opened mid-sentence");
+
+        zyris.feed(&utterance(1.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
+        zyris.stops().await;
+    }
+
+    /// **The phrase alone opens the turn during the pause after it**, not after the pause has
+    /// run the whole hangover and the phrase has then been read.
+    #[tokio::test]
+    async fn the_phrase_alone_opens_the_turn_during_the_pause() {
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("hey zyris".to_string()))
+                .chain(std::iter::repeat_n(Ok("what is the time".to_string()), 8)),
+        ));
+
+        // Short of the hangover: the watch alone could not have ended this utterance yet.
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(0.7)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time".into() });
+        zyris.stops().await;
+    }
+
+    /// **An early look decides only yes.** One that caught half the phrase leaves the utterance
+    /// to be read whole when it ends, as it always was, so no phrase is missed for having been
+    /// looked at too soon.
+    #[tokio::test]
+    async fn an_early_look_that_misses_leaves_the_whole_utterance_checked() {
+        let (mut zyris, _traces) = running_and_listening(Scribe::saying(
+            std::iter::once(Ok("Hey".to_string()))
+                .chain(std::iter::repeat_n(Ok("Hey Zyris, what is the time?".to_string()), 8)),
+        ));
+
+        zyris.feed(&utterance(2.0)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
+        assert_eq!(zyris.scribe.calls(), 2, "the early look and the whole utterance");
         zyris.stops().await;
     }
 
@@ -2978,11 +3148,11 @@ mod tests {
         );
         // The whole utterance was read in one piece, not its last few seconds.
         let heard = zyris.scribe.heard.lock().expect("not poisoned").clone();
-        assert_eq!(heard.len(), 1, "one reading of one utterance");
+        assert_eq!(heard.len(), 2, "the early look, then one reading of the whole utterance");
         assert!(
-            heard[0].len() + crate::stt::samples_in(std::time::Duration::from_millis(500)) >= said.len(),
+            heard[1].len() + crate::stt::samples_in(std::time::Duration::from_millis(500)) >= said.len(),
             "only {} of {} samples were read",
-            heard[0].len(),
+            heard[1].len(),
             said.len()
         );
         zyris.stops().await;
@@ -3001,7 +3171,7 @@ mod tests {
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
         assert_eq!(zyris.next().await, VoiceEvent::Thinking);
         assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "what is the time?".into() });
-        assert_eq!(zyris.scribe.calls(), 1, "one reading of one utterance");
+        assert_eq!(zyris.scribe.calls(), 2, "the early look, then one reading of the utterance");
         zyris.stops().await;
     }
 
