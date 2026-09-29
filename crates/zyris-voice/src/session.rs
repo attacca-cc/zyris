@@ -805,6 +805,8 @@ impl Session {
                 // `push_to_talk_rule` deliberately makes that impossible.
                 self.endpointer.use_rule(Rule::default());
                 self.pressed();
+                // After the press, which silences the speaker.
+                self.cue(Cue::Listening);
                 // **What was said while whisper was reading belongs to this turn.** The phrase
                 // ended on a pause and the request began before the check came back; the watch
                 // kept listening, and that audio is the start of the request, not a gap to lose.
@@ -1169,7 +1171,18 @@ impl Session {
         if let VoiceEvent::Failed { reason } = &event {
             self.trace(crate::Trace::Failed { reason: reason.clone() });
         }
+        // Here rather than at each place a turn ends, so that no ending goes without it.
+        if event == VoiceEvent::Thinking {
+            self.cue(Cue::Heard);
+        }
         let _ = self.events.send(event);
+    }
+
+    /// Play a cue, if this session has a speaker.
+    fn cue(&self, which: Cue) {
+        if let Some(speaking) = &self.speaking {
+            speaking.cue(which);
+        }
     }
 
     /// Send a transcript to the agent, on a task of its own.
@@ -1377,6 +1390,41 @@ impl Ledger {
         }
         interruption
     }
+}
+
+/// A short sound on the speaker that tells the person where the conversation is, since the
+/// window is usually not in view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cue {
+    /// Two rising notes: the phrase was heard, go on.
+    Listening,
+    /// Two falling notes: the request was heard and is being worked on.
+    Heard,
+}
+
+/// The cue's audio, made here rather than shipped: two 70 ms sine notes at the speaker's rate,
+/// each faded in and out so that neither clicks.
+///
+/// **On the speaker's queue, not the window's audio**, because only what goes through the
+/// speaker reaches the echo canceller's reference; a sound it did not know about would be
+/// recorded into the very request it announces.
+fn cue(cue: Cue) -> Vec<f32> {
+    let notes: [f32; 2] = match cue {
+        Cue::Listening => [660.0, 880.0],
+        Cue::Heard => [880.0, 660.0],
+    };
+    let rate = crate::tts::SAMPLE_RATE as f32;
+    let len = (rate * 0.07) as usize;
+    let fade = (rate * 0.005) as usize;
+    notes
+        .iter()
+        .flat_map(|&hz| {
+            (0..len).map(move |i| {
+                let edge = i.min(len - 1 - i).min(fade) as f32 / fade as f32;
+                0.2 * edge * (std::f32::consts::TAU * hz * i as f32 / rate).sin()
+            })
+        })
+        .collect()
 }
 
 /// The silence put between one fragment and the next, in samples of the speaker.s stream.
@@ -1821,6 +1869,12 @@ impl Speaking {
         self.lock().note.take()
     }
 
+    /// Play a cue. Kept out of the ledger: it is not an answer, so an interruption over it has
+    /// nothing to report and nothing to carry into the next message.
+    pub fn cue(&self, which: Cue) {
+        self.out.speak(cue(which));
+    }
+
     /// Whether anything is queued or being played.
     ///
     /// **The wake word does not listen while this is true.** See `Session::should_watch`.
@@ -2143,17 +2197,37 @@ mod tests {
 
     /// Listening for the phrase, with an answer already being read aloud.
     fn running_and_speaking(scribe: Arc<Scribe>) -> (Harness, broadcast::Receiver<crate::Trace>) {
+        running_with_speaker(scribe, Arc::new(Busy))
+    }
+
+    /// A speaker that is never busy and keeps the length of everything it was handed.
+    #[derive(Default)]
+    struct Heard(Mutex<Vec<usize>>);
+    impl Play for Heard {
+        fn speak(&self, samples: Vec<f32>) -> Option<u64> {
+            self.0.lock().unwrap().push(samples.len());
+            Some(0)
+        }
+        fn played(&self) -> u64 {
+            0
+        }
+        fn pending(&self) -> u64 {
+            0
+        }
+        fn silence(&self) {}
+    }
+
+    fn running_with_speaker(
+        scribe: Arc<Scribe>,
+        out: Arc<dyn Play>,
+    ) -> (Harness, broadcast::Receiver<crate::Trace>) {
         let (audio, audio_rx) = mpsc::unbounded_channel();
         let (keys, keys_rx) = broadcast::channel(32);
         let (events, events_rx) = broadcast::channel(64);
         let (traces, traces_rx) = broadcast::channel(512);
         let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
-        let speaking = Speaking::new(
-            Arc::new(Mute),
-            Arc::new(Busy),
-            Arc::new(Conversation::default()),
-            events.clone(),
-        );
+        let speaking =
+            Speaking::new(Arc::new(Mute), out, Arc::new(Conversation::default()), events.clone());
         let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
             .tracing(traces)
             .listening_for(the_phrase())
@@ -2775,6 +2849,42 @@ mod tests {
         let woke = step_where(&mut traces, |step| matches!(step, crate::Trace::Woke { .. })).await;
         assert_eq!(woke, crate::Trace::Woke { heard: "Hey, Zyris.".to_string() });
         assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.stops().await;
+    }
+
+    /// **The phrase alone is answered with a sound**, so the person knows to go on. Nothing
+    /// else says the machine heard it: the window is usually in a pocket.
+    #[tokio::test]
+    async fn the_phrase_alone_is_answered_with_the_listening_cue() {
+        let out = Arc::new(Heard::default());
+        let (mut zyris, _traces) = running_with_speaker(
+            Scribe::saying([Ok("Hey, Zyris.".to_string())]),
+            out.clone(),
+        );
+
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(*out.0.lock().unwrap(), [cue(Cue::Listening).len()]);
+        zyris.stops().await;
+    }
+
+    /// **The end of a request is answered too**: the machine stopped listening and is working.
+    #[tokio::test]
+    async fn a_request_said_with_the_phrase_is_answered_with_the_heard_cue() {
+        let out = Arc::new(Heard::default());
+        let (mut zyris, _traces) = running_with_speaker(
+            Scribe::saying([Ok("Hey Zyris, what time is it?".to_string())]),
+            out.clone(),
+        );
+
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(*out.0.lock().unwrap(), [cue(Cue::Heard).len()]);
         zyris.stops().await;
     }
 
@@ -3746,6 +3856,17 @@ mod barge_in {
                 .expect("an event was expected and none arrived")
                 .expect("the event stream is open")
         }
+    }
+
+    /// A cue is not part of any answer: stopping after one has nothing to report, and nothing
+    /// of it is carried into the next message as unheard.
+    #[tokio::test]
+    async fn a_cue_is_not_an_answer() {
+        let rig = rig(Voicebox::plain());
+        rig.speaking.cue(Cue::Listening);
+        assert_eq!(rig.speaker.pending(), cue(Cue::Listening).len() as u64);
+        assert!(rig.speaking.stop().is_none(), "a cue was taken for an answer");
+        assert_eq!(rig.speaking.take_note(), None);
     }
 
     // -----------------------------------------------------------------------------------------
