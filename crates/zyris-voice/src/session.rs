@@ -966,7 +966,8 @@ impl Session {
                 if let Some(watch) = &mut self.watch {
                     watch.forget();
                 }
-                tracing::info!(heard = %text, "heard something that was not the wake word");
+                // The length, not the words: this is whatever was said in the room.
+                tracing::info!(chars = text.chars().count(), "heard something that was not the wake word");
                 self.trace(crate::Trace::Unmatched { heard: text });
             }
         }
@@ -1198,6 +1199,7 @@ impl Session {
                 // On the NPU a look is seconds of decoding; told to stop, it ends at the next
                 // token.
                 Some(look) => {
+                    tracing::info!("a live look was still running when the turn ended; told to stop");
                     self.checker.as_ref().unwrap_or(&self.stt).abandon();
                     Some(look)
                 }

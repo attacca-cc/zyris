@@ -130,6 +130,7 @@ pub fn greedy(
             break;
         }
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!(step, "a reading was abandoned");
             return Err(fault("the reading was abandoned"));
         }
         let mut logits = runtime.next_logits(&tokens)?;
