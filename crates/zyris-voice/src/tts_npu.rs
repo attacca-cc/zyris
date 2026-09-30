@@ -64,6 +64,44 @@ impl NpuVoice {
     }
 }
 
+// Used by the QNN half, which only an Android build with `npu` compiles; tested everywhere.
+#[cfg_attr(not(all(feature = "npu", target_os = "android")), allow(dead_code))]
+/// The compiled context's file name for `graph` in `bucket`. Named for the graph's own bytes (the
+/// start of its SHA-256 in [`crate::tts::FILES`]) as well as the bucket, so a new model is compiled
+/// anew instead of read through the old one's weights.
+fn context_name(graph: &str, bucket: Bucket) -> String {
+    let sha = crate::tts::FILES.iter().find(|f| f.file == graph).map_or("unknown", |f| &f.sha256[..12]);
+    format!("{}-{}x{}-{sha}_ctx.onnx", graph.trim_end_matches(".onnx"), bucket.frames, bucket.text)
+}
+
+// Used by the QNN half, which only an Android build with `npu` compiles; tested everywhere.
+#[cfg_attr(not(all(feature = "npu", target_os = "android")), allow(dead_code))]
+/// The graphs that run on the NPU.
+const GRAPHS: [&str; 2] = ["vector_estimator.onnx", "vocoder.onnx"];
+
+// Used by the QNN half, which only an Android build with `npu` compiles; tested everywhere.
+#[cfg_attr(not(all(feature = "npu", target_os = "android")), allow(dead_code))]
+/// Which of `names` are not a current context or its weights: left by an older bucket or model,
+/// and ~130 MB apiece.
+fn stale(names: impl Iterator<Item = String>) -> Vec<String> {
+    let current: Vec<String> = crate::tts::BUCKETS
+        .iter()
+        .flat_map(|b| GRAPHS.map(|g| context_name(g, *b)))
+        .flat_map(|name| [name.replace("_ctx.onnx", "_ctx_qnn.bin"), name])
+        .collect();
+    names.filter(|name| !current.contains(name)).collect()
+}
+
+// Used by the QNN half, which only an Android build with `npu` compiles; tested everywhere.
+#[cfg_attr(not(all(feature = "npu", target_os = "android")), allow(dead_code))]
+/// Whether the NPU is off once every bucket has been tried: only when none is ready. A bucket
+/// that failed (a large one out of memory, say) leaves the others reading, and its sentences go
+/// to the processor.
+fn off_after(ready: usize, failed: Vec<String>) -> Option<String> {
+    (ready == 0 && !failed.is_empty())
+        .then(|| format!("the NPU could not prepare the voice: {}", failed.join("; ")))
+}
+
 #[cfg(all(feature = "npu", target_os = "android"))]
 mod qnn {
     use super::*;
@@ -80,12 +118,17 @@ mod qnn {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return npu.disable(format!("{}: {e}", dir.display()));
         }
+        // What an older bucket or model compiled is not read again, and takes space.
+        let names = std::fs::read_dir(&dir).into_iter().flatten().flatten();
+        for name in stale(names.map(|e| e.file_name().to_string_lossy().into_owned())) {
+            tracing::info!(%name, "removing a compiled NPU context nothing uses");
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let (mut ready, mut failed) = (0, Vec::new());
         for bucket in crate::tts::BUCKETS {
             let started = std::time::Instant::now();
-            let name = |graph: &str| dir.join(format!("{graph}-{}x{}_ctx.onnx", bucket.frames, bucket.text));
-            let pair = session(&models.join("vector_estimator.onnx"), bucket, &name("estimator"))
-                .and_then(|e| Ok((e, session(&models.join("vocoder.onnx"), bucket, &name("vocoder"))?)));
-            match pair {
+            let open = |graph: &str| session(&models.join(graph), bucket, &dir.join(context_name(graph, bucket)));
+            match open(GRAPHS[0]).and_then(|e| Ok((e, open(GRAPHS[1])?))) {
                 Ok(pair) => {
                     tracing::info!(
                         frames = bucket.frames,
@@ -94,9 +137,16 @@ mod qnn {
                         "an NPU voice bucket is ready"
                     );
                     npu.ready.lock().unwrap_or_else(|p| p.into_inner()).insert(bucket, pair);
+                    ready += 1;
                 }
-                Err(e) => return npu.disable(format!("the NPU could not prepare the voice: {e}")),
+                Err(e) => {
+                    tracing::warn!(frames = bucket.frames, text = bucket.text, %e, "an NPU voice bucket could not be prepared; its sentences are read on the processor");
+                    failed.push(e.to_string());
+                }
             }
+        }
+        if let Some(reason) = off_after(ready, failed) {
+            npu.disable(reason);
         }
     }
 
@@ -146,6 +196,37 @@ mod tests {
 
     /// Nothing is ready until something is put there, and a disabled voice hands out nothing
     /// again, with the reason kept for the Voice screen.
+    /// A context is named for its graph's own bytes as well as its bucket: a new model is
+    /// compiled anew, not read through the old model's weights.
+    #[test]
+    fn a_context_is_named_for_its_model_and_bucket() {
+        let name = context_name("vector_estimator.onnx", crate::tts::BUCKETS[0]);
+        let sha = crate::tts::FILES.iter().find(|f| f.file == "vector_estimator.onnx").unwrap().sha256;
+        assert_eq!(name, format!("vector_estimator-64x192-{}_ctx.onnx", &sha[..12]));
+    }
+
+    /// What an older bucket or model left behind is found; the current contexts are not.
+    #[test]
+    fn contexts_of_other_buckets_and_models_are_stale() {
+        let current = context_name("vocoder.onnx", crate::tts::BUCKETS[1]);
+        let bin = current.replace("_ctx.onnx", "_ctx_qnn.bin");
+        let names = [current.clone(), bin, "estimator-64x96_ctx.onnx".into(), "estimator-64x96_ctx_qnn.bin".into()];
+        assert_eq!(
+            stale(names.into_iter()),
+            ["estimator-64x96_ctx.onnx", "estimator-64x96_ctx_qnn.bin"]
+        );
+    }
+
+    /// One bucket failing leaves the others reading; only none at all turns the NPU off.
+    #[test]
+    fn the_npu_is_off_only_when_no_bucket_is_ready() {
+        assert_eq!(off_after(1, vec!["out of memory".into()]), None);
+        assert_eq!(
+            off_after(0, vec!["out of memory".into()]).as_deref(),
+            Some("the NPU could not prepare the voice: out of memory")
+        );
+    }
+
     #[test]
     fn a_disabled_voice_hands_out_nothing_and_says_why() {
         let npu = NpuVoice::empty();
