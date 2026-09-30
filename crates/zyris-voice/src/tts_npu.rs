@@ -127,10 +127,16 @@ mod qnn {
                 }
             }
         }
-        builder(bucket)?
-            .with_config_entry("ep.context_enable", "1")?
-            .with_config_entry("ep.context_file_path", ctx.to_string_lossy())?
-            .commit_from_file(model)
+        // Compiled from the model, the session keeps the model's fp32 weights beside the HTP's:
+        // the app's PSS was 3.17 GB after the first compile on an S23, against 1.35 GB opened
+        // from the contexts. So the compiling session is dropped and the context opened instead.
+        drop(
+            builder(bucket)?
+                .with_config_entry("ep.context_enable", "1")?
+                .with_config_entry("ep.context_file_path", ctx.to_string_lossy())?
+                .commit_from_file(model)?,
+        );
+        builder(bucket)?.commit_from_file(ctx)
     }
 }
 
