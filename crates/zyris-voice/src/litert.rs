@@ -1,4 +1,4 @@
-//! LiteRT's C API on Android: whisper's three compiled graphs on the NPU, behind [`npu::Graphs`].
+//! LiteRT's C API on Android: whisper's compiled graphs on the NPU, behind [`npu::Graphs`].
 //!
 //! **Loaded, not linked.** `libLiteRt.so` is opened with `libloading` the first time the NPU is
 //! chosen, so the app keeps `minSdk` 26 and a phone that never chooses it never touches LiteRT.
@@ -345,16 +345,43 @@ fn bytes_of(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
-/// Whisper's encoder, cross graph and one-token decoder, compiled for this phone's NPU.
-///
-/// Decoder inputs, in signature order (plan 2A, `whisper_kv.Decoder.forward`): token `[1, 1]` i32,
-/// position `[1]` i32, self K and V `[L, 1, H, 448, Dh]` f32, cross K and V `[L, 1, H, 1500, Dh]`
-/// f32. Outputs: logits `[1, vocab]`, the token's K and V `[L, 1, H, 1, Dh]`.
-pub struct LiteRtGraphs {
-    // Declared before `env`, so they are dropped before it.
+/// One context's encoder, cross graph and decoder.
+struct Set {
     encoder: Graph,
     cross: Graph,
     decoder: Graph,
+}
+
+impl Set {
+    /// `encoder{suffix}.tflite` and its two siblings.
+    fn open(env: &Env, bundle: &Path, suffix: &str) -> Result<Set, Fault> {
+        let graph = |name: &str| Graph::open(env, &bundle.join(format!("{name}{suffix}.tflite")));
+        Ok(Set {
+            encoder: graph("encoder")?,
+            cross: graph("cross")?,
+            decoder: graph("decoder")?,
+        })
+    }
+
+    fn fully_accelerated(&self) -> bool {
+        self.encoder.fully_accelerated
+            && self.cross.fully_accelerated
+            && self.decoder.fully_accelerated
+    }
+}
+
+/// Whisper's encoder, cross graph and one-token decoder, compiled for this phone's NPU, twice:
+/// for a whole 30 s window and for its first ten seconds ([`npu::SHORT_POSITIONS`]).
+///
+/// Decoder inputs, in signature order (plan 2A, `whisper_kv.Decoder.forward`): token `[1, 1]` i32,
+/// position `[1]` i32, self K and V `[L, 1, H, 448, Dh]` f32, cross K and V `[L, 1, H, P, Dh]`
+/// f32 with P 1500 or 500. Outputs: logits `[1, vocab]`, the token's K and V `[L, 1, H, 1, Dh]`.
+pub struct LiteRtGraphs {
+    // Declared before `env`, so they are dropped before it.
+    long: Set,
+    short: Set,
+    /// Whether the turn in progress is on the short set.
+    on_short: bool,
     env: Env,
     layers: usize,
     heads: usize,
@@ -365,7 +392,7 @@ pub struct LiteRtGraphs {
 }
 
 impl LiteRtGraphs {
-    /// The bundle's three graphs, with LiteRT's Qualcomm dispatch library (and the QNN libraries
+    /// The bundle's six graphs, with LiteRT's Qualcomm dispatch library (and the QNN libraries
     /// beside it) in `dispatch_dir`, the app's native library directory.
     pub fn open(
         bundle: &Path,
@@ -376,9 +403,9 @@ impl LiteRtGraphs {
     ) -> Result<LiteRtGraphs, Fault> {
         let env = Env::new(dispatch_dir)?;
         Ok(LiteRtGraphs {
-            encoder: Graph::open(&env, &bundle.join("encoder.tflite"))?,
-            cross: Graph::open(&env, &bundle.join("cross.tflite"))?,
-            decoder: Graph::open(&env, &bundle.join("decoder.tflite"))?,
+            long: Set::open(&env, bundle, "")?,
+            short: Set::open(&env, bundle, "-10s")?,
+            on_short: false,
             env,
             layers,
             heads,
@@ -387,39 +414,54 @@ impl LiteRtGraphs {
         })
     }
 
-    /// Whether LiteRT put every op of all three graphs on the NPU.
+    /// Whether LiteRT put every op of all six graphs on the NPU.
     pub fn fully_accelerated(&self) -> bool {
-        self.encoder.fully_accelerated
-            && self.cross.fully_accelerated
-            && self.decoder.fully_accelerated
+        self.long.fully_accelerated() && self.short.fully_accelerated()
     }
 
-    /// One turn on silence and one decoder step: the NPU answers, or this says why it did not.
+    /// One turn on silence and one decoder step on each set: the NPU answers, or this says why
+    /// it did not.
     ///
     /// **Opening is not proof.** With the DSP unreachable, LiteRT still opens every graph as
     /// "fully accelerated", and fails only when one runs (phase 0 findings).
     pub fn warm_up(&mut self) -> Result<(), Fault> {
-        self.begin_turn(&vec![-1.5; 80 * crate::mel::FRAMES], crate::mel::FRAMES)?;
-        self.step(50258, 0).map(|_| ())
+        let silence = vec![-1.5; 80 * crate::mel::FRAMES];
+        for frames in [crate::mel::FRAMES, 1] {
+            self.begin_turn(&silence, frames)?;
+            self.step(50258, 0)?;
+        }
+        Ok(())
     }
 }
 
 impl Graphs for LiteRtGraphs {
-    fn begin_turn(&mut self, mel: &[f32], _frames: usize) -> Result<(), Fault> {
+    fn begin_turn(&mut self, mel: &[f32], frames: usize) -> Result<(), Fault> {
         // The turn before this one, in one line: what a person tuning this needs, at INFO.
         let (encode_ms, steps, step_ms) = std::mem::take(&mut self.turn);
         if steps > 0 {
-            tracing::info!(encode_ms, steps, step_ms_avg = step_ms / steps, "an NPU turn");
+            tracing::info!(
+                encode_ms,
+                steps,
+                step_ms_avg = step_ms / steps,
+                short = self.on_short,
+                "an NPU turn"
+            );
         }
         let started = std::time::Instant::now();
-        self.encoder.write(0, 0, &bytes_of(mel))?;
-        self.encoder.run()?;
-        let hidden = self.encoder.read(0)?;
-        self.cross.write(0, 0, &hidden)?;
-        self.cross.run()?;
+        self.on_short = npu::is_short(frames);
+        let (set, mel) = if self.on_short {
+            (&mut self.short, npu::head_frames(mel, 80, 2 * npu::SHORT_POSITIONS))
+        } else {
+            (&mut self.long, mel.to_vec())
+        };
+        set.encoder.write(0, 0, &bytes_of(&mel))?;
+        set.encoder.run()?;
+        let hidden = set.encoder.read(0)?;
+        set.cross.write(0, 0, &hidden)?;
+        set.cross.run()?;
         // Cross K and V, once per turn, into the decoder's inputs 4 and 5.
-        self.decoder.write(4, 0, &self.cross.read(0)?)?;
-        self.decoder.write(5, 0, &self.cross.read(1)?)?;
+        set.decoder.write(4, 0, &set.cross.read(0)?)?;
+        set.decoder.write(5, 0, &set.cross.read(1)?)?;
         self.turn.0 = started.elapsed().as_millis() as u64;
         tracing::debug!(target: "zyris_voice::npu", ms = self.turn.0, "encoder and cross");
         Ok(())
@@ -427,11 +469,15 @@ impl Graphs for LiteRtGraphs {
 
     fn step(&mut self, token: i32, position: usize) -> Result<Vec<f32>, Fault> {
         let started = std::time::Instant::now();
-        self.decoder.write(0, 0, &token.to_le_bytes())?;
-        self.decoder.write(1, 0, &(position as i32).to_le_bytes())?;
-        self.decoder.run()?;
-        let logits: Vec<f32> = self
-            .decoder
+        let decoder = if self.on_short {
+            &mut self.short.decoder
+        } else {
+            &mut self.long.decoder
+        };
+        decoder.write(0, 0, &token.to_le_bytes())?;
+        decoder.write(1, 0, &(position as i32).to_le_bytes())?;
+        decoder.run()?;
+        let logits: Vec<f32> = decoder
             .read(0)?
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -440,7 +486,7 @@ impl Graphs for LiteRtGraphs {
         let row = self.head_dim * 4;
         let (heads, head_dim) = (self.heads, self.head_dim);
         for (output, input) in [(1, 2), (2, 3)] {
-            let new = self.decoder.read(output)?;
+            let new = decoder.read(output)?;
             let pieces = (0..self.layers * heads).map(|i| {
                 let (layer, head) = (i / heads, i % heads);
                 (
@@ -448,7 +494,7 @@ impl Graphs for LiteRtGraphs {
                     &new[i * row..(i + 1) * row],
                 )
             });
-            self.decoder.write_pieces(input, pieces)?;
+            decoder.write_pieces(input, pieces)?;
         }
         let ms = started.elapsed().as_millis() as u64;
         self.turn.1 += 1;
