@@ -1322,14 +1322,8 @@ impl Session {
         let Some(conversation) = self.conversation.clone() else { return };
         let events = self.events.clone();
         let traces = self.traces.clone();
-        // Taken here, synchronously, so two utterances cannot both carry it.
-        let note = self.speaking.as_ref().and_then(|speaking| speaking.take_note());
         tokio::spawn(async move {
             let sent = text.clone();
-            let text = match note {
-                Some(note) => format!("{note}\n\n{text}"),
-                None => text,
-            };
             if let Err(reason) = conversation.say(text).await {
                 let _ = traces.send(crate::Trace::SendFailed { reason: reason.clone() });
                 // Not swallowed. A transcript that did not reach the agent looks exactly like
@@ -1612,13 +1606,9 @@ pub struct Cut {
 /// the stream alone a cancel and an ordinary finish are the same event. The spec's "record only
 /// what actually reached the speaker" is therefore not implementable as written.
 ///
-/// So the decision taken is to **post a message saying where the speech was cut off**, which is
-/// [`Interruption::message`], and to ask upstream for `cancel_turn` to take a delivery point.
-///
-/// **The agent's own record is not truncated by any of this**, and the copy may not say it is.
-/// Generation runs ahead of speech — synthesis on this machine is 1.2 to 1.9 times slower than
-/// real time — so by the time somebody interrupts, most of the answer has usually been written
-/// already. What was cut short is the reading aloud.
+/// So the turn is cancelled and nothing more is said about it: a note in front of the person's
+/// next words, saying where the answer was cut off, showed in the conversation, and the person
+/// asked (2026-09-30) not to have it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Interruption {
     /// Fragments the speaker played to the end, in order.
@@ -1633,51 +1623,6 @@ impl Interruption {
     /// Whether any of what was queued went unheard. `false` is a speaker that had finished.
     pub fn anything_missed(&self) -> bool {
         self.cut.is_some() || !self.unheard.is_empty()
-    }
-
-    /// The note put in front of what the person says next, written for the agent reading it.
-    ///
-    /// Bracketed and named, because it is text this node wrote and not something the person
-    /// said — an agent that could not tell the two apart would answer it as if it had been asked
-    /// something.
-    ///
-    /// **In front of the person's next message rather than a message of its own.** Attacca queues
-    /// a message that arrives while a turn is running and answers it as a turn of its own, so a
-    /// note posted by itself was answered — and the answer to it read aloud — before the person's
-    /// actual words were even looked at.
-    pub fn message(&self) -> String {
-        let quoted = |texts: &[String]| {
-            texts.iter().map(|text| format!("\u{201c}{text}\u{201d}")).collect::<Vec<_>>().join(" ")
-        };
-        let mut lines = vec![
-            "[Zyris: the person started speaking, so reading your last answer aloud was stopped \
-             part way through and the turn was cancelled. What they said follows this note.]"
-                .to_string(),
-        ];
-        if !self.heard.is_empty() {
-            lines.push(format!("Heard in full: {}", quoted(&self.heard)));
-        }
-        if let Some(cut) = &self.cut {
-            lines.push(format!(
-                "Heard {:.1}s of {:.1}s: \u{201c}{}\u{201d}",
-                cut.at.as_secs_f64(),
-                cut.of.as_secs_f64(),
-                cut.text
-            ));
-        }
-        if !self.unheard.is_empty() {
-            lines.push(format!("Not heard at all: {}", quoted(&self.unheard)));
-        }
-        if self.heard.is_empty() && self.cut.is_none() {
-            lines.push("None of it was heard.".to_string());
-        }
-        lines.push(
-            "Your own record of that answer is complete — only the speaking was cut short. \
-             Speech runs behind writing here, so most of what you wrote had already been written \
-             before anything was stopped."
-                .to_string(),
-        );
-        lines.join("\n")
     }
 }
 
@@ -1701,8 +1646,7 @@ impl Interruption {
 /// # What stopping does, in order
 ///
 /// Throw the queue away, read how far the speaker got, stop reading anything more of that turn,
-/// cancel it, and keep a note saying where it was cut off for the front of whatever the person
-/// says next. The queue is discarded **before** `played` is read, or the answer would include
+/// and cancel it. The queue is discarded **before** `played` is read, or the answer would include
 /// audio that never reached the device.
 ///
 /// **A turn still being written is interrupted even when none of it has been heard yet** — the
@@ -1739,9 +1683,6 @@ struct SpeakingState {
     /// cancelled turn ends, still arrive afterwards, and each would be read over the person who
     /// just cut it off. The generation cannot catch them — they start after the key went down.
     muted: bool,
-    /// Where the last answer was cut off, waiting to go in front of what the person says next.
-    /// See [`Interruption::message`].
-    note: Option<String>,
 }
 
 impl Speaking {
@@ -1960,9 +1901,7 @@ impl Speaking {
     /// a flag saying "still speaking" is a second copy of that fact, and the copy is what goes
     /// stale.
     ///
-    /// `Some` also mutes the rest of the turn and keeps the note for [`Speaking::take_note`],
-    /// both here under the lock, so that nothing the person says can be sent before the note
-    /// exists.
+    /// `Some` also mutes the rest of the turn, here under the lock.
     pub fn stop(&self) -> Option<Interruption> {
         let mut state = self.lock();
         state.generation += 1;
@@ -1974,13 +1913,12 @@ impl Speaking {
             return None;
         }
         state.muted = true;
-        state.note = Some(interruption.message());
         Some(interruption)
     }
 
     /// Stop reading, without interrupting anybody: what is queued is thrown away and whatever is
-    /// still being made is dropped when it finishes, but the turn goes on, nothing is cancelled
-    /// and no note is kept for the next message. Reading aloud was switched off; the agent was
+    /// still being made is dropped when it finishes, but the turn goes on and nothing is
+    /// cancelled. Reading aloud was switched off; the agent was
     /// not cut off.
     ///
     /// Traces `Spoke` when something was being read, so the window stops showing speech.
@@ -2008,11 +1946,6 @@ impl Speaking {
         }
     }
 
-    /// The note an interruption left, once: whoever sends the person's next words puts it in
-    /// front of them. See [`Interruption::message`].
-    pub fn take_note(&self) -> Option<String> {
-        self.lock().note.take()
-    }
 
     /// Play a cue. Kept out of the ledger: it is not an answer, so an interruption over it has
     /// nothing to report and nothing to carry into the next message.
@@ -2776,10 +2709,10 @@ mod tests {
         zyris.stops().await;
     }
 
-    /// **The note an interruption leaves goes in front of the person's next words**, in one
-    /// message, after the cancel.
+    /// **What is said after an interruption goes as it was said**: the turn is cancelled first,
+    /// and nothing is put in front of the person's words.
     #[tokio::test]
-    async fn what_is_said_after_an_interruption_carries_where_the_answer_was_cut_off() {
+    async fn what_is_said_after_an_interruption_is_sent_as_it_was_said() {
         let (audio, audio_rx) = mpsc::unbounded_channel();
         let (keys, keys_rx) = broadcast::channel(32);
         let (events, events_rx) = broadcast::channel(64);
@@ -2808,9 +2741,7 @@ mod tests {
         let told = attacca.told();
         assert_eq!(told.len(), 2, "{told:?}");
         assert_eq!(told[0], Told::Cancel);
-        let Told::Said(message) = &told[1] else { panic!("{told:?}") };
-        assert!(message.starts_with("[Zyris:"), "{message}");
-        assert!(message.ends_with("\n\nwait, stop"), "{message}");
+        assert_eq!(told[1], Told::Said("wait, stop".into()));
         zyris.stops().await;
     }
 
@@ -4082,15 +4013,13 @@ mod barge_in {
         }
     }
 
-    /// A cue is not part of any answer: stopping after one has nothing to report, and nothing
-    /// of it is carried into the next message as unheard.
+    /// A cue is not part of any answer: stopping after one has nothing to report.
     #[tokio::test]
     async fn a_cue_is_not_an_answer() {
         let rig = rig(Voicebox::plain());
         rig.speaking.cue(Cue::Listening);
         assert_eq!(rig.speaker.pending(), cue(Cue::Listening).len() as u64);
         assert!(rig.speaking.stop().is_none(), "a cue was taken for an answer");
-        assert_eq!(rig.speaking.take_note(), None);
     }
 
     // -----------------------------------------------------------------------------------------
@@ -4150,44 +4079,6 @@ mod barge_in {
 
         assert_eq!(read.heard, vec!["One.", "Two.", "Three."]);
         assert!(!read.anything_missed());
-    }
-
-    // -----------------------------------------------------------------------------------------
-    // The message
-    // -----------------------------------------------------------------------------------------
-
-    /// **The copy may not claim the agent's own record is short**, and it is not: generation
-    /// finishes long before speech does, so the answer was written whether or not it was heard.
-    /// Three tasks of this project have shipped copy claiming more than the code does.
-    #[test]
-    fn the_message_says_what_was_heard_and_does_not_claim_the_record_is_truncated() {
-        let message = ledger().at(2000).message();
-
-        assert!(message.contains("\u{201c}One.\u{201d}"), "{message}");
-        assert!(message.contains("Heard 0.0s of 0.0s"), "one second at 44.1 kHz is not a second");
-        assert!(message.contains("\u{201c}Two.\u{201d}"), "{message}");
-        assert!(message.contains("Not heard at all: \u{201c}Three.\u{201d}"), "{message}");
-        assert!(
-            message.contains("Your own record of that answer is complete"),
-            "the one thing this message must not leave a reader believing is that their own \
-             transcript was cut short: {message}"
-        );
-        assert!(
-            message.contains("most of what you wrote had already been written"),
-            "and the sentence after it is half of what makes that believable — an agent told \
-             only that its record is complete has no reason to think so, since the speech it \
-             was writing for stopped: {message}"
-        );
-    }
-
-    /// A key pressed before a word of the answer came out. "None of it was heard" rather than a
-    /// message with nothing in it, which reads as a formatting bug.
-    #[test]
-    fn a_message_about_speech_that_never_started_says_so() {
-        let message = ledger().at(0).message();
-
-        assert!(message.contains("None of it was heard."), "{message}");
-        assert!(!message.contains("Heard in full"), "{message}");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -4293,7 +4184,7 @@ mod barge_in {
 
     /// **One message, not two.** Attacca answers a message that arrives while a turn is running
     /// as a turn of its own, so a note posted by itself was answered — and the answer read aloud —
-    /// ahead of whatever the person said. The note now waits for the person's words.
+    /// ahead of whatever the person said.
     #[tokio::test]
     async fn an_interruption_cancels_the_turn_and_posts_nothing_by_itself() {
         let mut rig = rig(Voicebox::plain());
@@ -4304,13 +4195,10 @@ mod barge_in {
         settle().await;
 
         assert_eq!(rig.conversation.told(), vec![Told::Cancel]);
-        let note = rig.speaking.take_note().expect("the interruption left a note");
-        assert!(note.contains("\u{201c}Yes.\u{201d}"), "the note is the one it describes: {note}");
-        assert_eq!(rig.speaking.take_note(), None, "and it goes in front of one message, not two");
     }
 
     /// Switching reading aloud off stops the speaker where it is, but interrupts nobody: no
-    /// cancel, no note, and a sentence that finishes being made afterwards is not played.
+    /// cancel, and a sentence that finishes being made afterwards is not played.
     #[tokio::test]
     async fn hushing_stops_the_speaker_without_interrupting_the_turn() {
         let (voice, open) = Voicebox::gated();
@@ -4331,7 +4219,6 @@ mod barge_in {
         assert_eq!(rig.speaker.played(), 0, "nothing reached the device after the switch");
         assert_eq!(rig.speaker.pending(), 0, "and nothing is left to play");
         assert_eq!(rig.next_event().await, VoiceEvent::Spoke);
-        assert_eq!(rig.speaking.take_note(), None, "nobody was interrupted");
         assert_eq!(rig.conversation.told(), Vec::new(), "and nothing was cancelled");
     }
 
@@ -4348,8 +4235,6 @@ mod barge_in {
         settle().await;
 
         assert_eq!(rig.conversation.told(), vec![Told::Cancel]);
-        let note = rig.speaking.take_note().expect("an interrupted turn leaves a note");
-        assert!(note.contains("None of it was heard."), "{note}");
     }
 
     /// A cancel is not instant. What the cancelled turn had already sent — and the last sentence

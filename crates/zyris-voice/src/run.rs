@@ -207,24 +207,19 @@ fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
 /// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
 pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
 
-/// Send what somebody typed, with `note` in front of it, and trace the outcome.
+/// Send what somebody typed and trace the outcome.
 ///
 /// Apart from [`Engine::send_text`] so that a test can hand it a conversation that is not a feed.
 async fn send_typed(
     conversation: &dyn crate::session::Says,
     traces: &broadcast::Sender<crate::Trace>,
-    note: Option<String>,
     text: String,
 ) -> Result<(), String> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("there is nothing to send".to_string());
     }
-    let message = match note {
-        Some(note) => format!("{note}\n\n{text}"),
-        None => text.clone(),
-    };
-    match conversation.say(message).await {
+    match conversation.say(text.clone()).await {
         Ok(()) => {
             let _ = traces.send(crate::Trace::Sent { text });
             Ok(())
@@ -712,17 +707,15 @@ impl Engine {
 
     /// Send a typed message to the session, as though it had been said.
     ///
-    /// **The same message a spoken turn would send**: a note an interruption left goes in front
-    /// of it, once. It does not interrupt anything itself — a cancel sent now could land after
+    /// **The same message a spoken turn would send.** It does not interrupt anything itself — a cancel sent now could land after
     /// the message and cancel the answer to it; the Stop button is how speech is cut off.
     pub async fn send_text(&self, text: String) -> Result<(), String> {
         let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
-        let note = self.answers.speaking().and_then(|speaking| speaking.take_note());
-        send_typed(feed.as_ref(), &self.traces, note, text).await
+        send_typed(feed.as_ref(), &self.traces, text).await
     }
 
     /// Stop reading the answer, exactly as pressing the push-to-talk key would: the rest is not
-    /// read, the answer is cancelled, and the next message says where it was cut off.
+    /// read and the answer is cancelled.
     pub fn stop_speaking(&self) {
         if let Some(speaking) = self.answers.speaking() {
             speaking.interrupt();
@@ -732,8 +725,8 @@ impl Engine {
     /// Read answers aloud or not, now and at the next launch.
     ///
     /// Switching off while an answer is being read stops it where it is: somebody who reaches for
-    /// this switch wants the room quiet, not the rest of the sentence. Nothing is cancelled and no
-    /// note is left for the next message — the agent was not interrupted, only not listened to.
+    /// this switch wants the room quiet, not the rest of the sentence. Nothing is cancelled: the
+    /// agent was not interrupted, only not listened to.
     pub async fn set_read_aloud(&self, on: bool) {
         let mut live = self.live.lock().await;
         live.settings.read_aloud = Some(on);
@@ -1873,16 +1866,13 @@ mod tests {
         }
     }
 
-    /// A typed message carries an interruption's note exactly as a spoken one does, and the
-    /// window is told the words without it.
+    /// A typed message goes as it was typed, trimmed, with nothing put in front of it.
     #[tokio::test]
-    async fn a_typed_message_is_sent_with_the_note_in_front_and_traced_without_it() {
+    async fn a_typed_message_is_sent_as_typed() {
         let heard = Heard::default();
         let (traces, mut seen) = broadcast::channel(4);
-        send_typed(&heard, &traces, Some("You stopped me.".into()), "  Go on.  ".into())
-            .await
-            .expect("sent");
-        assert_eq!(*heard.said.lock().unwrap(), vec!["You stopped me.\n\nGo on.".to_string()]);
+        send_typed(&heard, &traces, "  Go on.  ".into()).await.expect("sent");
+        assert_eq!(*heard.said.lock().unwrap(), vec!["Go on.".to_string()]);
         assert_eq!(seen.try_recv().unwrap(), crate::Trace::Sent { text: "Go on.".into() });
     }
 
@@ -1890,7 +1880,7 @@ mod tests {
     async fn an_empty_message_is_not_sent() {
         let heard = Heard::default();
         let (traces, mut seen) = broadcast::channel(4);
-        assert!(send_typed(&heard, &traces, None, "   ".into()).await.is_err());
+        assert!(send_typed(&heard, &traces, "   ".into()).await.is_err());
         assert!(heard.said.lock().unwrap().is_empty());
         assert!(seen.try_recv().is_err(), "nothing to trace");
     }
@@ -1899,7 +1889,7 @@ mod tests {
     async fn a_message_that_did_not_arrive_says_so() {
         let heard = Heard { refuse: Some("the connection is down".into()), ..Default::default() };
         let (traces, mut seen) = broadcast::channel(4);
-        let error = send_typed(&heard, &traces, None, "Hello".into()).await.unwrap_err();
+        let error = send_typed(&heard, &traces, "Hello".into()).await.unwrap_err();
         assert!(error.contains("the connection is down"), "{error}");
         assert_eq!(
             seen.try_recv().unwrap(),
