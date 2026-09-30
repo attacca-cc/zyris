@@ -116,7 +116,8 @@ pub struct Settings {
     /// is [`stt::default_device`].
     #[serde(default)]
     pub transcribe_on: Option<String>,
-    /// Where answers are read: `cpu` or `gpu`. `None` is the GPU in a build that has one.
+    /// Where answers are read: `cpu`, `gpu` or `npu`. `None` is the NPU on a phone that has one,
+    /// else the GPU in a build that has one.
     #[serde(default)]
     pub speak_on: Option<String>,
     /// Whether answers are read aloud while listening is on. **`None` is on**, so that every
@@ -126,7 +127,11 @@ pub struct Settings {
 }
 
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
-fn compute_view(settings: &Settings, npu: Option<crate::view::NpuView>) -> crate::view::ComputeView {
+fn compute_view(
+    settings: &Settings,
+    npu: Option<crate::view::NpuView>,
+    speak_npu_off: Option<String>,
+) -> crate::view::ComputeView {
     use crate::view::ComputeOption;
     let devices = stt::devices();
     let processor = devices.first().map_or("Processor".to_string(), |cpu| cpu.name.clone());
@@ -157,11 +162,23 @@ fn compute_view(settings: &Settings, npu: Option<crate::view::NpuView>) -> crate
             name: "GPU — whichever the graphics driver calls the fastest".into(),
         });
     }
+    if let Some(npu) = &npu {
+        // Why it is not reading, in the option's own name: the list is the one place that says
+        // where answers are read, and it needs no new part of the window to say it.
+        let off = speak_npu_off.map(|reason| format!(" — not in use: {reason}")).unwrap_or_default();
+        speak.push(ComputeOption { id: "npu".into(), name: format!("NPU — Qualcomm {}{off}", npu.soc) });
+    }
+    let speaking = speak_on(settings, npu.is_some());
     crate::view::ComputeView {
         transcribe,
         transcribe_on: transcribe_on(settings).id(),
         speak,
-        speak_on: if speak_on_gpu(settings) { "gpu" } else { "cpu" }.into(),
+        speak_on: match speaking {
+            SpeakOn::Cpu => "cpu",
+            SpeakOn::Gpu => "gpu",
+            SpeakOn::Npu => "npu",
+        }
+        .into(),
         npu,
     }
 }
@@ -191,9 +208,30 @@ fn transcribe_on(settings: &Settings) -> stt::Device {
         .unwrap_or_else(stt::default_device)
 }
 
-/// Whether this run reads answers on the GPU.
-fn speak_on_gpu(settings: &Settings) -> bool {
-    crate::tts::GPU_BUILT_IN && settings.speak_on.as_deref() != Some("cpu")
+/// Where answers are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeakOn {
+    Cpu,
+    Gpu,
+    Npu,
+}
+
+/// Where this run reads answers: what the settings chose, if this machine has it; otherwise the
+/// NPU on a phone that has one, the GPU in a build that has one, and the processor.
+fn speak_on(settings: &Settings, npu: bool) -> SpeakOn {
+    let fallback = if npu {
+        SpeakOn::Npu
+    } else if crate::tts::GPU_BUILT_IN {
+        SpeakOn::Gpu
+    } else {
+        SpeakOn::Cpu
+    };
+    match settings.speak_on.as_deref() {
+        Some("cpu") => SpeakOn::Cpu,
+        Some("npu") if npu => SpeakOn::Npu,
+        Some("gpu") if crate::tts::GPU_BUILT_IN => SpeakOn::Gpu,
+        _ => fallback,
+    }
 }
 
 /// The speech model these settings choose, for the device they transcribe on.
@@ -294,7 +332,7 @@ pub struct Engine {
     /// Whether that load failed on this run, and why: tried once per run.
     npu_warm: Arc<crate::npu::WarmUp>,
     /// The voice, loaded once per place it runs: the same directory and voice on every start.
-    voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
+    voice: std::sync::Mutex<Option<(SpeakOn, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
     takes_checked: std::sync::atomic::AtomicBool,
     /// The one reader of the answer stream, whether or not anything is listening. See
@@ -582,7 +620,13 @@ impl Engine {
             read_aloud: read_aloud(settings),
             volume: volume(settings),
             input_gain: input_gain(settings),
-            compute: compute_view(settings, self.npu_view()),
+            compute: compute_view(
+                settings,
+                self.npu_view(),
+                // `try_lock`: the voice is held for the whole of a sentence while it is being
+                // read, and the screen must not wait on that. Busy is not off.
+                lock(&self.voice).as_ref().and_then(|(_, tts)| tts.try_lock().ok()?.npu_off()),
+            ),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
                 let chosen = chosen_model(settings).id;
@@ -785,7 +829,7 @@ impl Engine {
         if let Some(id) = transcribe.filter(|id| stt::Device::from_id(id).is_some()) {
             live.settings.transcribe_on = Some(id);
         }
-        if let Some(id) = speak.filter(|id| id == "cpu" || id == "gpu") {
+        if let Some(id) = speak.filter(|id| ["cpu", "gpu", "npu"].contains(&id.as_str())) {
             live.settings.speak_on = Some(id);
         }
         self.store(&live.settings);
@@ -1182,18 +1226,25 @@ impl Engine {
             crate::tts::VoiceState::Unreadable { detail, .. } => return Err(detail),
             crate::tts::VoiceState::Nowhere { reason } => return Err(reason),
         };
-        let gpu = speak_on_gpu(settings);
-        let cached = lock(&self.voice).clone().filter(|(on, _)| *on == gpu).map(|(_, tts)| tts);
+        let on = speak_on(settings, crate::npu::probe().is_some());
+        let cached = lock(&self.voice).clone().filter(|(was, _)| *was == on).map(|(_, tts)| tts);
         let tts = match cached {
             Some(tts) => tts,
             None => {
                 let voice = crate::tts::DEFAULT_VOICE;
-                let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load_on(&dir, voice, gpu))
-                    .await
-                    .map_err(|_| "loading the voice stopped before it finished".to_string())?
-                    .map_err(|fault| fault.to_string())?;
+                let models = dir.clone();
+                let mut tts = tokio::task::spawn_blocking(move || {
+                    crate::tts::Tts::load_on(&dir, voice, on == SpeakOn::Gpu)
+                })
+                .await
+                .map_err(|_| "loading the voice stopped before it finished".to_string())?
+                .map_err(|fault| fault.to_string())?;
+                // The processor reads until the NPU's buckets are ready; see `crate::tts_npu`.
+                if let (SpeakOn::Npu, Some(cache)) = (on, stt::cache_dir()) {
+                    tts.with_npu(crate::tts_npu::NpuVoice::start(models, cache));
+                }
                 let tts = Arc::new(std::sync::Mutex::new(tts));
-                *lock(&self.voice) = Some((gpu, tts.clone()));
+                *lock(&self.voice) = Some((on, tts.clone()));
                 tts
             }
         };
@@ -1774,6 +1825,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn answers_are_read_where_the_settings_say_and_the_phone_can() {
+        let with = |on: Option<&str>| Settings { speak_on: on.map(str::to_string), ..Settings::default() };
+        assert_eq!(speak_on(&with(Some("cpu")), true), SpeakOn::Cpu, "a choice of the processor is kept");
+        assert_eq!(speak_on(&with(Some("npu")), true), SpeakOn::Npu);
+        assert_eq!(speak_on(&with(None), true), SpeakOn::Npu, "the NPU is the default where there is one");
+        let elsewhere = if crate::tts::GPU_BUILT_IN { SpeakOn::Gpu } else { SpeakOn::Cpu };
+        assert_eq!(speak_on(&with(Some("npu")), false), elsewhere, "never the NPU on a machine without one");
+        assert_eq!(speak_on(&with(None), false), elsewhere);
+    }
+
+    #[test]
+    fn the_npu_is_offered_for_reading_answers_only_where_there_is_one() {
+        let settings = Settings::default();
+        let view = compute_view(&settings, None, None);
+        assert!(view.speak.iter().all(|o| o.id != "npu"));
+        let npu = || crate::view::NpuView { soc: "SM8550".into(), bytes: 0, state: crate::view::NpuState::Ready };
+        let view = compute_view(&settings, Some(npu()), None);
+        assert!(view.speak.iter().any(|o| o.id == "npu" && o.name == "NPU — Qualcomm SM8550"));
+        assert_eq!(view.speak_on, "npu");
+        // And why, when it was chosen and is not reading.
+        let view = compute_view(&settings, Some(npu()), Some("the DSP said no".into()));
+        assert!(view.speak.iter().any(|o| o.id == "npu" && o.name.ends_with("not in use: the DSP said no")));
+    }
 
     pub(super) fn tempdir() -> PathBuf {
         // A counter as well as the clock: Windows' clock is coarse enough that two tests
