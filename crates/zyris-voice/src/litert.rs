@@ -373,13 +373,19 @@ impl Set {
 /// Whisper's encoder, cross graph and one-token decoder, compiled for this phone's NPU, twice:
 /// for a whole 30 s window and for its first ten seconds ([`npu::SHORT_POSITIONS`]).
 ///
+/// **The 30 s set opens on the first speech longer than ten seconds**, not at load. With both
+/// open the app's PSS was 1.88 GB on an S23 (2026-09-30), and most speech never needs it; the
+/// price is the time to open it, once, on the first long turn.
+///
 /// Decoder inputs, in signature order (plan 2A, `whisper_kv.Decoder.forward`): token `[1, 1]` i32,
 /// position `[1]` i32, self K and V `[L, 1, H, 448, Dh]` f32, cross K and V `[L, 1, H, P, Dh]`
 /// f32 with P 1500 or 500. Outputs: logits `[1, vocab]`, the token's K and V `[L, 1, H, 1, Dh]`.
 pub struct LiteRtGraphs {
     // Declared before `env`, so they are dropped before it.
-    long: Set,
+    long: Option<Set>,
     short: Set,
+    /// Where the 30 s set is read from when it is first needed.
+    bundle: std::path::PathBuf,
     /// Whether the turn in progress is on the short set.
     on_short: bool,
     env: Env,
@@ -392,8 +398,9 @@ pub struct LiteRtGraphs {
 }
 
 impl LiteRtGraphs {
-    /// The bundle's six graphs, with LiteRT's Qualcomm dispatch library (and the QNN libraries
-    /// beside it) in `dispatch_dir`, the app's native library directory.
+    /// The bundle's ten-second graphs, the 30 s ones waiting for their first turn, with LiteRT's
+    /// Qualcomm dispatch library (and the QNN libraries beside it) in `dispatch_dir`, the app's
+    /// native library directory.
     pub fn open(
         bundle: &Path,
         dispatch_dir: &Path,
@@ -403,8 +410,9 @@ impl LiteRtGraphs {
     ) -> Result<LiteRtGraphs, Fault> {
         let env = Env::new(dispatch_dir)?;
         Ok(LiteRtGraphs {
-            long: Set::open(&env, bundle, "")?,
+            long: None,
             short: Set::open(&env, bundle, "-10s")?,
+            bundle: bundle.to_path_buf(),
             on_short: false,
             env,
             layers,
@@ -414,23 +422,19 @@ impl LiteRtGraphs {
         })
     }
 
-    /// Whether LiteRT put every op of all six graphs on the NPU.
+    /// Whether LiteRT put every op of the open graphs on the NPU.
     pub fn fully_accelerated(&self) -> bool {
-        self.long.fully_accelerated() && self.short.fully_accelerated()
+        self.short.fully_accelerated() && self.long.as_ref().is_none_or(Set::fully_accelerated)
     }
 
-    /// One turn on silence and one decoder step on each set: the NPU answers, or this says why
-    /// it did not.
+    /// One turn on silence and one decoder step on the short set: the NPU answers, or this says
+    /// why it did not. The 30 s set is warmed by its first turn.
     ///
     /// **Opening is not proof.** With the DSP unreachable, LiteRT still opens every graph as
     /// "fully accelerated", and fails only when one runs (phase 0 findings).
     pub fn warm_up(&mut self) -> Result<(), Fault> {
-        let silence = vec![-1.5; 80 * crate::mel::FRAMES];
-        for frames in [crate::mel::FRAMES, 1] {
-            self.begin_turn(&silence, frames)?;
-            self.step(50258, 0)?;
-        }
-        Ok(())
+        self.begin_turn(&vec![-1.5; 80 * crate::mel::FRAMES], 1)?;
+        self.step(50258, 0).map(|_| ())
     }
 }
 
@@ -449,10 +453,15 @@ impl Graphs for LiteRtGraphs {
         }
         let started = std::time::Instant::now();
         self.on_short = npu::is_short(frames);
+        if !self.on_short && self.long.is_none() {
+            let opened = std::time::Instant::now();
+            self.long = Some(Set::open(&self.env, &self.bundle, "")?);
+            tracing::info!(ms = opened.elapsed().as_millis() as u64, "the NPU's 30 s graphs are open");
+        }
         let (set, mel) = if self.on_short {
             (&mut self.short, npu::head_frames(mel, 80, 2 * npu::SHORT_POSITIONS))
         } else {
-            (&mut self.long, mel.to_vec())
+            (self.long.as_mut().expect("opened above"), mel.to_vec())
         };
         set.encoder.write(0, 0, &bytes_of(&mel))?;
         set.encoder.run()?;
@@ -472,7 +481,7 @@ impl Graphs for LiteRtGraphs {
         let decoder = if self.on_short {
             &mut self.short.decoder
         } else {
-            &mut self.long.decoder
+            &mut self.long.as_mut().expect("opened by begin_turn").decoder
         };
         decoder.write(0, 0, &token.to_le_bytes())?;
         decoder.write(1, 0, &(position as i32).to_le_bytes())?;

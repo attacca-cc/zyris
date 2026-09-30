@@ -278,7 +278,7 @@ pub fn probe() -> Option<Probe> {
 }
 
 /// The whisper transcriber on this phone's NPU, from a bundle on disk, warmed up: one silent turn
-/// through all three graphs, since a graph that opens is not yet one that runs.
+/// through the ten-second graphs, since a graph that opens is not yet one that runs.
 #[cfg(all(feature = "npu", target_os = "android"))]
 pub fn load(dir: &std::path::Path) -> Result<crate::onnx_stt::OnnxStt, Fault> {
     let native = native_lib_dir().ok_or_else(|| Fault::Whisper {
