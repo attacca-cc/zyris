@@ -100,6 +100,10 @@ pub const SPEED: f32 = 1.05;
 ///
 /// Two, because each costs its own compiled `vector_estimator` (~133 MB on disk and on the NPU);
 /// 64 frames is 4.5 s of speech and 160 is 11.1 s, past what `split` ever hands over in one go.
+///
+/// **The text sides are three ids a frame, not one.** Korean is spelled in jamo, two or three ids
+/// a syllable, so an 11 s Korean sentence of 84 characters held more ids than 192 and was read on
+/// the processor (an S23, 2026-10-01). Doubling the text side cost 2-4% of a step there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bucket {
     pub frames: usize,
@@ -107,7 +111,7 @@ pub struct Bucket {
 }
 
 pub const BUCKETS: [Bucket; 2] =
-    [Bucket { frames: 64, text: 96 }, Bucket { frames: 160, text: 192 }];
+    [Bucket { frames: 64, text: 192 }, Bucket { frames: 160, text: 384 }];
 
 /// The smallest bucket that holds `frames` latent frames and `text` ids.
 pub fn bucket_for(frames: usize, text: usize) -> Option<Bucket> {
@@ -1603,13 +1607,13 @@ mod tests {
 
     #[test]
     fn a_sentence_takes_the_smallest_bucket_that_holds_it() {
-        assert_eq!(bucket_for(64, 96), Some(BUCKETS[0]));
+        assert_eq!(bucket_for(64, 192), Some(BUCKETS[0]));
         assert_eq!(bucket_for(1, 1), Some(BUCKETS[0]));
         assert_eq!(bucket_for(65, 10), Some(BUCKETS[1]));
-        assert_eq!(bucket_for(10, 97), Some(BUCKETS[1]));
-        assert_eq!(bucket_for(160, 192), Some(BUCKETS[1]));
+        assert_eq!(bucket_for(10, 193), Some(BUCKETS[1]));
+        assert_eq!(bucket_for(160, 384), Some(BUCKETS[1]));
         assert_eq!(bucket_for(161, 10), None);
-        assert_eq!(bucket_for(10, 193), None);
+        assert_eq!(bucket_for(10, 385), None);
     }
 
     #[test]
