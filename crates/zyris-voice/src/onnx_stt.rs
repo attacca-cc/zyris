@@ -8,7 +8,9 @@ pub const MAX_PROMPT: usize = 223;
 pub const MAX_POSITIONS: usize = 448;
 
 pub trait Runtime: Send {
-    fn encode(&mut self, mel: &[f32]) -> Result<(), Fault>;
+    /// `mel` is a whole 30 s window; `frames` is how many of its frames hold audio, the rest
+    /// being padding. A runtime with graphs for shorter windows picks on it.
+    fn encode(&mut self, mel: &[f32], frames: usize) -> Result<(), Fault>;
     fn next_logits(&mut self, tokens: &[i64]) -> Result<Vec<f32>, Fault>;
 }
 
@@ -207,7 +209,7 @@ fn session(path: &Path) -> Result<ort::session::Session, Fault> {
 }
 
 impl Runtime for Ort {
-    fn encode(&mut self, mel: &[f32]) -> Result<(), Fault> {
+    fn encode(&mut self, mel: &[f32], _frames: usize) -> Result<(), Fault> {
         let features =
             ort::value::TensorRef::from_array_view((vec![1, self.bins, crate::mel::FRAMES], mel))
                 .map_err(fault)?;
@@ -312,7 +314,8 @@ impl OnnxStt {
         // Cleared here, under the lock, rather than when a reading ends: a stop meant for a
         // reading that had already finished must not end the one after it.
         self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
-        runtime.encode(&mel)?;
+        let hop = crate::mel::SAMPLES / crate::mel::FRAMES;
+        runtime.encode(&mel, audio.len().div_ceil(hop).min(crate::mel::FRAMES))?;
         let language = detect_language(&mut **runtime, &self.specials)?;
         if let Some((code, _)) = self
             .specials
@@ -377,6 +380,7 @@ pub(crate) mod tests {
         pub steps: Vec<Vec<(u32, f32)>>,
         pub lengths: Vec<usize>,
         pub encoded: usize,
+        pub frames: Vec<usize>,
     }
 
     impl Scripted {
@@ -385,13 +389,15 @@ pub(crate) mod tests {
                 steps,
                 lengths: Vec::new(),
                 encoded: 0,
+                frames: Vec::new(),
             }
         }
     }
 
     impl Runtime for Scripted {
-        fn encode(&mut self, _mel: &[f32]) -> Result<(), Fault> {
+        fn encode(&mut self, _mel: &[f32], frames: usize) -> Result<(), Fault> {
             self.encoded += 1;
+            self.frames.push(frames);
             Ok(())
         }
         fn next_logits(&mut self, tokens: &[i64]) -> Result<Vec<f32>, Fault> {
@@ -460,6 +466,30 @@ pub(crate) mod tests {
             500 - MAX_PROMPT as i64,
             "the start of the prompt is what goes"
         );
+    }
+
+    /// The runtime is told how much of each window is audio: a short set is picked on it.
+    #[test]
+    fn each_window_says_how_many_of_its_frames_are_audio() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct Frames(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+        impl Runtime for Frames {
+            fn encode(&mut self, _mel: &[f32], frames: usize) -> Result<(), Fault> {
+                self.0.lock().unwrap().push(frames);
+                Ok(())
+            }
+            fn next_logits(&mut self, _tokens: &[i64]) -> Result<Vec<f32>, Fault> {
+                let mut logits = vec![0.0; VOCAB];
+                logits[KO as usize] = 5.0;
+                Ok(logits)
+            }
+        }
+        let stt = OnnxStt::with(Box::new(Frames(seen.clone())), specials(), tiny_tokenizer(), 80);
+        // Ten seconds exactly, ten and a bit, and thirty-five: the last is two windows.
+        for samples in [160_000, 160_001, 560_000] {
+            let _ = stt.transcribe(&vec![0.1; samples]);
+        }
+        assert_eq!(*seen.lock().unwrap(), [1000, 1001, 3000, 500]);
     }
 
     #[test]
@@ -548,7 +578,7 @@ pub(crate) mod tests {
     fn no_audio_is_no_text_and_no_model_run() {
         struct Untouchable;
         impl Runtime for Untouchable {
-            fn encode(&mut self, _mel: &[f32]) -> Result<(), Fault> {
+            fn encode(&mut self, _mel: &[f32], _frames: usize) -> Result<(), Fault> {
                 panic!("the model ran on no audio")
             }
             fn next_logits(&mut self, _tokens: &[i64]) -> Result<Vec<f32>, Fault> {

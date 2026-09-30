@@ -399,13 +399,13 @@ impl LiteRtGraphs {
     /// **Opening is not proof.** With the DSP unreachable, LiteRT still opens every graph as
     /// "fully accelerated", and fails only when one runs (phase 0 findings).
     pub fn warm_up(&mut self) -> Result<(), Fault> {
-        self.begin_turn(&vec![-1.5; 80 * crate::mel::FRAMES])?;
+        self.begin_turn(&vec![-1.5; 80 * crate::mel::FRAMES], crate::mel::FRAMES)?;
         self.step(50258, 0).map(|_| ())
     }
 }
 
 impl Graphs for LiteRtGraphs {
-    fn begin_turn(&mut self, mel: &[f32]) -> Result<(), Fault> {
+    fn begin_turn(&mut self, mel: &[f32], _frames: usize) -> Result<(), Fault> {
         // The turn before this one, in one line: what a person tuning this needs, at INFO.
         let (encode_ms, steps, step_ms) = std::mem::take(&mut self.turn);
         if steps > 0 {

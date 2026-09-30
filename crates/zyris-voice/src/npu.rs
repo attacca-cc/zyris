@@ -10,7 +10,8 @@ pub const CACHE: usize = 448;
 /// The compiled graphs, as a runtime drives them.
 pub trait Graphs: Send {
     /// Run the encoder and the cross graph for one turn's log-mel; keep cross K and V where the decoder reads them.
-    fn begin_turn(&mut self, mel: &[f32]) -> Result<(), Fault>;
+    /// `frames` of the window hold audio.
+    fn begin_turn(&mut self, mel: &[f32], frames: usize) -> Result<(), Fault>;
     /// Run the decoder for `token` at `position`: return its logits, and write its K and V into slot `position`.
     fn step(&mut self, token: i32, position: usize) -> Result<Vec<f32>, Fault>;
 }
@@ -24,6 +25,27 @@ pub fn slot_offset(
     head_dim: usize,
 ) -> usize {
     ((layer * heads + head) * CACHE + position) * head_dim
+}
+
+/// Encoder positions in a bundle's short graph set: ten seconds, two mel frames a position.
+///
+/// Measured on an S23 (2026-09-30): the encoder takes 65-158 ms instead of ~885 ms and a decoder
+/// step ~57 ms instead of ~88 ms, and clips up to ten seconds transcribe exactly as with 1500.
+pub const SHORT_POSITIONS: usize = 500;
+
+/// Whether `frames` of audio fit the short set.
+pub fn is_short(frames: usize) -> bool {
+    frames <= 2 * SHORT_POSITIONS
+}
+
+/// The first `frames` of each of the `bins` rows of a `[bins, FRAMES]` log-mel: what the short
+/// encoder reads.
+pub fn head_frames(mel: &[f32], bins: usize, frames: usize) -> Vec<f32> {
+    mel.chunks_exact(crate::mel::FRAMES)
+        .take(bins)
+        .flat_map(|row| &row[..frames])
+        .copied()
+        .collect()
 }
 
 /// `onnx_stt::Runtime` over [`Graphs`], feeding only the tokens not yet in the cache.
@@ -53,10 +75,10 @@ impl<G: Graphs> NpuRuntime<G> {
 }
 
 impl<G: Graphs> Runtime for NpuRuntime<G> {
-    fn encode(&mut self, mel: &[f32]) -> Result<(), Fault> {
+    fn encode(&mut self, mel: &[f32], frames: usize) -> Result<(), Fault> {
         self.fed.clear();
         self.last.clear();
-        self.graphs.begin_turn(mel)
+        self.graphs.begin_turn(mel, frames)
     }
 
     fn next_logits(&mut self, tokens: &[i64]) -> Result<Vec<f32>, Fault> {
@@ -310,11 +332,13 @@ mod tests {
     struct Recorder {
         turns: usize,
         steps: Vec<(i32, usize)>,
+        frames: Vec<usize>,
     }
 
     impl Graphs for Recorder {
-        fn begin_turn(&mut self, _mel: &[f32]) -> Result<(), Fault> {
+        fn begin_turn(&mut self, _mel: &[f32], frames: usize) -> Result<(), Fault> {
             self.turns += 1;
+            self.frames.push(frames);
             Ok(())
         }
         fn step(&mut self, token: i32, position: usize) -> Result<Vec<f32>, Fault> {
@@ -328,9 +352,32 @@ mod tests {
     }
 
     #[test]
+    fn ten_seconds_is_short_and_a_frame_more_is_not() {
+        assert!(is_short(1));
+        assert!(is_short(2 * SHORT_POSITIONS));
+        assert!(!is_short(2 * SHORT_POSITIONS + 1));
+        assert!(!is_short(crate::mel::FRAMES));
+    }
+
+    #[test]
+    fn the_head_of_a_mel_is_the_first_frames_of_every_row() {
+        let frames = crate::mel::FRAMES;
+        let mel: Vec<f32> = (0..2 * frames).map(|i| i as f32).collect();
+        let head = head_frames(&mel, 2, 3);
+        assert_eq!(head, [0.0, 1.0, 2.0, frames as f32, frames as f32 + 1.0, frames as f32 + 2.0]);
+    }
+
+    #[test]
+    fn the_frames_reach_the_graphs() {
+        let mut rt = runtime();
+        rt.encode(&[], 640).unwrap();
+        assert_eq!(rt.graphs.frames, [640]);
+    }
+
+    #[test]
     fn a_prefix_is_fed_once_then_one_token_a_call() {
         let mut rt = runtime();
-        rt.encode(&[]).unwrap();
+        rt.encode(&[], 0).unwrap();
         assert_eq!(
             rt.next_logits(&[50258, 50264, 50359, 50363]).unwrap(),
             vec![3.0; 4]
@@ -348,7 +395,7 @@ mod tests {
     #[test]
     fn a_list_that_is_not_an_extension_is_fed_again_from_the_start() {
         let mut rt = runtime();
-        rt.encode(&[]).unwrap();
+        rt.encode(&[], 0).unwrap();
         rt.next_logits(&[50258]).unwrap(); // language detection
         rt.next_logits(&[50361, 1, 2, 50258, 50264]).unwrap(); // a prompted prefix: position 0 differs
         let positions: Vec<usize> = rt.graphs().steps.iter().map(|(_, p)| *p).collect();
@@ -358,9 +405,9 @@ mod tests {
     #[test]
     fn every_turn_begins_on_the_graphs_and_forgets_what_was_fed() {
         let mut rt = runtime();
-        rt.encode(&[]).unwrap();
+        rt.encode(&[], 0).unwrap();
         rt.next_logits(&(0..300).collect::<Vec<i64>>()).unwrap();
-        rt.encode(&[]).unwrap();
+        rt.encode(&[], 0).unwrap();
         rt.next_logits(&[50258, 50264]).unwrap();
         assert_eq!(rt.graphs().turns, 2);
         assert_eq!(*rt.graphs().steps.last().unwrap(), (50264, 1));
@@ -369,7 +416,7 @@ mod tests {
     #[test]
     fn nothing_is_written_past_the_last_slot() {
         let mut rt = runtime();
-        rt.encode(&[]).unwrap();
+        rt.encode(&[], 0).unwrap();
         let full: Vec<i64> = (0..CACHE as i64).collect();
         assert!(rt.next_logits(&full).is_ok());
         let over: Vec<i64> = (0..=CACHE as i64).collect();
