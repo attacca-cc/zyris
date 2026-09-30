@@ -1,5 +1,5 @@
 """Greedy decode with the three .tflite graphs, language detected, against transformers.generate."""
-import json, pathlib
+import hashlib, json, pathlib
 
 import numpy as np
 import soundfile
@@ -69,6 +69,17 @@ def main():
         short_ids, lang = transcribe(wav, gen, shapes, "-10s")
         print(f"{pathlib.Path(wav).name} short: lang={lang} {tok.decode(short_ids, skip_special_tokens=True).strip()}", flush=True)
         assert short_ids == long_ids, "the short graphs disagree with the long ones"
+    # What aot.py --short compiles only if it is these bytes: checked, not merely exported.
+    (OUT / "checked.json").write_text(json.dumps({f"{g}.tflite": sha256(OUT / f"{g}.tflite") for g in SHORT}))
+
+SHORT = ("encoder-10s", "cross-10s", "decoder-10s")
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 if __name__ == "__main__":
     main()

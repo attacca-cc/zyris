@@ -89,6 +89,12 @@ def short(only):
     manifest_path = OUT / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     short_files = {f"{g}.tflite" for g in SHORT_GRAPHS}
+    # Only a set check_tflite.py passed: it reads the clips as the thirty-second set does.
+    stamp = SRC / "checked.json"
+    checked = json.loads(stamp.read_text()) if stamp.exists() else {}
+    for f in sorted(short_files):
+        if checked.get(f) != sha256(SRC / f):
+            raise SystemExit(f"{f} has not passed check_tflite.py; run it first")
     for name, entry in sorted(manifest["socs"].items()):
         if only and name not in only:
             continue
