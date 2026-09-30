@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
     // Parsed before anything else touches the system. `clap` prints help or version text and
     // exits the process by itself on `--help`/`--version`, and that has to work even while
     // another instance holds the lock (parsing after it meant a running instance made `--help`
-    // print nothing and exit 0) and before `SecretStore::new` gets anywhere near the keychain,
+    // print nothing and exit 0) and before `Identity::out_of_keychain` gets anywhere near the keychain,
     // which can raise an unlock dialog on some platforms.
     let cli = cli::Cli::parse();
     let mode = cli.mode();
@@ -97,7 +97,7 @@ fn main() -> anyhow::Result<()> {
     // instance lock in different places, because they need different things from a refusal.
     //
     // Headless takes it right here, before anything else does work (in particular, before
-    // `SecretStore::new` below gets anywhere near the keychain, which can raise an unlock
+    // `Identity::out_of_keychain` below gets anywhere near the keychain, which can raise an unlock
     // dialog on some platforms): there is no plugin to reach and nothing to focus, so a second
     // headless launch should simply be refused as early as possible.
     //
@@ -140,9 +140,8 @@ fn main() -> anyhow::Result<()> {
     // Named by the instance, so a `--server` run reads and writes its own `account-credential`
     // and `node-token` rather than the production ones. The file fallback follows for free:
     // `secret.rs`'s `default_file_dir` derives its directory from this same string.
-    let identity = zyris_runtime::identity::Identity::new(
-        zyris_runtime::secret::SecretStore::new(&instance),
-    );
+    let identity =
+        zyris_runtime::identity::Identity::new(zyris_runtime::secret::SecretStore::new(&instance)).out_of_keychain();
 
     // Everything this run owns on disk lives here: the audit log, this machine's peer key, the
     // ledger of peers it has pinned, and the inbox. One directory, named by the instance, so a
