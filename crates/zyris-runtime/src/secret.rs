@@ -61,18 +61,35 @@ pub struct SecretStore {
 }
 
 impl SecretStore {
-    /// Picks the keychain if this machine has a working one, and a file under the user's config
+    /// A file under the user's config directory on a computer. A phone probes for its keychain.
+    ///
+    /// **Not the keychain on a computer** (since 0.2.1): the connector reads the credential from
+    /// inside a tokio task, and keyring's Secret Service store blocks on zbus's own runtime, which
+    /// panicked there ("Cannot start a runtime from within a runtime") on any Linux desktop with a
+    /// keyring running. Its keychain calls are off the runtime now too (`off_the_runtime`), but a
+    /// file is what the person asked for. A credential an older build left in the keychain is moved
+    /// by `Identity::out_of_keychain`.
+    pub fn new(service: &str) -> SecretStore {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            return SecretStore::probed(service);
+        }
+        SecretStore { service: service.to_string(), file_dir: Some(default_file_dir(service)) }
+    }
+
+    /// The keychain if this machine has a working one, and a file under the user's config
     /// directory if it does not. The probe is a real read: a Secret Service that is installed but
     /// not running answers the same way as one that is absent, and only trying tells them apart.
-    pub fn new(service: &str) -> SecretStore {
-        let probe = keyring::Entry::new(service, "__probe__").and_then(|entry| match entry.get_password() {
-            Ok(_) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error),
+    fn probed(service: &str) -> SecretStore {
+        let probe = off_the_runtime(|| {
+            keyring::Entry::new(service, "__probe__").and_then(|entry| match entry.get_password() {
+                Ok(_) => Ok(()),
+                Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(error),
+            })
         });
 
         match probe {
-            Ok(()) => SecretStore { service: service.to_string(), file_dir: None },
+            Ok(()) => SecretStore::keychain(service),
             Err(error) => {
                 let dir = default_file_dir(service);
                 tracing::warn!(
@@ -85,10 +102,19 @@ impl SecretStore {
         }
     }
 
+    /// The keychain, unprobed: where an older build may have left a secret.
+    pub fn keychain(service: &str) -> SecretStore {
+        SecretStore { service: service.to_string(), file_dir: None }
+    }
+
     /// Pins the file backend at a directory of the caller's choosing. Tests use this so they
     /// never touch the developer's own keyring.
     pub fn with_file_dir(service: &str, dir: PathBuf) -> SecretStore {
         SecretStore { service: service.to_string(), file_dir: Some(dir) }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
     }
 
     pub fn backend(&self) -> Backend {
@@ -112,7 +138,7 @@ impl SecretStore {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => Err(error.into()),
             },
-            None => match self.entry(name)?.get_password() {
+            None => match off_the_runtime(|| self.entry(name)?.get_password()) {
                 Ok(value) => Ok(Some(value)),
                 Err(keyring::Error::NoEntry) => Ok(None),
                 Err(error) => Err(SecretError::Backend(error.to_string())),
@@ -128,9 +154,7 @@ impl SecretStore {
                 write_restricted(&path, value)?;
                 Ok(())
             }
-            None => self
-                .entry(name)?
-                .set_password(value)
+            None => off_the_runtime(|| self.entry(name)?.set_password(value))
                 .map_err(|error| SecretError::Backend(error.to_string())),
         }
     }
@@ -143,7 +167,7 @@ impl SecretStore {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error.into()),
             },
-            None => match self.entry(name)?.delete_credential() {
+            None => match off_the_runtime(|| self.entry(name)?.delete_credential()) {
                 Ok(()) => Ok(()),
                 Err(keyring::Error::NoEntry) => Ok(()),
                 Err(error) => Err(SecretError::Backend(error.to_string())),
@@ -151,9 +175,16 @@ impl SecretStore {
         }
     }
 
-    fn entry(&self, name: &str) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(&self.service, name).map_err(|error| SecretError::Backend(error.to_string()))
+    fn entry(&self, name: &str) -> keyring::Result<keyring::Entry> {
+        keyring::Entry::new(&self.service, name)
     }
+}
+
+/// Runs a keychain call on a thread of its own. keyring's Secret Service store blocks on zbus,
+/// which with this build's features runs its own tokio runtime, and blocking on that from a thread
+/// already inside a runtime panics. A plain thread is inside none, whoever the caller is.
+fn off_the_runtime<T: Send>(call: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| scope.spawn(call).join().expect("a keychain call panicked"))
 }
 
 fn default_file_dir(service: &str) -> PathBuf {
@@ -303,5 +334,29 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "overwriting a pre-existing loosely-permissioned file must still tighten it");
+    }
+
+    /// The connector reads the credential from inside a tokio task. keyring's Secret Service store
+    /// blocks on zbus, which here runs on its own tokio runtime, and blocking on one runtime from
+    /// inside another panics ("Cannot start a runtime from within a runtime"). Ignored: it needs a
+    /// running Secret Service: `dbus-run-session` with a throwaway `gnome-keyring-daemon`. `-p zyris-app`
+    /// has to be in the same `cargo test`, since its `ashpd` is what turns on zbus's tokio executor.
+    #[test]
+    #[ignore]
+    fn the_keychain_answers_from_inside_a_runtime() {
+        let store = SecretStore::keychain("zyris-test");
+
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        runtime.block_on(async {
+            assert_eq!(store.get("absent").unwrap(), None);
+        });
+    }
+
+    /// A computer keeps its secrets in a file, keychain or not: a Secret Service is not worth what
+    /// it costs here (a locked keyring's prompt, zbus blocking inside the connector's task).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_computer_keeps_its_secrets_in_a_file() {
+        assert_eq!(SecretStore::new("zyris-test").backend(), Backend::File);
     }
 }

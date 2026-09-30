@@ -36,6 +36,33 @@ impl Identity {
         Identity { store }
     }
 
+    /// Moves a credential an older build left in the keychain into this store's file, once.
+    ///
+    /// Only when the marker says the keychain held it and this store is the file. The keychain
+    /// copy is deleted after the file has it. If the keychain cannot be read, this launch keeps
+    /// using it and the next launch tries again, rather than enrolling a second credential. If it
+    /// can be read and holds nothing, there is nothing to strand, and the marker goes.
+    pub fn out_of_keychain(self) -> Identity {
+        if self.store.backend() != Backend::File || self.recorded_backend() != Some(Backend::Keychain) {
+            return self;
+        }
+        let keychain = SecretStore::keychain(self.store.service());
+        let moved = match keychain.get(CREDENTIAL) {
+            Ok(Some(raw)) => self.store.set(CREDENTIAL, &raw).and_then(|()| self.record_backend(Backend::File)),
+            Ok(None) => self.clear_backend_marker(),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = moved {
+            tracing::warn!(%error, "could not move this machine's credential out of the keychain; using the keychain this time");
+            return Identity::new(keychain);
+        }
+        if let Err(error) = keychain.delete(CREDENTIAL) {
+            tracing::warn!(%error, "the credential is in the file now, but its keychain copy would not delete");
+        }
+        tracing::info!("moved this machine's credential from the keychain to a file");
+        self
+    }
+
     /// Unparseable stored JSON reads as absent. The only recovery from a corrupt secret is to
     /// enrol again, and that path starts by loading — so failing here would leave no way out.
     pub fn load(&self) -> Result<Option<Credential>, SecretError> {
@@ -277,5 +304,35 @@ pub(crate) mod tests {
         identity.forget().unwrap();
 
         assert!(!dir.path().join("backend").exists());
+    }
+
+    #[test]
+    fn a_machine_that_never_used_the_keychain_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        identity(dir.path()).save(&a_credential()).unwrap();
+
+        let moved = identity(dir.path()).out_of_keychain();
+
+        assert_eq!(moved.load().unwrap(), Some(a_credential()));
+        assert_eq!(moved.stranded_in(), None);
+    }
+
+    /// Ignored: it needs a running Secret Service (see `secret.rs`'s runtime test for how to give
+    /// it a throwaway one), and it writes a `zyris-test` entry there.
+    #[test]
+    #[ignore]
+    fn a_credential_in_the_keychain_moves_to_the_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = crate::secret::SecretStore::keychain("zyris-test");
+        keychain.set(CREDENTIAL, &serde_json::to_string(&a_credential()).unwrap()).unwrap();
+        identity(dir.path()).record_backend(Backend::Keychain).unwrap();
+        assert_eq!(identity(dir.path()).stranded_in(), Some(Backend::Keychain));
+
+        let moved = identity(dir.path()).out_of_keychain();
+
+        assert_eq!(moved.store.backend(), Backend::File);
+        assert_eq!(moved.load().unwrap(), Some(a_credential()));
+        assert_eq!(moved.stranded_in(), None);
+        assert_eq!(keychain.get(CREDENTIAL).unwrap(), None, "the keychain copy is gone");
     }
 }
