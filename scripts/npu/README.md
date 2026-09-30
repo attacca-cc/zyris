@@ -28,3 +28,17 @@ Measured in the app on an S23 (SM8550), 2026-09-30:
 
 - **A short request:** transcribed 2.05 s after it ended, against 3.4-4.2 s on the thirty-second set.
 - **Memory:** the app's total PSS was 1.23 GB with the ten-second set open, and 1.88 GB with both open. So the thirty-second set opens only on the first speech longer than ten seconds.
+
+## Answers on the NPU
+
+Supertonic's `vector_estimator` and `vocoder` run through ONNX Runtime's QNN EP (`onnxruntime-android-qnn` 1.24.3, over QAIRT 2.47) in two buckets: `(64 frames, 192 text ids)` and `(160, 384)`. The graphs are compiled on the phone once and kept as EP context files (`crates/zyris-voice/src/tts_npu.rs`).
+
+Measured in the app on an S23 (SM8550), 2026-10-01:
+
+- **Compiling:** 8.6 s and 17.9 s for the two buckets, on the first run only. Opening them from the contexts afterwards takes 0.26-0.35 s.
+- **A sentence:** 2.0-3.5 s of speech in 0.74-0.78 s, and 4.2-7.9 s of speech in 1.27-1.29 s. On the processor, 75 characters (6.0 s) took 3.46 s.
+- **Memory:** the app's total PSS was 1.35-1.73 GB with the voice's buckets open. It was 3.17 GB after the first compile, before the compiling session was dropped for its context.
+- **Side effect:** the QNN EP holds the HTP in burst mode, and speech recognition through LiteRT sped up with it:
+  - the encoder went from ~200 ms to 66-86 ms;
+  - a decoder step went from ~55 ms to 23-26 ms;
+  - a short request was transcribed in ~0.9 s.
