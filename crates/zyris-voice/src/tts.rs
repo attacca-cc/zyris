@@ -95,6 +95,40 @@ pub const TOTAL_STEP: usize = 8;
 /// so above 1.0 is faster.
 pub const SPEED: f32 = 1.05;
 
+/// A shape the NPU's graphs are compiled for: latent frames and text ids. A sentence is padded up
+/// to the smallest one that holds it, and a sentence too long for both is read on the processor.
+///
+/// Two, because each costs its own compiled `vector_estimator` (~133 MB on disk and on the NPU);
+/// 64 frames is 4.5 s of speech and 160 is 11.1 s, past what `split` ever hands over in one go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Bucket {
+    pub frames: usize,
+    pub text: usize,
+}
+
+pub const BUCKETS: [Bucket; 2] =
+    [Bucket { frames: 64, text: 96 }, Bucket { frames: 160, text: 192 }];
+
+/// The smallest bucket that holds `frames` latent frames and `text` ids.
+pub fn bucket_for(frames: usize, text: usize) -> Option<Bucket> {
+    BUCKETS.into_iter().find(|b| frames <= b.frames && text <= b.text)
+}
+
+/// `rows` rows of `len`, each padded with zeros to `to`: how a channel-major `[1, C, len]` tensor
+/// becomes `[1, C, to]`.
+pub fn pad_rows(data: &[f32], rows: usize, len: usize, to: usize) -> Vec<f32> {
+    let mut out = vec![0.0; rows * to];
+    for (row, chunk) in data.chunks_exact(len).take(rows).enumerate() {
+        out[row * to..row * to + len].copy_from_slice(chunk);
+    }
+    out
+}
+
+/// A mask over `to` positions of which the first `len` are real.
+fn padded_mask(len: usize, to: usize) -> Vec<f32> {
+    (0..to).map(|i| if i < len { 1.0 } else { 0.0 }).collect()
+}
+
 /// The voice used when nothing has chosen one. The reference's own default.
 pub const DEFAULT_VOICE: &str = "M1";
 
@@ -846,6 +880,16 @@ impl Tts {
                 detail: format!("{lang} is not one of the {} languages this voice knows", LANGUAGES.len()),
             });
         }
+        self.synthesise(text, lang, None)
+    }
+
+    /// [`Tts::say_in`] once the language is known good: padded to `bucket` when there is one.
+    pub(crate) fn synthesise(
+        &mut self,
+        text: &str,
+        lang: &str,
+        bucket: Option<Bucket>,
+    ) -> Result<Utterance, Fault> {
         let body = normalise(text);
         let spoken = self.indexer.encode(&prepare(text, lang));
         if !speakable(&self.indexer, &body) {
@@ -862,26 +906,37 @@ impl Tts {
 
         let samples = (seconds * SAMPLE_RATE as f32) as usize;
         let frames = samples.div_ceil(SAMPLES_PER_FRAME).max(1);
-        let latent_shape = [1usize, LATENT_WIDTH, frames];
-        let latent_mask = vec![1.0f32; frames];
-        let latent_mask_shape = [1usize, 1, frames];
-        let mut latent = noise(LATENT_WIDTH * frames, self.seed);
+        // Padded to the bucket, or not at all. The noise is the unpadded path's, laid into the
+        // first `frames` of each row, so a sentence sounds the same either way.
+        let (width, text_width) = bucket.map_or((frames, chars), |b| (b.frames, b.text));
+        let mut latent = pad_rows(&noise(LATENT_WIDTH * frames, self.seed), LATENT_WIDTH, frames, width);
+        let latent_shape = [1usize, LATENT_WIDTH, width];
+        let latent_mask = padded_mask(frames, width);
+        let latent_mask_shape = [1usize, 1, width];
+        let text_mask = padded_mask(chars, text_width);
+        let text_mask_shape = [1usize, 1, text_width];
+        let rows = emb.1[1];
+        let text_emb = pad_rows(&emb.0, rows, chars, text_width);
+        let text_emb_shape = [1usize, rows, text_width];
 
         for step in 0..self.steps {
-            latent = self.denoise(
+            latent = denoise(
+                &mut self.estimator,
+                &self.style,
+                self.steps,
                 &latent,
                 &latent_shape,
-                &emb.0,
-                &emb.1,
-                &mask,
-                &mask_shape,
+                &text_emb,
+                &text_emb_shape,
+                &text_mask,
+                &text_mask_shape,
                 &latent_mask,
                 &latent_mask_shape,
                 step,
             )?;
         }
 
-        let mut wav = self.vocode(&latent, &latent_shape)?;
+        let mut wav = vocode(&mut self.vocoder, &latent, &latent_shape)?;
         // The vocoder produces a whole number of latent frames; the duration predictor said how
         // much of that is speech. Keeping the rest would pad every fragment with up to 69 ms of
         // whatever the model put in an unasked-for frame.
@@ -932,45 +987,50 @@ impl Tts {
         Ok((data.to_vec(), three(shape)?))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn denoise(
-        &mut self,
-        latent: &[f32],
-        latent_shape: &[usize; 3],
-        emb: &[f32],
-        emb_shape: &[usize; 3],
-        mask: &[f32],
-        mask_shape: &[usize; 3],
-        latent_mask: &[f32],
-        latent_mask_shape: &[usize; 3],
-        step: usize,
-    ) -> Result<Vec<f32>, Fault> {
-        let current = [step as f32];
-        let total = [self.steps as f32];
-        let out = self
-            .estimator
-            .run(ort::inputs![
-                "noisy_latent" => tensor(latent_shape, latent)?,
-                "text_emb" => tensor(emb_shape, emb)?,
-                "style_ttl" => tensor(&self.style.ttl_shape, &self.style.ttl)?,
-                "latent_mask" => tensor(latent_mask_shape, latent_mask)?,
-                "text_mask" => tensor(mask_shape, mask)?,
-                "current_step" => tensor(&[1usize], &current)?,
-                "total_step" => tensor(&[1usize], &total)?,
-            ])
-            .map_err(onnx)?;
-        let (_, data) = out["denoised_latent"].try_extract_tensor::<f32>().map_err(onnx)?;
-        Ok(data.to_vec())
-    }
+    // `denoise` and `vocode` are free functions of the session they run on: the processor's, or
+    // the NPU's for a bucket (`crate::tts_npu`).
+}
 
-    fn vocode(&mut self, latent: &[f32], shape: &[usize; 3]) -> Result<Vec<f32>, Fault> {
-        let out = self
-            .vocoder
-            .run(ort::inputs!["latent" => tensor(shape, latent)?])
-            .map_err(onnx)?;
-        let (_, wav) = out["wav_tts"].try_extract_tensor::<f32>().map_err(onnx)?;
-        Ok(wav.to_vec())
-    }
+#[allow(clippy::too_many_arguments)]
+fn denoise(
+    estimator: &mut ort::session::Session,
+    style: &Style,
+    steps: usize,
+    latent: &[f32],
+    latent_shape: &[usize; 3],
+    emb: &[f32],
+    emb_shape: &[usize; 3],
+    mask: &[f32],
+    mask_shape: &[usize; 3],
+    latent_mask: &[f32],
+    latent_mask_shape: &[usize; 3],
+    step: usize,
+) -> Result<Vec<f32>, Fault> {
+    let current = [step as f32];
+    let total = [steps as f32];
+    let out = estimator
+        .run(ort::inputs![
+            "noisy_latent" => tensor(latent_shape, latent)?,
+            "text_emb" => tensor(emb_shape, emb)?,
+            "style_ttl" => tensor(&style.ttl_shape, &style.ttl)?,
+            "latent_mask" => tensor(latent_mask_shape, latent_mask)?,
+            "text_mask" => tensor(mask_shape, mask)?,
+            "current_step" => tensor(&[1usize], &current)?,
+            "total_step" => tensor(&[1usize], &total)?,
+        ])
+        .map_err(onnx)?;
+    let (_, data) = out["denoised_latent"].try_extract_tensor::<f32>().map_err(onnx)?;
+    Ok(data.to_vec())
+}
+
+fn vocode(
+    vocoder: &mut ort::session::Session,
+    latent: &[f32],
+    shape: &[usize; 3],
+) -> Result<Vec<f32>, Fault> {
+    let out = vocoder.run(ort::inputs!["latent" => tensor(shape, latent)?]).map_err(onnx)?;
+    let (_, wav) = out["wav_tts"].try_extract_tensor::<f32>().map_err(onnx)?;
+    Ok(wav.to_vec())
 }
 
 /// Scale `wav` by `gain`, clipping at full scale.
@@ -1500,6 +1560,48 @@ mod tests {
     // machine with no models; what it costs is that a mistake between the graph names and the
     // tensors fed to them is caught only here.
     // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_sentence_takes_the_smallest_bucket_that_holds_it() {
+        assert_eq!(bucket_for(64, 96), Some(BUCKETS[0]));
+        assert_eq!(bucket_for(1, 1), Some(BUCKETS[0]));
+        assert_eq!(bucket_for(65, 10), Some(BUCKETS[1]));
+        assert_eq!(bucket_for(10, 97), Some(BUCKETS[1]));
+        assert_eq!(bucket_for(160, 192), Some(BUCKETS[1]));
+        assert_eq!(bucket_for(161, 10), None);
+        assert_eq!(bucket_for(10, 193), None);
+    }
+
+    #[test]
+    fn rows_are_padded_each_to_the_bucket_with_zeros() {
+        // Two rows of three, padded to five: [a b c 0 0][d e f 0 0].
+        let padded = pad_rows(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 2, 3, 5);
+        assert_eq!(padded, [1.0, 2.0, 3.0, 0.0, 0.0, 4.0, 5.0, 6.0, 0.0, 0.0]);
+        assert_eq!(padded_mask(3, 5), [1.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    /// **A sentence padded to a bucket is the same sentence**: as long, and as loud, as it is
+    /// unpadded. Not the same samples — the model's output depends a little on the length it is
+    /// given (5-12% on one step, masks honoured), so eight steps draw a different rendition — and
+    /// the person listened to both on 2026-10-01 and heard no difference.
+    #[test]
+    fn a_sentence_padded_to_a_bucket_says_the_same_thing() {
+        let Some(dir) = models() else {
+            eprintln!("skipped: no Supertonic models; set {MODELS_ENV}");
+            return;
+        };
+        let mut tts = Tts::load_on(&dir, DEFAULT_VOICE, false).expect("loads");
+        let text = "내일 아침 서울 날씨를 알려 드릴게요.";
+        let plain = tts.synthesise(text, "ko", None).expect("speaks").samples;
+        let rms = |wav: &[f32]| (wav.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / wav.len() as f64).sqrt();
+        for bucket in BUCKETS {
+            let padded = tts.synthesise(text, "ko", Some(bucket)).expect("speaks").samples;
+            let length = padded.len() as f64 / plain.len() as f64;
+            assert!((0.9..1.1).contains(&length), "{bucket:?} changed the length by {length:.2}x");
+            let loudness = rms(&padded) / rms(&plain);
+            assert!((0.75..1.33).contains(&loudness), "{bucket:?} changed the loudness by {loudness:.2}x");
+        }
+    }
 
     fn models() -> Option<PathBuf> {
         let dir = models_dir()?;
