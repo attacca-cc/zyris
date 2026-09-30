@@ -1,12 +1,13 @@
 """Write crates/zyris-voice/src/npu_catalog.rs from out/bundles/manifest.json.
 
-Every bundle file as a `model::Model`: the release asset URL (one release holds every SoC's bundle,
-so the asset name carries the SoC), its name on disk, its size and its SHA-256. The app checks every
-file against these before it loads anything.
+Every bundle file as a `model::Model`: the release asset URL (each file names its release:
+npu-models-1 for the first six, npu-models-2 for the ten-second set; the asset name carries the
+SoC), its name on disk, its size and its SHA-256. The app checks every file against these before
+it loads anything.
 """
 import json, pathlib
 
-RELEASE = "https://github.com/attacca-cc/zyris/releases/download/npu-models-1"
+BASE = "https://github.com/attacca-cc/zyris/releases/download"
 HERE = pathlib.Path(__file__).parent
 OUT = HERE / "../../crates/zyris-voice/src/npu_catalog.rs"
 
@@ -24,7 +25,7 @@ def main():
     for soc, entry in sorted(manifest["socs"].items()):
         lines.append(f'    Bundle {{ soc: "{soc}", htp: {entry["htp"]}, files: &[')
         for f in entry["files"]:
-            url = f"{RELEASE}/whisper-small-npu-{soc}-{f['name']}"
+            url = f"{BASE}/{f.get('release', 'npu-models-1')}/whisper-small-npu-{soc}-{f['name']}"
             lines.append(f'        Model {{ url: "{url}", file: "{f["name"]}", bytes: {f["bytes"]}, sha256: "{f["sha256"]}" }},')
         lines.append("    ] },")
     lines.append("];")

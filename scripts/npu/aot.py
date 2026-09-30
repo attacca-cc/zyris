@@ -81,5 +81,42 @@ def rescan():
         entry["files"] = [{"name": f.name, "bytes": f.stat().st_size, "sha256": sha256(f)} for f in sorted(dest.iterdir())]
     manifest_path.write_text(json.dumps(manifest, indent=2))
 
+SHORT_GRAPHS = ("encoder-10s", "cross-10s", "decoder-10s")
+SHORT_RELEASE, FIRST_RELEASE = "npu-models-2", "npu-models-1"
+
+def short(only):
+    """Add the ten-second set to the bundles on disk, leaving every uploaded file as it is."""
+    manifest_path = OUT / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    short_files = {f"{g}.tflite" for g in SHORT_GRAPHS}
+    for name, entry in sorted(manifest["socs"].items()):
+        if only and name not in only:
+            continue
+        dest = OUT / f"whisper-small-npu-{name}"
+        kept = [f for f in entry["files"] if f["name"] not in short_files]
+        for f in kept:  # what npu-models-1 serves: these bytes, or stop
+            f.setdefault("release", FIRST_RELEASE)
+            if sha256(dest / f["name"]) != f["sha256"]:
+                raise SystemExit(f"{name}/{f['name']} is not the file npu-models-1 serves")
+        tmp = OUT / f"_tmp-{name}"
+        added = []
+        for graph in SHORT_GRAPHS:
+            result = aot_lib.aot_compile(str(SRC / f"{graph}.tflite"), output_dir=str(tmp), target=qnn.Target(qnn.SocModel(name)), keep_going=True)
+            if result.failed_backends:
+                raise SystemExit(f"{name} {graph}: {result.failed_backends[0][1][:300]}")
+            _, model = result.models_with_backend[0]
+            path = dest / f"{graph}.tflite"
+            shutil.copy(model.path, path)
+            s = model.partition_stats.subgraph_stats[0]
+            entry["offload"][graph] = [s.num_ops_offloaded, s.num_total_ops]
+            added.append({"name": path.name, "bytes": path.stat().st_size, "sha256": sha256(path), "release": SHORT_RELEASE})
+        shutil.rmtree(tmp, ignore_errors=True)
+        entry["files"] = sorted(kept + added, key=lambda f: f["name"])
+        print(name, "short ok", {g: entry["offload"][g] for g in SHORT_GRAPHS}, flush=True)
+        manifest_path.write_text(json.dumps(manifest, indent=2))  # after each SoC: a long run can stop
+
 if __name__ == "__main__":
-    main(set(sys.argv[1:]))
+    if sys.argv[1:2] == ["--short"]:
+        short(set(sys.argv[2:]))
+    else:
+        main(set(sys.argv[1:]))

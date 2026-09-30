@@ -439,8 +439,14 @@ mod tests {
             "SM8450", "SM8475", "SM8550", "SM8650", "SM8750", "SM8845", "SM8850",
         ] {
             let b = bundle_for(soc).unwrap_or_else(|| panic!("{soc}"));
-            assert_eq!(b.files.len(), 6);
+            assert_eq!(b.files.len(), 9);
             assert!(b.files.iter().any(|f| f.file == "decoder.tflite"));
+            for short in ["encoder-10s.tflite", "cross-10s.tflite", "decoder-10s.tflite"] {
+                let file = b.files.iter().find(|f| f.file == short).expect(short);
+                assert!(file.url.contains("/npu-models-2/"), "{}", file.url);
+            }
+            let long = b.files.iter().find(|f| f.file == "decoder.tflite").unwrap();
+            assert!(long.url.contains("/npu-models-1/"), "the uploaded files keep their URLs");
         }
         for soc in ["SM8350", "SA8295", "MT6989", "", "sm8550"] {
             assert!(bundle_for(soc).is_none(), "{soc}");
@@ -458,6 +464,24 @@ mod tests {
         std::fs::write(dir.join(small.file), vec![0u8; small.bytes as usize]).unwrap();
         assert!(matches!(state(b, &root), BundleState::Partial { .. }));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A phone with the six files of `npu-models-1` is partway there after the update: what it
+    /// has counts, and only the short set is left to fetch.
+    #[test]
+    fn a_bundle_from_before_the_short_set_is_partial() {
+        let b = bundle_for("SM8550").unwrap();
+        let root = std::env::temp_dir().join(format!("zyris-npu-old-{}", std::process::id()));
+        let dir = bundle_dir(b, &root);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old: Vec<_> = b.files.iter().filter(|f| !f.file.contains("-10s")).collect();
+        for f in &old {
+            // Sparse: only the size is read.
+            std::fs::File::create(dir.join(f.file)).unwrap().set_len(f.bytes).unwrap();
+        }
+        let have: u64 = old.iter().map(|f| f.bytes).sum();
+        assert!(matches!(state(b, &root), BundleState::Partial { have: h, .. } if h == have));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
