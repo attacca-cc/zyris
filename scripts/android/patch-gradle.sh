@@ -13,8 +13,13 @@ repositories {
 }
 dependencies {
     implementation("org.rustls:rustls-platform-verifier:$version")
-    // The ONNX Runtime the speech voice loads; 1.22 is the API \`ort\` 2.0.0-rc.10 speaks.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
+    // The ONNX Runtime the speech voice loads, with the QNN EP that reads answers on the NPU.
+    // \`ort\` 2.0.0-rc.10 asks for API 22, which 1.24 serves; 1.24 is the first whose QNN EP runs
+    // Supertonic's Erf on the HTP. Its own QNN runtime (2.42) is left out: the APK carries
+    // QAIRT 2.47 for LiteRT (npu-libs.sh), and there can be one libQnnHtp.so.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.24.3") {
+        exclude(group = "com.qualcomm.qti")
+    }
 }
 android {
     buildTypes {
