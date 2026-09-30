@@ -123,6 +123,8 @@ pub mod litert;
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]
 pub mod tts;
+#[cfg(feature = "voice")]
+pub mod tts_npu;
 
 // What is read aloud and what is not, and the two texts that are not the same text.
 #[cfg(feature = "conversation")]

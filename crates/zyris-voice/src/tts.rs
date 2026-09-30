@@ -800,6 +800,8 @@ pub struct Tts {
     /// How loud, as a gain on what the vocoder writes. See [`Tts::set_volume`].
     volume: f32,
     seed: u64,
+    /// The NPU's sessions, per bucket, where this phone has one and it was chosen.
+    npu: Option<std::sync::Arc<crate::tts_npu::NpuVoice>>,
 }
 
 impl Tts {
@@ -830,7 +832,18 @@ impl Tts {
             speed: SPEED,
             volume: 1.0,
             seed: SEED,
+            npu: None,
         })
+    }
+
+    /// Read on the NPU wherever one of its buckets is ready. See [`crate::tts_npu`].
+    pub fn with_npu(&mut self, npu: std::sync::Arc<crate::tts_npu::NpuVoice>) {
+        self.npu = Some(npu);
+    }
+
+    /// Why the NPU is not reading answers, when it was asked to and is not.
+    pub fn npu_off(&self) -> Option<String> {
+        self.npu.as_ref().and_then(|npu| npu.off())
     }
 
     /// Which voice this is speaking with.
@@ -906,10 +919,20 @@ impl Tts {
 
         let samples = (seconds * SAMPLE_RATE as f32) as usize;
         let frames = samples.div_ceil(SAMPLES_PER_FRAME).max(1);
+        // The NPU's bucket for this sentence, when one is ready; `bucket` otherwise, if it holds
+        // the sentence. A bucket that does not hold it is not used: it would cut the sentence.
+        let on_npu = self.npu.clone().and_then(|npu| {
+            let b = bucket_for(frames, chars)?;
+            npu.with(b, |_, _| ()).map(|()| (b, npu))
+        });
+        let bucket = on_npu
+            .as_ref()
+            .map(|(b, _)| *b)
+            .or(bucket.filter(|b| frames <= b.frames && chars <= b.text));
         // Padded to the bucket, or not at all. The noise is the unpadded path's, laid into the
         // first `frames` of each row, so a sentence sounds the same either way.
         let (width, text_width) = bucket.map_or((frames, chars), |b| (b.frames, b.text));
-        let mut latent = pad_rows(&noise(LATENT_WIDTH * frames, self.seed), LATENT_WIDTH, frames, width);
+        let latent = pad_rows(&noise(LATENT_WIDTH * frames, self.seed), LATENT_WIDTH, frames, width);
         let latent_shape = [1usize, LATENT_WIDTH, width];
         let latent_mask = padded_mask(frames, width);
         let latent_mask_shape = [1usize, 1, width];
@@ -919,24 +942,41 @@ impl Tts {
         let text_emb = pad_rows(&emb.0, rows, chars, text_width);
         let text_emb_shape = [1usize, rows, text_width];
 
-        for step in 0..self.steps {
-            latent = denoise(
-                &mut self.estimator,
-                &self.style,
-                self.steps,
-                &latent,
-                &latent_shape,
-                &text_emb,
-                &text_emb_shape,
-                &text_mask,
-                &text_mask_shape,
-                &latent_mask,
-                &latent_mask_shape,
-                step,
-            )?;
-        }
-
-        let mut wav = vocode(&mut self.vocoder, &latent, &latent_shape)?;
+        let (style, steps) = (&self.style, self.steps);
+        let run = |estimator: &mut ort::session::Session,
+                   vocoder: &mut ort::session::Session|
+         -> Result<Vec<f32>, Fault> {
+            let mut latent = latent.clone();
+            for step in 0..steps {
+                latent = denoise(
+                    estimator,
+                    style,
+                    steps,
+                    &latent,
+                    &latent_shape,
+                    &text_emb,
+                    &text_emb_shape,
+                    &text_mask,
+                    &text_mask_shape,
+                    &latent_mask,
+                    &latent_mask_shape,
+                    step,
+                )?;
+            }
+            vocode(vocoder, &latent, &latent_shape)
+        };
+        // On the NPU when its bucket is ready. A failure there reads this sentence on the
+        // processor with the same padded inputs, which it accepts, and turns the NPU off for the
+        // run: a second failing sentence would be a second gap in the answer.
+        let wav = match on_npu.and_then(|(b, npu)| npu.with(b, &run).map(|said| (said, npu))) {
+            Some((Ok(wav), _)) => wav,
+            Some((Err(fault), npu)) => {
+                npu.disable(format!("the NPU failed reading a sentence: {fault}"));
+                run(&mut self.estimator, &mut self.vocoder)?
+            }
+            None => run(&mut self.estimator, &mut self.vocoder)?,
+        };
+        let mut wav = wav;
         // The vocoder produces a whole number of latent frames; the duration predictor said how
         // much of that is speech. Keeping the rest would pad every fragment with up to 69 ms of
         // whatever the model put in an unasked-for frame.

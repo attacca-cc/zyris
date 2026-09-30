@@ -277,14 +277,14 @@ pub fn probe() -> Option<Probe> {
     None
 }
 
-/// The whisper transcriber on this phone's NPU, from a bundle on disk, warmed up: one silent turn
-/// through the ten-second graphs, since a graph that opens is not yet one that runs.
+/// Point the DSP at the app's native library directory, where the Hexagon skels are, once and
+/// before anything opens QNN; answers the directory. LiteRT's graphs and ONNX Runtime's QNN EP
+/// (the voice, `crate::tts_npu`) both need it, and either may be first.
 #[cfg(all(feature = "npu", target_os = "android"))]
-pub fn load(dir: &std::path::Path) -> Result<crate::onnx_stt::OnnxStt, Fault> {
+pub(crate) fn reach_the_dsp() -> Result<std::path::PathBuf, Fault> {
     let native = native_lib_dir().ok_or_else(|| Fault::Whisper {
         detail: "the app's native library directory was not found".into(),
     })?;
-    // The DSP loads the Hexagon skel by path. Set before LiteRT opens the dispatch library, once.
     static ADSP: std::sync::Once = std::sync::Once::new();
     ADSP.call_once(|| {
         let path = format!(
@@ -294,6 +294,14 @@ pub fn load(dir: &std::path::Path) -> Result<crate::onnx_stt::OnnxStt, Fault> {
         // SAFETY: set once, before the NPU is first opened; nothing else here reads it concurrently.
         unsafe { std::env::set_var("ADSP_LIBRARY_PATH", path) };
     });
+    Ok(native)
+}
+
+/// The whisper transcriber on this phone's NPU, from a bundle on disk, warmed up: one silent turn
+/// through the ten-second graphs, since a graph that opens is not yet one that runs.
+#[cfg(all(feature = "npu", target_os = "android"))]
+pub fn load(dir: &std::path::Path) -> Result<crate::onnx_stt::OnnxStt, Fault> {
+    let native = reach_the_dsp()?;
     let mut graphs = crate::litert::LiteRtGraphs::open(dir, &native, 12, 12, 64)?;
     tracing::info!(
         fully_accelerated = graphs.fully_accelerated(),
