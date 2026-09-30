@@ -1114,17 +1114,21 @@ impl Engine {
     fn npu_view(&self) -> Option<crate::view::NpuView> {
         use crate::view::{NpuState, NpuView};
         let probe = crate::npu::probe()?;
+        let on_disk = stt::cache_dir().map(|root| crate::npu::state(probe.bundle, &root));
         let state = if let Some(reason) = self.npu_warm.reason() {
             NpuState::Unavailable { reason }
         } else if self.downloads.lock().expect("downloads is never poisoned").contains_key(NPU_DOWNLOAD) {
             NpuState::Downloading
         } else {
-            match stt::cache_dir().map(|root| crate::npu::state(probe.bundle, &root)) {
+            match &on_disk {
                 Some(crate::npu::BundleState::Ready { .. }) => NpuState::Ready,
                 _ => NpuState::Absent,
             }
         };
-        Some(NpuView { soc: probe.soc, bytes: crate::npu::total_bytes(probe.bundle), state })
+        let bytes = on_disk.as_ref().map_or(crate::npu::total_bytes(probe.bundle), |on_disk| {
+            crate::npu::left_to_fetch(probe.bundle, on_disk)
+        });
+        Some(NpuView { soc: probe.soc, bytes, state })
     }
 
     /// Download this phone's NPU bundle, every file checked against its size and SHA-256.

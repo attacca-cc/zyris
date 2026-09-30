@@ -119,7 +119,8 @@ pub struct ComputeView {
 pub struct NpuView {
     /// `ro.soc.model`, e.g. `SM8550`.
     pub soc: String,
-    /// What its bundle downloads, in bytes.
+    /// What its bundle still has to download, in bytes: all of it, or what a bundle that grew
+    /// since it was fetched is missing.
     pub bytes: u64,
     pub state: NpuState,
 }

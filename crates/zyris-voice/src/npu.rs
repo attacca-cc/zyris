@@ -137,6 +137,16 @@ pub fn total_bytes(bundle: &Bundle) -> u64 {
     bundle.files.iter().map(|f| f.bytes).sum()
 }
 
+/// What a download of `bundle` in `state` still has to fetch: a bundle that grew since it was
+/// fetched (the ten-second set, 2026-09-30) needs only its new files.
+pub fn left_to_fetch(bundle: &Bundle, state: &BundleState) -> u64 {
+    match state {
+        BundleState::Ready { .. } => 0,
+        BundleState::Partial { have, bytes, .. } => bytes - have,
+        BundleState::Absent { .. } => total_bytes(bundle),
+    }
+}
+
 /// Where `bundle` lives under `root` (the models cache directory).
 pub fn bundle_dir(bundle: &Bundle, root: &std::path::Path) -> std::path::PathBuf {
     root.join("npu")
@@ -481,6 +491,8 @@ mod tests {
         }
         let have: u64 = old.iter().map(|f| f.bytes).sum();
         assert!(matches!(state(b, &root), BundleState::Partial { have: h, .. } if h == have));
+        // And the Voice screen offers what is left, not the whole bundle again.
+        assert_eq!(left_to_fetch(b, &state(b, &root)), total_bytes(b) - have);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
