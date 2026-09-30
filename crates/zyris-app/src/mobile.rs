@@ -158,8 +158,16 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the Zyris app ended with an error");
+        .build(tauri::generate_context!())
+        .expect("the Zyris app could not be built")
+        .run(|_app, event| {
+            // Tauri would call `std::process::exit` next, and its C++ exit handlers abort in
+            // ONNX Runtime's statics on every exit. As the desktop app does: see
+            // `zyris_voice::exit_process`.
+            if let tauri::RunEvent::Exit = event {
+                zyris_voice::exit_process(0);
+            }
+        });
     drop(runtime);
 }
 

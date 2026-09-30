@@ -654,6 +654,25 @@ mod tests {
     ///
     /// It is deliberately not a count of call sites. A third exit added later that hands nothing
     /// back is exactly the mistake worth catching, and a count would pass for it.
+    /// **The phone app leaves the way the desktop does**: by `zyris_voice::exit_process` on the
+    /// event loop's final event. With Tauri's own `std::process::exit` the C++ exit handlers ran,
+    /// and ONNX Runtime's locked a mutex its own statics had already destroyed: an abort on every
+    /// exit from the app (the S23, 2026-09-30).
+    #[test]
+    fn the_phone_app_ends_without_the_cpp_exit_handlers() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mobile.rs"),
+        )
+        .expect("mobile.rs is readable from its own crate");
+        let at = source
+            .find("RunEvent::Exit")
+            .expect("the phone app handles the event loop's final event");
+        assert!(
+            source[at..].lines().take(6).any(|line| line.contains("zyris_voice::exit_process(")),
+            "the phone app's final event does not end with zyris_voice::exit_process"
+        );
+    }
+
     #[test]
     fn both_ways_out_of_this_process_hand_everything_back() {
         let source = std::fs::read_to_string(
