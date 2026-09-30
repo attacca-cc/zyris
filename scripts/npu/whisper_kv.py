@@ -29,6 +29,24 @@ class Encoder(torch.nn.Module):
     def forward(self, features):
         return self.encoder(input_features=features).last_hidden_state
 
+SHORT = 500  # encoder positions in the short set: ten seconds
+
+class ShortEncoder(torch.nn.Module):
+    """The encoder on the first 2n mel frames with the first n position embeddings: whisper.cpp's
+    audio_ctx. transformers' encoder insists on 3000 frames, so its layers are run here directly."""
+    def __init__(self, model, n):
+        super().__init__()
+        self.encoder, self.n = model.model.encoder, n
+
+    def forward(self, features):
+        e = self.encoder
+        x = torch.nn.functional.gelu(e.conv1(features))
+        x = torch.nn.functional.gelu(e.conv2(x)).permute(0, 2, 1) + e.embed_positions.weight[: self.n]
+        for layer in e.layers:
+            x = layer(x, attention_mask=None)
+            x = x[0] if isinstance(x, tuple) else x
+        return e.layer_norm(x)
+
 class Cross(torch.nn.Module):
     def __init__(self, model):
         super().__init__()

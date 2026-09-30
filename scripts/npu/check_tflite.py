@@ -15,10 +15,12 @@ def runner(name):
     names = sorted(r.get_input_details().keys(), key=lambda n: int(n.split("_")[-1]))
     return lambda *xs: list(r(**dict(zip(names, xs))).values())
 
-def transcribe(wav, gen, shapes):
+def transcribe(wav, gen, shapes, suffix=""):
     audio, rate = soundfile.read(wav, dtype="float32"); assert rate == 16000
     feats = WhisperFeatureExtractor(feature_size=shapes["bins"])(audio, sampling_rate=16000, return_tensors="np").input_features.astype(np.float32)
-    enc, cross, dec = runner("encoder"), runner("cross"), runner("decoder")
+    if suffix:  # the short set reads the head of the same padded window, as the app does
+        feats = np.ascontiguousarray(feats[:, :, : 2 * kv.SHORT])
+    enc, cross, dec = runner("encoder" + suffix), runner("cross" + suffix), runner("decoder" + suffix)
     (hidden,) = enc(feats)
     ck, cv = cross(hidden)
     L, H, Dh, C = shapes["layers"], shapes["heads"], shapes["head_dim"], shapes["cache"]
@@ -59,6 +61,14 @@ def main():
         ref = tok.decode(model.generate(feats, task="transcribe")[0], skip_special_tokens=True).strip()
         print(f"{pathlib.Path(wav).name}: lang={lang}\n  tflite:       {ours}\n  transformers: {ref}", flush=True)
         assert ours == ref, "the .tflite graphs disagree with transformers"
+    # The short set must read every clip it can hold exactly as the long set does.
+    for wav in ["out/clips/ko1.wav", "out/clips/ko2.wav", "out/clips/en1.wav"]:
+        audio, _ = soundfile.read(wav, dtype="float32")
+        assert len(audio) <= 2 * kv.SHORT * 160, f"{wav} is longer than the short set"
+        long_ids, _ = transcribe(wav, gen, shapes)
+        short_ids, lang = transcribe(wav, gen, shapes, "-10s")
+        print(f"{pathlib.Path(wav).name} short: lang={lang} {tok.decode(short_ids, skip_special_tokens=True).strip()}", flush=True)
+        assert short_ids == long_ids, "the short graphs disagree with the long ones"
 
 if __name__ == "__main__":
     main()

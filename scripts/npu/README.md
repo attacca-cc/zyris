@@ -9,5 +9,7 @@ one bundle per SoC, with a SHA-256 manifest. The phase 0 findings are on branch 
     cd scripts/npu
     .venv/bin/python check_torch.py                             # the step decoder against transformers
     .venv/bin/python export.py                                  # three .tflite graphs
+    .venv/bin/python export.py --short                          # only the ten-second set
     .venv/bin/python check_tflite.py                            # the .tflite graphs against transformers
     bash aot.sh                                                 # per-SoC bundles and manifest.json
+    bash aot.sh --short                                         # add the ten-second set to existing bundles
