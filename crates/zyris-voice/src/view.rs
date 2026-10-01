@@ -109,6 +109,34 @@ pub struct ComputeView {
     pub transcribe_on: String,
     pub speak: Vec<ComputeOption>,
     pub speak_on: String,
+    /// This phone's NPU, when it has a bundle: `None` on every other machine.
+    pub npu: Option<NpuView>,
+}
+
+/// A phone's NPU, as the Voice screen shows it next to the transcription choice.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NpuView {
+    /// `ro.soc.model`, e.g. `SM8550`.
+    pub soc: String,
+    /// What its bundle still has to download, in bytes: all of it, or what a bundle that grew
+    /// since it was fetched is missing.
+    pub bytes: u64,
+    pub state: NpuState,
+}
+
+/// Where the NPU stands on this run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum NpuState {
+    /// The bundle is not (all) on disk.
+    Absent,
+    /// The bundle is downloading; progress is in `VoiceView::downloads` under `npu`.
+    Downloading,
+    /// The bundle is on disk.
+    Ready,
+    /// The NPU failed to load or warm up on this run, and whisper.cpp transcribes instead.
+    Unavailable { reason: String },
 }
 
 /// One place a model can run: `cpu`, `gpu:N` or `gpu`, and a name a person recognises.

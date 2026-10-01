@@ -108,10 +108,23 @@ pub mod bpe;
 #[cfg(feature = "voice")]
 pub mod onnx_stt;
 
+// Whisper on a phone's NPU: the cache logic, the SoC table and the bundles, testable anywhere.
+// The LiteRT binding it runs on is `litert`, Android only.
+#[cfg(feature = "voice")]
+pub mod npu;
+#[cfg(feature = "voice")]
+mod npu_catalog;
+
+// LiteRT's C API on Android: the NPU transcriber's three compiled graphs (`npu::Graphs`).
+#[cfg(all(feature = "npu", target_os = "android"))]
+pub mod litert;
+
 // Supertonic 3: the files it needs, the four graphs, and the normalisation without which most
 // of the world’s text is silently unsayable.
 #[cfg(feature = "voice")]
 pub mod tts;
+#[cfg(feature = "voice")]
+pub mod tts_npu;
 
 // What is read aloud and what is not, and the two texts that are not the same text.
 #[cfg(feature = "conversation")]
@@ -768,6 +781,17 @@ impl Voice {
         }
         let _ = id;
         self.look().await
+    }
+
+    /// Download this phone's NPU bundle. Answers `Err` with a sentence when it could not be had,
+    /// including on every machine without an NPU Zyris can use.
+    pub async fn fetch_npu(&self) -> Result<view::VoiceView, String> {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.fetch_npu().await?;
+            return Ok(self.look().await);
+        }
+        Err(NOT_COMPILED_IN.to_string())
     }
 
     /// Download a speech model, by id. Answers `Err` with a sentence when it could not be had.

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No code: an app identity, debuggable, so that `run-as` puts a process in an app's uid and
+     SELinux domain. extractNativeLibs puts lib/arm64-v8a/*.so in the native library directory. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="cc.attacca.npugate">
+    <uses-sdk android:minSdkVersion="31" android:targetSdkVersion="36" />
+    <application android:hasCode="false" android:debuggable="true" android:extractNativeLibs="true" android:label="npugate">
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
+    </application>
+</manifest>

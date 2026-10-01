@@ -474,6 +474,16 @@ pub async fn fetch_speech_model(
     Ok(voice_screen(voice.fetch_model(id).await?, &hotkey))
 }
 
+/// Download the NPU bundle of the phone this runs on. A computer has none, and `Err` says so;
+/// the screen only offers it where the view lists an NPU.
+#[tauri::command]
+pub async fn fetch_npu_model(
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.fetch_npu().await?, &hotkey))
+}
+
 /// Download the voice that reads answers aloud.
 ///
 /// Sixteen files and about 401 MB, so it takes minutes and the screen says what it is doing.

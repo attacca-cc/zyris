@@ -37,6 +37,9 @@ fn main() {
     }
     println!("cargo::rerun-if-env-changed=ZYRIS_ALLOW_NATIVE_WHISPER");
 
+    #[cfg(feature = "npu")]
+    litert::bind();
+
     // No whisper in this build, so nothing to bake anything into.
     if std::env::var_os("CARGO_FEATURE_VOICE").is_none() {
         return;
@@ -84,5 +87,35 @@ fn main() {
              `cargo clean --release -p whisper-rs-sys`: it does not rebuild on its own.",
             missing.join(", ") + if missing.len() == 1 { " is" } else { " are" }
         );
+    }
+}
+
+/// LiteRT's C API for the NPU transcriber (`src/litert.rs`): bound only for Android, and loaded at
+/// run time (`dynamic_library_name`), so the app never links libLiteRt.so and keeps minSdk 26.
+#[cfg(feature = "npu")]
+mod litert {
+    pub fn bind() {
+        println!("cargo::rerun-if-changed=litert/include");
+        if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
+            return;
+        }
+        let include = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("litert/include");
+        let header = |name: &str| include.join("litert/c").join(name).to_string_lossy().into_owned();
+        bindgen::Builder::default()
+            .header(header("litert_compiled_model.h"))
+            .header(header("litert_environment.h"))
+            .header(header("litert_model.h"))
+            .header(header("litert_options.h"))
+            .header(header("litert_tensor_buffer.h"))
+            .clang_arg(format!("-I{}", include.display()))
+            .allowlist_function("LiteRt.*")
+            .allowlist_type("LiteRt.*")
+            .allowlist_var("kLiteRt.*")
+            .prepend_enum_name(false)
+            .dynamic_library_name("LiteRtLib")
+            .generate()
+            .expect("LiteRT's C headers bind")
+            .write_to_file(std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("litert.rs"))
+            .expect("the bindings are written");
     }
 }
