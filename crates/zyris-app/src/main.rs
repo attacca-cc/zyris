@@ -149,6 +149,17 @@ fn main() -> anyhow::Result<()> {
 
     let mode = cli.mode();
 
+    // **What shape this build has, before anything is built from it.** Tauri creates every window
+    // a config declares before `setup` runs and none that it does not, so a build whose config
+    // declares none — Lite: `crates/zyris-app/tauri.lite.conf.json`, built without the `voice`
+    // feature — is a tray with nothing behind it. Read here, from the config itself, because two
+    // decisions below depend on it and neither can reach Tauri: whether there is a screen to ask
+    // about a peer's fingerprint on, and whether anything will put a window on that screen at
+    // all. `generate_context!` embeds the frontend, so this is the one call and `gui::run` is
+    // handed the value rather than building a second one.
+    let context = gui::context();
+    let windowed = gui::has_a_window(context.config());
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| "zyris=info".into()),
@@ -285,8 +296,14 @@ fn main() -> anyhow::Result<()> {
     // `block_on` rather than an async main: the GUI runtime owns the main thread synchronously,
     // and the endpoint's background work keeps running on the runtime's worker threads after
     // this returns.
-    let transfers = match runtime.block_on(bind_transfers(mode, &data, root.clone(), &pending, &bus))
-    {
+    let transfers = match runtime.block_on(bind_transfers(
+        mode,
+        windowed,
+        &data,
+        root.clone(),
+        &pending,
+        &bus,
+    )) {
         Ok(transfers) => Some(transfers),
         // How loudly this is said depends on *why* it failed, which is why it is not one line
         // here. See `report_no_peer_identity`.
@@ -496,6 +513,9 @@ fn main() -> anyhow::Result<()> {
             cli.server().map(str::to_string),
             // The console's state file, started by `setup` the moment the lock is settled.
             watch,
+            // The config this build was compiled with — the same value `windowed` above was read
+            // from. Passed rather than rebuilt, because `generate_context!` embeds the frontend.
+            context,
         ),
     }
 }
@@ -559,12 +579,14 @@ fn report_no_peer_identity(error: &anyhow::Error) {
 /// [`report_no_peer_identity`] rather than this swallowing it.
 async fn bind_transfers(
     mode: cli::Mode,
+    // Whether this build has a window at all — the one thing [`peer_confirmer`] does with it.
+    windowed: bool,
     data: &std::path::Path,
     root: std::path::PathBuf,
     pending: &confirm::Pending,
     bus: &EventBus,
 ) -> anyhow::Result<zyris_tools::Transfers> {
-    zyris_tools::Transfers::bind(data, root, peer_confirmer(mode, pending, bus)).await
+    zyris_tools::Transfers::bind(data, root, peer_confirmer(mode, windowed, pending, bus)).await
 }
 
 /// Who answers when this machine is about to **send** a file to a peer it has never pinned.
@@ -597,11 +619,20 @@ async fn bind_transfers(
 /// answered a minute ago must not be handed to every window that opens afterwards.
 fn peer_confirmer(
     mode: cli::Mode,
+    // Whether this build declares a window at all. **Not the same question as `mode`**: a Lite
+    // build is a tray with no window at all, where `--minimized` and no flag are one run.
+    windowed: bool,
     pending: &confirm::Pending,
     bus: &EventBus,
 ) -> std::sync::Arc<dyn zyris_tools::PeerConfirmer> {
     match mode {
         cli::Mode::Headless => std::sync::Arc::new(zyris_tools::DenyUnknown),
+        // **A build with no window has nobody to ask either.** `DenyUnknown` for the reason the
+        // headless arm gives, and for one more: the windowed confirmer would park the question in
+        // a slot no screen can read and hold an agent's `send_to` for the whole three quarters of
+        // a minute before refusing it anyway. What a person does on such a machine is `zyris
+        // login` and the tray menu; approving a peer's fingerprint is not on the list.
+        _ if !windowed => std::sync::Arc::new(zyris_tools::DenyUnknown),
         cli::Mode::Window | cli::Mode::WindowHidden => {
             let bus = bus.clone();
             std::sync::Arc::new(confirm::WindowConfirmer::new(
@@ -628,7 +659,7 @@ mod tests {
         let pending = confirm::Pending::new();
         let mut watching = bus.subscribe();
 
-        let confirmer = peer_confirmer(cli::Mode::Headless, &pending, &bus);
+        let confirmer = peer_confirmer(cli::Mode::Headless, true, &pending, &bus);
         let answer = tokio::time::timeout(
             std::time::Duration::from_secs(1),
             confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
@@ -654,7 +685,7 @@ mod tests {
         let pending = confirm::Pending::new();
         let mut watching = bus.subscribe();
 
-        let confirmer = peer_confirmer(cli::Mode::WindowHidden, &pending, &bus);
+        let confirmer = peer_confirmer(cli::Mode::WindowHidden, true, &pending, &bus);
         let asked = tokio::spawn(async move { confirmer.confirm("kitchen-pi", FINGERPRINT).await });
 
         let published = tokio::time::timeout(std::time::Duration::from_secs(1), watching.recv())
@@ -692,6 +723,7 @@ mod tests {
 
         let transfers = bind_transfers(
             cli::Mode::WindowHidden,
+            true,
             data.path(),
             root.path().to_path_buf(),
             &pending,
@@ -739,6 +771,7 @@ mod tests {
 
         let transfers = bind_transfers(
             cli::Mode::Headless,
+            true,
             data.path(),
             root.path().to_path_buf(),
             &pending,
@@ -756,6 +789,31 @@ mod tests {
 
         assert!(!answer, "nobody is there, so nothing may be approved");
         assert!(pending.question().is_none(), "headless must not park a question anywhere");
+    }
+
+    #[tokio::test]
+    async fn a_build_with_no_window_refuses_an_unknown_peer_without_asking_anybody() {
+        // **The Lite arm.** Its config declares no window, so a fingerprint has no screen to be
+        // read on and `main` gives file transfer the same immediate no a `--headless` run gives.
+        // The alternative — the windowed confirmer — parks the question in a slot nothing can
+        // reach and holds the agent for the full deadline before refusing it regardless.
+        let bus = EventBus::new(8);
+        let pending = confirm::Pending::new();
+        let mut watching = bus.subscribe();
+
+        // `Window`, not `Headless`: this is a run that asked for the app, in a build that has no
+        // window to give it. That is the pair the whole arm exists for.
+        let confirmer = peer_confirmer(cli::Mode::Window, false, &pending, &bus);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            confirmer.confirm("kitchen-pi", "9F2A 41C7 0E83 BB15 6D04 A97E 22C1 5FB8"),
+        )
+        .await
+        .expect("a build with no window has to answer at once rather than wait for a screen");
+
+        assert!(!answer, "nobody can be asked, so nothing may be approved");
+        assert!(pending.question().is_none(), "there is no screen to park a question on");
+        assert!(watching.try_recv().is_err(), "and no window to publish it to");
     }
 
     #[test]

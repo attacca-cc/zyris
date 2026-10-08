@@ -106,6 +106,65 @@ jobs:
 
       - run: cargo test --workspace
 
+      # **The Lite axis is a file, and nothing above reads it.** `cargo test --workspace`
+      # compiles the app with no features but with `tauri.conf.json` — the config that declares a
+      # window — so a window left in `tauri.lite.conf.json`, or a key spelled wrong in it, is
+      # invisible here and first seen by a release build, which is the wrong place to see it.
+      # `tauri build --no-bundle` goes through the same `tauri_build` a release does, with the
+      # merged config, and stops before the bundler: it is the compile, and nothing else.
+      #
+      # **Linux only.** The release matrix builds Lite on all three platforms; what this step is
+      # for is that a pull request cannot merge past a broken Lite config, and one platform
+      # proves that. macOS and Windows are covered by the jobs those runners already have.
+      - name: Build the Lite config
+        if: runner.os == 'Linux'
+        run: pnpm tauri build --no-bundle --features custom-protocol --config crates/zyris-app/tauri.lite.conf.json
+
+      # **And then run it, which is the only way any of this is known.** The step above proves the
+      # Lite config compiles; it says nothing about the three things a Lite build is for, none of
+      # which a compiler can see: that nothing is ever put on the screen, that the tray comes up
+      # anyway, and that the machine still announces what it can do. All three are in the log,
+      # which is why this is a smoke test rather than a hand-check somebody has to remember.
+      #
+      # `--server` points it at an address nothing answers on, so it dials, fails, and retries
+      # without touching a real account — the instance it names is its own, with its own lock, its
+      # own data directory and its own credential file. `dbus-run-session` is not decoration: the
+      # tray is an appindicator, which speaks D-Bus, and on a session with no bus the tray is the
+      # thing that fails. Xvfb is a real X server, so `input` and `screen_capture` are announced
+      # here exactly as they are on a desktop.
+      - name: Run the Lite build (no window, a tray, capabilities announced)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils dbus-x11
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          sleep 3
+          # `timeout` is what ends it: a node that is working is a node that never returns.
+          set +e
+          DISPLAY=:99 RUST_LOG=info dbus-run-session -- timeout 25 \
+            target/release/zyris --server wss://127.0.0.1:1/ws > /tmp/lite.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/lite.log
+          # 124 is `timeout` killing something that was still running, which is the pass.
+          if [ "$status" != 124 ]; then
+            echo "the Lite build ended by itself after the start (exit $status); a node that is up does not" >&2
+            exit 1
+          fi
+          grep -q "this build has no window at all" /tmp/lite.log
+          # And it must not be a windowed run: that line is the ordinary build's.
+          if grep -q "running with a window" /tmp/lite.log; then
+            echo "a window was created in a build whose config declares none" >&2
+            exit 1
+          fi
+          grep -q "tools are announced" /tmp/lite.log
+          grep -q "file_io" /tmp/lite.log
+          # What it can do has to reach Attacca, not only the log: `announce` is the line the core
+          # prints as the node's capability list goes out.
+          grep -q "announce" /tmp/lite.log
+          echo "Lite: no window, tray built, capabilities announced"
+
       - name: Point bindgen at libclang
         if: runner.os == 'Windows'
         shell: pwsh

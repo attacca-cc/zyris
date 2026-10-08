@@ -78,6 +78,29 @@ use crate::confirm::Pending;
 use crate::hotkey::Hotkey;
 use crate::{bridge, hotkey, tray, update};
 
+/// The config this build was compiled with, and the first thing `main` asks of it.
+///
+/// **What shape this build has is the config, and not a flag or a `#[cfg]`.** Tauri builds every
+/// window a config declares *before* `setup` runs and none that it does not, so an empty
+/// `app.windows` — the whole of `tauri.lite.conf.json` — is what makes a Lite process a tray with
+/// nothing behind it. The feature side is the other half and is not here at all: a Lite build is
+/// this file's config plus the absence of `voice` on the command line, which is why nothing in
+/// this crate may ask whether the audio stack is compiled in.
+///
+/// `generate_context!` embeds the frontend, so it is called once, in `main`, and carried in here.
+pub fn context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
+/// Whether a config declares a window at all.
+///
+/// Two callers need the same answer — `main`, for the peer confirmer, and this module, for
+/// showing, raising and styling — and neither may work it out from [`Mode`]: `--minimized` is a
+/// window that is not shown, while Lite is a build with no window to show.
+pub fn has_a_window(config: &tauri::Config) -> bool {
+    !config.app.windows.is_empty()
+}
+
 pub fn run(
     bus: EventBus,
     runtime: tokio::runtime::Handle,
@@ -121,9 +144,24 @@ pub fn run(
     // The console's report on this run — `zyris status`, `down` and `login` read it. Started in
     // `setup` below, once this process knows whether it is the one holding the instance lock.
     watch: crate::console::state::Watcher,
+    // The config this build was compiled with, from [`context`] — the same value `.build()` below
+    // takes, and the only thing in this process that says whether it declares a window. `main`
+    // read the same answer, for its peer confirmer, from the same value.
+    context: tauri::Context<tauri::Wry>,
 ) -> anyhow::Result<()> {
     let dev_server = server.is_some();
-    tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
+    // **Said out loud before anything acts on it.** A Lite build declares no window, so this and
+    // `mode` disagree there — a bare `zyris` in a windowless build is `Mode::Window` with nothing
+    // to put on a screen — and everything below that is about a surface asks this instead.
+    let windowed = has_a_window(context.config());
+    if windowed {
+        tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
+    } else {
+        tracing::info!(
+            "this build has no window at all: it runs from the tray icon, and `zyris login`, \
+             `zyris status` and `zyris config` are what a console does with it"
+        );
+    }
 
     // **Built here, on the main thread, before Tauri takes it over.** On Windows
     // `RegisterHotKey` posts `WM_HOTKEY` to a message-only window and only the thread that owns
@@ -305,8 +343,12 @@ pub fn run(
             update::install_update,
         ])
         .setup(move |app| {
+            // The thin dark title bar below is GTK's header bar, which belongs to a window; a
+            // build with none has nothing to style.
             #[cfg(target_os = "linux")]
-            quiet_title_bar();
+            if windowed {
+                quiet_title_bar();
+            }
 
             // Taken here, after the single-instance plugin above has already had first refusal:
             // a second GUI launch has to reach that plugin — which focuses the running window
@@ -392,7 +434,7 @@ pub fn run(
             //
             // Built in both modes, and that is the point of `--minimized`: a process started by
             // autostart with no tray is a process nobody can open Zyris on.
-            tray::build(app.handle(), &setup_runtime)?;
+            tray::build(app.handle(), &setup_runtime, windowed)?;
 
             // `tauri.conf.json` declares this window `"visible": false`, so this call is what
             // puts it on the screen. It has to be this way round: Tauri builds a
@@ -402,7 +444,18 @@ pub fn run(
             // Below the lock check on purpose. A second launch exits from that arm having shown
             // nothing, and the first process's `tauri_plugin_single_instance` callback is what
             // brings the running window forward.
-            if mode.shows_a_window() {
+            // **A build with no window has nothing to show and no screen to show it on.** The
+            // enrolment code is the one screen a person must see, and in a build with no window
+            // it is reached from a console — `zyris login` prints the same code and takes the
+            // same path through the core, and `zyris status` prints it while the node waits.
+            // The watcher in the `else` is not installed there: a task that wakes up to raise a
+            // window that does not exist is a task doing nothing twice.
+            if !windowed {
+                tracing::info!(
+                    "there is no window to put on the screen; `zyris login` is how that code is \
+                     read on this build"
+                );
+            } else if mode.shows_a_window() {
                 tray::show_main_window(app.handle());
             } else {
                 // Onboarding is the one case a hidden window cannot be left hidden through: the
@@ -475,12 +528,18 @@ pub fn run(
             // spends most of its life with no window on the screen. A question nobody is shown
             // refuses itself three quarters of a minute later, and the agent is told only that
             // the peer was not approved.
-            raise_the_window_for_a_peer_question(
-                app.handle().clone(),
-                setup_bus.clone(),
-                setup_pending.clone(),
-                &setup_runtime,
-            );
+            // **Installed only where there is a window to raise.** A build with no window has
+            // `DenyUnknown` behind `file_transfer` — see `main::peer_confirmer` — so nothing
+            // ever publishes a question for this to hear, and a watcher for a surface that does
+            // not exist is not worth keeping alive.
+            if windowed {
+                raise_the_window_for_a_peer_question(
+                    app.handle().clone(),
+                    setup_bus.clone(),
+                    setup_pending.clone(),
+                    &setup_runtime,
+                );
+            }
             // Published only now that the bridge above is already subscribed — publishing
             // earlier is a silent no-op, since `broadcast` never replays a send to a later
             // subscriber. Do not move this back above the bridge.
@@ -499,7 +558,7 @@ pub fn run(
                 tracing::info!("window hidden; the node keeps running");
             }
         })
-        .build(tauri::generate_context!())?;
+        .build(context)?;
 
     app.run(move |_app, event| match event {
         // `code: None` means the last window closed rather than someone asking to quit.
