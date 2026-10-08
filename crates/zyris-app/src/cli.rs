@@ -23,10 +23,10 @@ pub struct Cli {
 
     /// Run with no window and no tray. The node still connects and still speaks.
     ///
-    /// **Read by `zyris` on its own — the node — and by `zyris up`, which starts one in the
-    /// background.** Every other subcommand refuses it rather than ignoring it, so this shows in
-    /// their help only because the flags are parsed beside any command, which is what lets
-    /// `--server` be written on either side of the command.
+    /// Read by `zyris` on its own — the node — and by `zyris up`, which starts one in the
+    /// background. Every other subcommand refuses it rather than ignoring it; it shows in their
+    /// help only because the flags are parsed beside any command, which is what lets `--server`
+    /// be written on either side of the command.
     #[arg(long, global = true)]
     pub headless: bool,
 
