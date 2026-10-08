@@ -7,7 +7,16 @@ use zyris_runtime::connection::Connector;
 use zyris_runtime::{lifecycle, CoreEvent, EventBus, McpServerChange};
 
 /// Runs until interrupted. Ctrl-C is this program's decision, not the core's.
-pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
+///
+/// **Ctrl-C and `zyris down` end it the same way.** The console asks through a file in this
+/// instance's data directory rather than a signal — the reasons are in `crate::stop` — and both
+/// roads lead to the same shutdown below, so a machine stopped from a terminal and one stopped
+/// from its own console end up in the same state.
+pub async fn run(
+    bus: EventBus,
+    connector: Connector,
+    data: std::path::PathBuf,
+) -> anyhow::Result<()> {
     // Subscribed before `lifecycle::start` publishes `Started` — `broadcast` never replays a
     // send to a subscriber that shows up late, so the logging loop below has to already exist
     // when that fires. Symmetric with the GUI runtime subscribing its bridge before its own
@@ -95,7 +104,26 @@ pub async fn run(bus: EventBus, connector: Connector) -> anyhow::Result<()> {
     // has to stay responsive while it does.
     let connection = tokio::spawn(connector.run());
 
-    tokio::signal::ctrl_c().await?;
+    // **`zyris down`, reaching a run nobody is sitting at.** The same two ways out of this
+    // function, and the same shutdown for both: a request that arrived is a stop somebody asked
+    // for, and Ctrl-C is a stop somebody is standing there asking for.
+    let mut asked = crate::stop::ask_when_requested(&data, &tokio::runtime::Handle::current());
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = asked.changed() => {
+            if *asked.borrow() {
+                tracing::info!("`zyris down` asked this node to stop");
+            } else {
+                // The watcher ended without a request. Nothing can ask this node to stop from a
+                // console any more, which is worth saying; Ctrl-C still can, so this waits for it
+                // rather than taking a node down because a task inside it fell over.
+                tracing::warn!(
+                    "the stop-request watcher ended; Ctrl-C is the only way to stop this node now"
+                );
+                tokio::signal::ctrl_c().await?;
+            }
+        }
+    }
 
     tracing::info!("stopping");
     connection.abort();

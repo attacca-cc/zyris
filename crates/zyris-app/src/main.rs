@@ -13,9 +13,12 @@
 mod bridge;
 mod cli;
 mod confirm;
+mod console;
 mod gui;
 mod headless;
 mod hotkey;
+mod instance;
+mod stop;
 mod tray;
 mod update;
 
@@ -43,17 +46,107 @@ fn keep_webkit_off_dmabuf() {
     }
 }
 
+/// Give this process a console to write to, on Windows.
+///
+/// **A release build has no console at all**, and that is deliberate — `windows_subsystem =
+/// "windows"` above is what stops an installer-launched Zyris from opening a terminal beside its
+/// window (#32) — but it also means `stdout` is a handle to nothing, so every line a console
+/// command prints goes nowhere. So:
+///
+/// - **`AttachConsole(ATTACH_PARENT_PROCESS)` first, for every run.** Started from `cmd.exe`,
+///   PowerShell, or a terminal, this is the one that reaches the console that is already there.
+///   It also fixes something older than these commands: a `--headless` node started from a
+///   terminal has been writing its log into nothing since #32.
+/// - **`AllocConsole` only when this run is a console command** and there was no parent console to
+///   attach to — a command launched from a shortcut, or from Explorer. A *windowed* run never
+///   allocates one: a console window opening beside the app at every sign-in is exactly the
+///   complaint #32 was.
+/// - **And then the standard handles have to be rebound**, because `AttachConsole` does not touch
+///   them: the process's `STD_OUTPUT_HANDLE` is whatever it was created with, which for a
+///   window-subsystem binary is nothing. `SetStdHandle` to a handle on `CONOUT$` is what makes
+///   them point at the console that was just attached. It has to happen before the first
+///   `println!` — Rust's `stdout` caches the handle it finds the first time it is asked — which is
+///   why this is called between the parse and the first thing that prints.
+///
+/// **What this cannot fix from inside the process**, and the reason it is worth writing down:
+/// `cmd.exe` does not wait for a window-subsystem binary. Typing `zyris status` at a prompt
+/// therefore returns the prompt immediately and prints the answer *after* it, rather than under
+/// the command that asked for it. The output is there — that is what this function is for — but
+/// its place on the screen is the shell's decision about subsystem builds. The alternative is a
+/// second, console-subsystem executable for the commands, which is a packaging decision (two
+/// binaries to build, ship and keep in step) rather than a line of code here.
+#[cfg(windows)]
+fn attach_console(allocate: bool) {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
+    };
+
+    // SAFETY: three Win32 calls that own no memory of ours. `AttachConsole` and `SetStdHandle`
+    // answer with a status this reads and nothing else, and the handle handed to `SetStdHandle`
+    // is deliberately kept alive by `forget` below — closing it would leave the standard handle
+    // pointing at a closed object, which is worse than no handle at all.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            if !allocate {
+                return;
+            }
+            if AllocConsole().is_err() {
+                // Neither attached nor allocated: there is no console to be had, and a command
+                // that carries on writes into nothing rather than refusing to run.
+                return;
+            }
+        }
+
+        for standard in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let Ok(console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") else {
+                continue;
+            };
+            if SetStdHandle(standard, HANDLE(console.as_raw_handle())).is_ok() {
+                std::mem::forget(console);
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread there is: see its documentation.
     #[cfg(target_os = "linux")]
     keep_webkit_off_dmabuf();
 
     // Parsed before anything else touches the system. `clap` prints help or version text and
-    // exits the process by itself on `--help`/`--version`, and that has to work even while
-    // another instance holds the lock (parsing after it meant a running instance made `--help`
-    // print nothing and exit 0) and before `Identity::out_of_keychain` gets anywhere near the keychain,
-    // which can raise an unlock dialog on some platforms.
-    let cli = cli::Cli::parse();
+    // exits the process on `--help`/`--version`, and that has to work even while another instance
+    // holds the lock (parsing after it meant a running instance made `--help` print nothing and
+    // exit 0) and before `Identity::out_of_keychain` gets anywhere near the keychain, which can
+    // raise an unlock dialog on some platforms.
+    //
+    // **Parsed rather than `parse`d, and that is Windows' doing.** A release build there is a
+    // window-subsystem binary with no console, so its output has to be given one by hand — and
+    // whether this run is a console command at all is only known once it has been parsed. Nothing
+    // is printed here either way: the printing below is clap's own `exit`, which writes a usage
+    // error to stderr and `--help` to stdout, exactly as `parse` would have.
+    let parsed = cli::Cli::try_parse();
+
+    // Before anything writes a byte: a `println!` that went nowhere cannot be given back later,
+    // and Rust's `stdout` caches the handle it found the first time it was asked for one.
+    #[cfg(windows)]
+    attach_console(parsed.as_ref().map_or(true, |cli| cli.subcommand().is_some()));
+
+    let cli = match parsed {
+        Ok(cli) => cli,
+        Err(error) => error.exit(),
+    };
+
+    // A flag that has nothing to say to the command it was typed beside. Refused before the lock,
+    // the keychain or anything else, and printed the way every other wrong input to this program
+    // is; see `Cli::check`.
+    if let Err(error) = cli.check() {
+        error.exit();
+    }
+
     let mode = cli.mode();
 
     tracing_subscriber::fmt()
@@ -62,14 +155,23 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // **A console command is the whole program.** It starts no node, takes no instance lock and
+    // reads no keychain of its own (except `login`, which takes the lock deliberately), so it
+    // returns from here rather than falling into everything below — and it can therefore run
+    // while a node is running on this machine, which is the only time three of these are
+    // interesting at all.
+    if let Some(command) = cli.subcommand() {
+        return console::run(command, cli.server(), mode);
+    }
+
     // **Before the instance lock, and before anything reaches the keychain.** Turning autostart
     // on while Zyris is already running is an ordinary thing to do — it is what somebody does
     // the day after they install it — and being refused by your own running copy is not an
-    // answer. These flags do one thing and exit; neither of them starts a node.
-    //
-    // After `tracing` is up, because what they have to say is said through it.
+    // answer. These flags do one thing and exit; neither of them starts a node. `zyris autostart
+    // enable` asks for the same thing and goes through the same function, so the flag and the
+    // subcommand cannot install different things.
     if let Some(request) = cli.autostart() {
-        return run_autostart(request, cli.server());
+        return console::commands::autostart(Some(request), cli.server());
     }
 
     // Everything that names this instance on this machine — the keychain service, the instance
@@ -80,7 +182,7 @@ fn main() -> anyhow::Result<()> {
     // whose first action on a permanently refused credential is to forget the stored one — a dev
     // server answering 401 would otherwise destroy the real machine's credential.
     // Derived here, before any of the three names is used, because all three have to agree.
-    let instance = instance_name(cli.server());
+    let instance = instance::name(cli.server());
     if let Some(server) = cli.server() {
         // Said out loud, in the first lines of output: a run pointed at a local server is a run
         // whose node, tokens, lock and audit log all live somewhere other than the real
@@ -146,7 +248,7 @@ fn main() -> anyhow::Result<()> {
     // Everything this run owns on disk lives here: the audit log, this machine's peer key, the
     // ledger of peers it has pinned, and the inbox. One directory, named by the instance, so a
     // `--server` run shares none of it with the production node.
-    let data = data_dir(&instance);
+    let data = instance::data_dir(&instance);
     // Read once and shared: it is where a caller's relative paths start for `file_io` and
     // `terminal`, and the one directory `file_transfer` will read a file out of.
     let root = zyris_tools::default_root();
@@ -331,12 +433,34 @@ fn main() -> anyhow::Result<()> {
         connector = connector.with_server(server.to_string());
     }
 
+    // What a console command reads about this run — `zyris status`, `zyris down` and
+    // `zyris login` — written as the core publishes events. **Built here and started by each
+    // runtime**, because when it may start is decided by the instance lock: `main` has already
+    // taken that for a headless run, and the windowed one takes it inside `gui::run`'s `setup`.
+    // A node that is about to be refused its own lock must not leave a state file naming a pid
+    // that is on its way out.
+    let watch = console::state::Watcher::new(&bus, &data, &instance, mode, cli.server());
+
     match mode {
         // Headless is handed no `Tools`: it has no surface to move the switch from, and the
         // gate it would need is already inside every capability the connector announces. The
         // window gets one so the tray and the Tools tab can reach the same gate and the same
         // log — the same ones, not copies, because `Tools` holds handles on shared state.
-        cli::Mode::Headless => runtime.block_on(headless::run(bus, connector)),
+        cli::Mode::Headless => {
+            // The lock was taken above, before this process could do any work, so this is already
+            // the point at which this run is *the* node.
+            //
+            // **A stop request nobody answered must not stop it.** `zyris down` against a node that
+            // came back from the dead leaves its request behind — the request is consumed by
+            // whoever acts on it, and nobody ever did — and the node starting now would find it
+            // waiting and stop on the spot. Cleared only here, where holding the lock means the
+            // request is this run's to answer: the arm above exits without reaching this line,
+            // which is what keeps a second launch from clearing the request the first is about to
+            // act on.
+            stop::clear(&data);
+            watch.start(runtime.handle());
+            runtime.block_on(headless::run(bus, connector, data))
+        }
         // Both windowed modes are the same runtime; the mode goes along so `setup` knows
         // whether to put the window on the screen. The instance name goes with it too: the GUI
         // takes its lock inside `setup`, and it has to be the same name this function derived
@@ -364,111 +488,16 @@ fn main() -> anyhow::Result<()> {
             voice,
             instance,
             mode,
-            // Not the URL, only whether there was one: the window needs this to decide whether
-            // to register the single-instance plugin, and nothing else about the server.
-            cli.server().is_some(),
+            // The URL, rather than only whether there was one. The window needs to know whether
+            // `--server` was given at all — that is what decides whether it registers the
+            // single-instance plugin, which keys on the bundle identifier — and a console
+            // command reading the state file afterwards needs to know which server this run
+            // dialled, which for a development run is not the shipped one.
+            cli.server().map(str::to_string),
+            // The console's state file, started by `setup` the moment the lock is settled.
+            watch,
         ),
     }
-}
-
-/// Turn autostart on or off from the command line, and say where that left the machine.
-///
-/// The window's switch goes through the same `bridge::apply_autostart`, so a flag and a click
-/// cannot install different things or read the answer differently.
-///
-/// Everything it has to report goes through `tracing` rather than `println!`, like the rest of
-/// this program: a person running this on a server is reading the same stream either way, and
-/// `RUST_LOG` is what turns the detail up.
-fn run_autostart(request: cli::AutostartRequest, server: Option<&str>) -> anyhow::Result<()> {
-    // Both mechanisms start `<this executable> --minimized` and nothing else, so autostart
-    // installed from a `--server` run starts the *production* instance at the next logon — a
-    // different node, with different credentials, from the one this process would have been.
-    // Said rather than refused: the person may well want exactly that.
-    if server.is_some() {
-        tracing::warn!(
-            "--server is not carried into autostart: what starts at logon is this executable with --minimized, which is the default instance"
-        );
-    }
-
-    let autostart = zyris_autostart::Autostart::for_this_machine();
-    let view =
-        bridge::apply_autostart(&autostart, request == cli::AutostartRequest::Install)?;
-
-    // Read back, never assumed — the same rule the window follows.
-    match &view.state {
-        zyris_autostart::State::Enabled => tracing::info!(
-            mechanism = view.mechanism.as_deref().unwrap_or("an unnamed mechanism"),
-            "Zyris will start when you sign in",
-        ),
-        zyris_autostart::State::Disabled => {
-            tracing::info!("Zyris will not start when you sign in");
-        }
-        // Reachable after a successful call only in the strangest circumstances, and the
-        // honest thing to print when it happens.
-        zyris_autostart::State::Unsupported(reason) => {
-            tracing::warn!(%reason, "this machine cannot start Zyris by itself");
-        }
-    }
-
-    // At `warn`, because every one of these is a way the switch is weaker than "on" sounds.
-    // On Linux this line is the difference between a machine that is connected whenever it is
-    // switched on and one that is connected only while somebody is logged in to a desktop.
-    for caveat in &view.caveats {
-        tracing::warn!("{caveat}");
-    }
-
-    Ok(())
-}
-
-/// What this run calls itself on this machine: the keychain service, the instance lock's name,
-/// and the directory the audit log lands in. All three from one string, so they cannot disagree.
-///
-/// A default run is `zyris`, exactly as it has always been, so nothing about an existing install
-/// moves. A `--server` run earns a name of its own, because it is a different node: its
-/// credentials belong to that server, its calls are not this machine's real history, and it has
-/// to be able to run *beside* a production instance rather than be turned away by its lock —
-/// which is the point of the flag.
-///
-/// Naming the lock is only half of that. The other half is in `gui.rs`: `tauri-plugin-single-
-/// instance` keys on the bundle identifier rather than on this name, so a windowed `--server`
-/// run skips registering it. Both halves are needed, and neither works alone.
-///
-/// Every character that is not `[0-9A-Za-z]` is replaced, so the result is usable as a directory
-/// name, a file name and a keychain service on every platform. Two servers that differ only in
-/// punctuation collide into one name; that is chosen over hashing, because a person who finds
-/// `zyris-dev-ws---127-0-0-1-8080-zyris-v1-ws` in their data directory can tell what it is.
-fn instance_name(server: Option<&str>) -> String {
-    match server {
-        None => "zyris".to_string(),
-        Some(url) => {
-            format!("zyris-dev-{}", url.replace(|c: char| !c.is_ascii_alphanumeric(), "-"))
-        }
-    }
-}
-
-/// Where everything this run owns on disk lives: beside the other per-user state, never beside
-/// the binary. The audit log, this machine's peer key, the ledger of peers it has pinned, the
-/// inbox and the undo stash are all under here.
-///
-/// Scoped by the instance for the same reason the keychain is — a `--server` run must not append
-/// its calls to the production machine's history, nor read that history back as its own, nor
-/// answer to the production machine's peer identity.
-///
-/// The fallbacks mirror `SecretStore`'s, and for the same reason — the current directory is `/`
-/// under a systemd unit and whatever a shortcut set for a desktop launch, so anything written
-/// there lands somewhere different every launch. The last resort is a directory rather than a
-/// prefixed file name, because there is now more than one file to put in it.
-fn data_dir(instance: &str) -> std::path::PathBuf {
-    if let Some(dirs) = directories::ProjectDirs::from("cc", "attacca", instance) {
-        return dirs.data_dir().to_path_buf();
-    }
-    if let Some(dirs) = directories::BaseDirs::new() {
-        return dirs.home_dir().join(format!(".{instance}"));
-    }
-    // No directory the platform can name. `AuditLog` survives a path it cannot write — it says
-    // so in the process log and never fails a tool call — so an absolute, OS-chosen path is a
-    // better last resort than refusing to start.
-    std::env::temp_dir().join(instance)
 }
 
 /// Says why this machine has no peer identity, at a level that matches what actually went wrong.
@@ -730,55 +759,22 @@ mod tests {
     }
 
     #[test]
-    fn the_default_instance_keeps_the_name_an_existing_install_already_uses() {
-        // This exact string is the keychain service, the lock's name and the audit directory on
-        // every machine already running Zyris. Changing it orphans their stored credentials and
-        // enrols the machine again on the next launch.
-        assert_eq!(instance_name(None), "zyris");
-    }
+    fn a_headless_run_takes_the_lock_before_it_starts_anything_else() {
+        // The order this file arranges and a console command depends on: `zyris up` waits for the
+        // lock to be taken, and a run that took it after its keychain or its MCP servers would be
+        // one `up` could call failed while it was still starting.
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .expect("main.rs is readable from its own crate");
 
-    #[test]
-    fn a_server_run_is_a_different_instance_from_the_default_one() {
-        // Otherwise a development run reads and writes the production credential — and a dev
-        // server that refuses it makes this app forget it.
-        assert_ne!(
-            instance_name(None),
-            instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws"))
-        );
-    }
-
-    #[test]
-    fn two_servers_are_two_instances() {
-        assert_ne!(
-            instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws")),
-            instance_name(Some("ws://127.0.0.1:9090/zyris/v1/ws"))
-        );
-    }
-
-    #[test]
-    fn each_instance_reads_its_own_mcp_server_list() {
-        // The list of MCP servers is per-instance like everything else this run owns, and for the
-        // same reason: a `--server` run must not start the production machine's servers and
-        // announce them to a development server, nor the other way round. `Config::path` takes a
-        // directory rather than finding one so that this is decided once, where the instance is.
-        let production = zyris_mcp::Config::path(&data_dir(&instance_name(None)));
-        let development = zyris_mcp::Config::path(&data_dir(&instance_name(Some(
-            "ws://127.0.0.1:8080/zyris/v1/ws",
-        ))));
-
-        assert_ne!(production, development);
-        // And it lands beside the rest of that instance's state rather than beside the binary or
-        // in whatever directory Zyris happened to be started from.
-        assert_eq!(production.parent().unwrap(), data_dir("zyris"));
-    }
-
-    #[test]
-    fn an_instance_name_is_safe_as_a_file_name_and_as_a_keychain_service() {
-        let name = instance_name(Some("ws://127.0.0.1:8080/zyris/v1/ws"));
-
+        let lock = source.find("InstanceLock::acquire(&instance)").expect("the lock is taken");
+        let servers = source
+            .find("zyris_mcp::config::start")
+            .expect("the MCP servers are started");
         assert!(
-            name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
-            "a name carrying a path separator would land the log somewhere else entirely: {name}"
+            lock < servers,
+            "the instance lock has to be taken before anything this run owns is started"
         );
     }
 }
