@@ -22,6 +22,11 @@ pub struct Cli {
     command: Option<Command>,
 
     /// Run with no window and no tray. The node still connects and still speaks.
+    ///
+    /// **Read by `zyris` on its own — the node — and by `zyris up`, which starts one in the
+    /// background.** Every other subcommand refuses it rather than ignoring it, so this shows in
+    /// their help only because the flags are parsed beside any command, which is what lets
+    /// `--server` be written on either side of the command.
     #[arg(long, global = true)]
     pub headless: bool,
 
@@ -29,7 +34,8 @@ pub struct Cli {
     /// autostart installs: a window that opened by itself at every sign-in is a window nobody
     /// asked for, and a process with no tray at all is one nobody can reach.
     ///
-    /// Refused beside `--headless`, which has no window to hide.
+    /// Refused beside `--headless`, which has no window to hide. Read by the same two forms
+    /// `--headless` is — `zyris` on its own, and `zyris up`.
     #[arg(long, global = true, conflicts_with = "headless")]
     pub minimized: bool,
 
