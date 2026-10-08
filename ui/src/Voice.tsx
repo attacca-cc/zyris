@@ -132,11 +132,18 @@ type VoiceModelView =
 // `view::ComputeView`: where each model can run and where it does. Two lists because whisper can
 // be pointed at any one GPU and the voice only at "the GPU".
 type ComputeOption = { id: string; name: string };
+// `view::NpuView`: a phone's NPU, when its SoC has a bundle; `null` on every other machine.
+type Npu = {
+  soc: string;
+  bytes: number;
+  state: { state: "absent" | "downloading" | "ready" } | { state: "unavailable"; reason: string };
+};
 type Compute = {
   transcribe: ComputeOption[];
   transcribeOn: string;
   speak: ComputeOption[];
   speakOn: string;
+  npu?: Npu | null;
 };
 
 // `view::SpeechModelView`: one speech model on offer, and what is in the cache for it.
@@ -1134,6 +1141,14 @@ export function Voice() {
               computer's graphics cards here.
             </Note>
           )}
+          {voice.compute.transcribeOn === "npu" && voice.compute.npu && (
+            <NpuStatus
+              npu={voice.compute.npu}
+              busy={isBusy("npu")}
+              onFetch={() => act("npu", "fetch_npu_model", {})}
+            />
+          )}
+          {refused.npu && <Problem>{refused.npu}</Problem>}
           {refused.compute && <Problem>{refused.compute}</Problem>}
         </Section>
       )}
@@ -1172,6 +1187,30 @@ function WakePhrase({ phrase, busy, onSave }: { phrase: string; busy: boolean; o
       </Button>
     </form>
   );
+}
+
+// The NPU once it is chosen: its download while the bundle is not on the phone, and the reason it
+// is not in use when loading it failed. While it downloads, the loading bar above says so.
+function NpuStatus({ npu, busy, onFetch }: { npu: Npu; busy: boolean; onFetch: () => void }) {
+  if (npu.state.state === "absent") {
+    return (
+      <div className="flex flex-col items-start gap-2">
+        <Note>Transcribing on the NPU needs its model for this phone first.</Note>
+        <Button size="sm" variant="outline" disabled={busy} onClick={onFetch}>
+          Download for the NPU ({Math.round(npu.bytes / 1e6)} MB)
+        </Button>
+      </div>
+    );
+  }
+  if (npu.state.state === "unavailable") {
+    return (
+      <>
+        <Problem>{npu.state.reason}</Problem>
+        <Note>Transcribing on the processor instead.</Note>
+      </>
+    );
+  }
+  return null;
 }
 
 // What the bar says while models download, with how far along they are together.

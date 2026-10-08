@@ -148,6 +148,17 @@ optional = true
 # enables this feature and cargo still builds nothing, because the dependency is declared for
 # `cfg(windows)` only. That is what lets `win_aec.rs` sit behind plain `voice` rather than
 # behind `aec` — see the feature list below for why those are not the same thing.
+# LiteRT, loaded at run time by the NPU transcriber (`litert.rs`), so the app never links it.
+# Binds LiteRT's C headers for the NPU transcriber (`build.rs`, Android with `npu`). Already in the
+# tree through whisper-rs-sys.
+[build-dependencies.bindgen]
+version = "0.72.1"
+optional = true
+
+[target.'cfg(target_os = "android")'.dependencies.libloading]
+version = "0.8"
+optional = true
+
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 optional = true
@@ -219,6 +230,9 @@ voice = [
     "dep:windows-core",
     "tokio/rt",
 ]
+
+# Whisper on a phone's NPU through LiteRT (`npu.rs`, `litert.rs`). Android only; forwards `voice`.
+npu = ["voice", "dep:libloading", "dep:bindgen"]
 
 # Echo cancellation, so the microphone can stay open while Zyris is speaking.
 #

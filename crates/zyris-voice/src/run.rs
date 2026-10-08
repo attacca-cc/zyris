@@ -116,7 +116,8 @@ pub struct Settings {
     /// is [`stt::default_device`].
     #[serde(default)]
     pub transcribe_on: Option<String>,
-    /// Where answers are read: `cpu` or `gpu`. `None` is the GPU in a build that has one.
+    /// Where answers are read: `cpu`, `gpu` or `npu`. `None` is the NPU on a phone that has one,
+    /// else the GPU in a build that has one.
     #[serde(default)]
     pub speak_on: Option<String>,
     /// Whether answers are read aloud while listening is on. **`None` is on**, so that every
@@ -126,7 +127,11 @@ pub struct Settings {
 }
 
 /// Where the models can run and where these settings put them, as the Voice tab lists them.
-fn compute_view(settings: &Settings) -> crate::view::ComputeView {
+fn compute_view(
+    settings: &Settings,
+    npu: Option<crate::view::NpuView>,
+    speak_npu_off: Option<String>,
+) -> crate::view::ComputeView {
     use crate::view::ComputeOption;
     let devices = stt::devices();
     let processor = devices.first().map_or("Processor".to_string(), |cpu| cpu.name.clone());
@@ -142,8 +147,13 @@ fn compute_view(settings: &Settings) -> crate::view::ComputeView {
                     d.name,
                     if d.integrated { " (integrated)" } else { "" }
                 ),
+                stt::Device::Npu => format!("NPU — {}", d.name),
             },
         })
+        .chain(npu.as_ref().map(|npu| ComputeOption {
+            id: stt::Device::Npu.id(),
+            name: format!("NPU — Qualcomm {} (whisper-small)", npu.soc),
+        }))
         .collect();
     let mut speak = vec![ComputeOption { id: "cpu".into(), name: format!("Processor — {processor}") }];
     if crate::tts::GPU_BUILT_IN {
@@ -152,22 +162,76 @@ fn compute_view(settings: &Settings) -> crate::view::ComputeView {
             name: "GPU — whichever the graphics driver calls the fastest".into(),
         });
     }
+    if let Some(npu) = &npu {
+        // Why it is not reading, in the option's own name: the list is the one place that says
+        // where answers are read, and it needs no new part of the window to say it.
+        let off = speak_npu_off.map(|reason| format!(" — not in use: {reason}")).unwrap_or_default();
+        speak.push(ComputeOption { id: "npu".into(), name: format!("NPU — Qualcomm {}{off}", npu.soc) });
+    }
+    let speaking = speak_on(settings, npu.is_some());
     crate::view::ComputeView {
         transcribe,
         transcribe_on: transcribe_on(settings).id(),
         speak,
-        speak_on: if speak_on_gpu(settings) { "gpu" } else { "cpu" }.into(),
+        speak_on: match speaking {
+            SpeakOn::Cpu => "cpu",
+            SpeakOn::Gpu => "gpu",
+            SpeakOn::Npu => "npu",
+        }
+        .into(),
+        npu,
     }
 }
 
 /// Where this run transcribes.
-fn transcribe_on(settings: &Settings) -> stt::Device {
-    settings.transcribe_on.as_deref().and_then(stt::Device::from_id).unwrap_or_else(stt::default_device)
+/// The download id the NPU bundle's progress is kept under.
+const NPU_DOWNLOAD: &str = "npu";
+
+/// Load the NPU transcriber from a bundle directory: LiteRT on Android with `npu`, nowhere else.
+fn npu_load(dir: &Path) -> Result<crate::onnx_stt::OnnxStt, stt::Fault> {
+    #[cfg(all(feature = "npu", target_os = "android"))]
+    return crate::npu::load(dir);
+    #[cfg(not(all(feature = "npu", target_os = "android")))]
+    {
+        let _ = dir;
+        Err(stt::Fault::Whisper { detail: "this build has no NPU support".into() })
+    }
 }
 
-/// Whether this run reads answers on the GPU.
-fn speak_on_gpu(settings: &Settings) -> bool {
-    crate::tts::GPU_BUILT_IN && settings.speak_on.as_deref() != Some("cpu")
+fn transcribe_on(settings: &Settings) -> stt::Device {
+    settings
+        .transcribe_on
+        .as_deref()
+        .and_then(stt::Device::from_id)
+        // `npu` only where there is one: a file copied from a phone, or a bundle gone, is today's default.
+        .filter(|device| *device != stt::Device::Npu || crate::npu::probe().is_some())
+        .unwrap_or_else(stt::default_device)
+}
+
+/// Where answers are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpeakOn {
+    Cpu,
+    Gpu,
+    Npu,
+}
+
+/// Where this run reads answers: what the settings chose, if this machine has it; otherwise the
+/// NPU on a phone that has one, the GPU in a build that has one, and the processor.
+fn speak_on(settings: &Settings, npu: bool) -> SpeakOn {
+    let fallback = if npu {
+        SpeakOn::Npu
+    } else if crate::tts::GPU_BUILT_IN {
+        SpeakOn::Gpu
+    } else {
+        SpeakOn::Cpu
+    };
+    match settings.speak_on.as_deref() {
+        Some("cpu") => SpeakOn::Cpu,
+        Some("npu") if npu => SpeakOn::Npu,
+        Some("gpu") if crate::tts::GPU_BUILT_IN => SpeakOn::Gpu,
+        _ => fallback,
+    }
 }
 
 /// The speech model these settings choose, for the device they transcribe on.
@@ -181,24 +245,19 @@ fn chosen_model(settings: &Settings) -> &'static stt::Choosable {
 /// syllable or two in Korean; 1.6 lost whole phrases. The screen offers up to 1.4.
 pub const DEFAULT_SPEAKING_RATE: f32 = 1.25;
 
-/// Send what somebody typed, with `note` in front of it, and trace the outcome.
+/// Send what somebody typed and trace the outcome.
 ///
 /// Apart from [`Engine::send_text`] so that a test can hand it a conversation that is not a feed.
 async fn send_typed(
     conversation: &dyn crate::session::Says,
     traces: &broadcast::Sender<crate::Trace>,
-    note: Option<String>,
     text: String,
 ) -> Result<(), String> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("there is nothing to send".to_string());
     }
-    let message = match note {
-        Some(note) => format!("{note}\n\n{text}"),
-        None => text.clone(),
-    };
-    match conversation.say(message).await {
+    match conversation.say(text.clone()).await {
         Ok(()) => {
             let _ = traces.send(crate::Trace::Sent { text });
             Ok(())
@@ -268,8 +327,12 @@ pub struct Engine {
     /// Whisper models already in memory, by path. Reopening a microphone or a speaker used to
     /// load and warm them again, which is seconds per model and most of a restart.
     loaded: std::sync::Mutex<Vec<(PathBuf, stt::Device, Arc<stt::Stt>)>>,
+    /// The phone's NPU transcriber, loaded and warmed up once (`crate::npu`).
+    npu: std::sync::Mutex<Option<Arc<dyn crate::session::Transcribe>>>,
+    /// Whether that load failed on this run, and why: tried once per run.
+    npu_warm: Arc<crate::npu::WarmUp>,
     /// The voice, loaded once per place it runs: the same directory and voice on every start.
-    voice: std::sync::Mutex<Option<(bool, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
+    voice: std::sync::Mutex<Option<(SpeakOn, Arc<std::sync::Mutex<crate::tts::Tts>>)>>,
     /// Whether the takes have been read against the phrase yet. Once per run: it only logs.
     takes_checked: std::sync::atomic::AtomicBool,
     /// The one reader of the answer stream, whether or not anything is listening. See
@@ -340,6 +403,8 @@ impl Engine {
             live: Mutex::new(Live { settings, state: ListeningState::Off, running: None }),
             downloads: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             loaded: std::sync::Mutex::new(Vec::new()),
+            npu: std::sync::Mutex::new(None),
+            npu_warm: Arc::new(crate::npu::WarmUp::default()),
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
             input_gain: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(gain.to_bits())),
@@ -555,7 +620,13 @@ impl Engine {
             read_aloud: read_aloud(settings),
             volume: volume(settings),
             input_gain: input_gain(settings),
-            compute: compute_view(settings),
+            compute: compute_view(
+                settings,
+                self.npu_view(),
+                // `try_lock`: the voice is held for the whole of a sentence while it is being
+                // read, and the screen must not wait on that. Busy is not off.
+                lock(&self.voice).as_ref().and_then(|(_, tts)| tts.try_lock().ok()?.npu_off()),
+            ),
             model: model_view(stt::state(&chosen_model(settings).model)),
             models: {
                 let chosen = chosen_model(settings).id;
@@ -680,17 +751,15 @@ impl Engine {
 
     /// Send a typed message to the session, as though it had been said.
     ///
-    /// **The same message a spoken turn would send**: a note an interruption left goes in front
-    /// of it, once. It does not interrupt anything itself — a cancel sent now could land after
+    /// **The same message a spoken turn would send.** It does not interrupt anything itself — a cancel sent now could land after
     /// the message and cancel the answer to it; the Stop button is how speech is cut off.
     pub async fn send_text(&self, text: String) -> Result<(), String> {
         let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
-        let note = self.answers.speaking().and_then(|speaking| speaking.take_note());
-        send_typed(feed.as_ref(), &self.traces, note, text).await
+        send_typed(feed.as_ref(), &self.traces, text).await
     }
 
     /// Stop reading the answer, exactly as pressing the push-to-talk key would: the rest is not
-    /// read, the answer is cancelled, and the next message says where it was cut off.
+    /// read and the answer is cancelled.
     pub fn stop_speaking(&self) {
         if let Some(speaking) = self.answers.speaking() {
             speaking.interrupt();
@@ -700,8 +769,8 @@ impl Engine {
     /// Read answers aloud or not, now and at the next launch.
     ///
     /// Switching off while an answer is being read stops it where it is: somebody who reaches for
-    /// this switch wants the room quiet, not the rest of the sentence. Nothing is cancelled and no
-    /// note is left for the next message — the agent was not interrupted, only not listened to.
+    /// this switch wants the room quiet, not the rest of the sentence. Nothing is cancelled: the
+    /// agent was not interrupted, only not listened to.
     pub async fn set_read_aloud(&self, on: bool) {
         let mut live = self.live.lock().await;
         live.settings.read_aloud = Some(on);
@@ -760,7 +829,7 @@ impl Engine {
         if let Some(id) = transcribe.filter(|id| stt::Device::from_id(id).is_some()) {
             live.settings.transcribe_on = Some(id);
         }
-        if let Some(id) = speak.filter(|id| id == "cpu" || id == "gpu") {
+        if let Some(id) = speak.filter(|id| ["cpu", "gpu", "npu"].contains(&id.as_str())) {
             live.settings.speak_on = Some(id);
         }
         self.store(&live.settings);
@@ -946,20 +1015,40 @@ impl Engine {
         let choice = &settings.device;
         let typed_phrase = settings.wake_phrase.clone();
         let device = transcribe_on(settings);
-        let path = match stt::state(&chosen_model(settings).model) {
-            stt::ModelState::Ready { path, .. } => path,
-            // Everything else is the screen's business: it renders the same `ModelState` and has
-            // a button for the one case a button fixes. The sentence here is about listening.
-            other => return Err(no_model(&other)),
-        };
+        // The NPU, when chosen and it loads; whisper.cpp on the processor when it does not, with
+        // the reason on the Voice screen (`npu_view`). whisper.cpp itself never runs on the NPU.
+        let on_npu = if device == stt::Device::Npu { self.npu_transcriber().await } else { None };
+        let whisper_on = if device == stt::Device::Npu { stt::Device::Cpu } else { device };
 
         let apm = Apm::new().map_err(|fault| fault.to_string())?;
-        let stt = self.stt_at(&path, device).await?;
-        let checker = self.wake_checker(settings, &stt).await;
+        let (stt, checker): (Arc<dyn crate::session::Transcribe>, Option<Arc<stt::Stt>>) = match on_npu {
+            // **Turns and the wake word both on the NPU.** A separate checker on the processor
+            // meant two passes for "Agent, <request>": whisper.cpp Base found the phrase (2-4 s
+            // on the test phone's CPU), then the NPU wrote the whole utterance again (about 3 s);
+            // with no checker the session checks on the NPU, and a request said in one breath is
+            // already written by the model that turns use (measured on SM8550, 2026-09-30).
+            Some(npu) => (npu, None),
+            None => {
+                let path = match stt::state(&chosen_model(settings).model) {
+                    stt::ModelState::Ready { path, .. } => path,
+                    // Everything else is the screen's business: it renders the same `ModelState` and
+                    // has a button for the one case a button fixes. The sentence here is about listening.
+                    other => return Err(no_model(&other)),
+                };
+                let stt = self.stt_at(&path, whisper_on).await?;
+                let checker = self.wake_checker(settings, &stt, whisper_on).await;
+                (stt, Some(checker))
+            }
+        };
         // Only what this start uses stays in memory: a model chosen away from is let go.
-        lock(&self.loaded).retain(|(_, _, kept)| Arc::ptr_eq(kept, &stt) || Arc::ptr_eq(kept, &checker));
+        let in_use = |kept: &Arc<stt::Stt>| {
+            std::ptr::addr_eq(Arc::as_ptr(kept), Arc::as_ptr(&stt))
+                || checker.as_ref().is_some_and(|c| Arc::ptr_eq(kept, c))
+        };
+        lock(&self.loaded).retain(|(_, _, kept)| in_use(kept));
         let phrase = enrolled_phrase(typed_phrase);
         if let Some(phrase) = &phrase
+            && let Some(checker) = &checker
             && !self.takes_checked.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             // In the background: it only logs, and with a large model it took most of a minute
@@ -1011,7 +1100,9 @@ impl Engine {
             session = session.listening_for(phrase);
         }
         // Also when the wake word is off: the preview while somebody speaks runs on it.
-        session = session.checking_with(checker);
+        if let Some(checker) = checker {
+            session = session.checking_with(checker);
+        }
         Ok((
             Running { stop, session: tokio::spawn(session.run()), speaker_stop, tasks },
             device,
@@ -1026,7 +1117,7 @@ impl Engine {
     /// machine this was measured on it answers in half a second where Large v3 Turbo takes ten
     /// — ten seconds of every core for each sentence somebody says to someone else. The chosen
     /// model is kept for what matters: the request.
-    async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>) -> Arc<stt::Stt> {
+    async fn wake_checker(&self, settings: &Settings, chosen: &Arc<stt::Stt>, device: stt::Device) -> Arc<stt::Stt> {
         let named = std::env::var_os(stt::MODEL_ENV).is_some_and(|n| !n.is_empty());
         if named || chosen_model(settings).model == stt::BASE {
             return chosen.clone();
@@ -1034,7 +1125,63 @@ impl Engine {
         let stt::ModelState::Ready { path, .. } = stt::cached_state(&stt::BASE) else {
             return chosen.clone();
         };
-        self.stt_at(&path, transcribe_on(settings)).await.unwrap_or_else(|_| chosen.clone())
+        self.stt_at(&path, device).await.unwrap_or_else(|_| chosen.clone())
+    }
+
+    /// The NPU transcriber: loaded and warmed up once, and not tried again this run after a
+    /// failure. `None` when there is no NPU here, its bundle is not on disk, or it failed.
+    async fn npu_transcriber(&self) -> Option<Arc<dyn crate::session::Transcribe>> {
+        if let Some(loaded) = lock(&self.npu).clone() {
+            return Some(loaded);
+        }
+        let probe = crate::npu::probe()?;
+        let root = stt::cache_dir()?;
+        let crate::npu::BundleState::Ready { dir } = crate::npu::state(probe.bundle, &root) else {
+            return None;
+        };
+        let warm = self.npu_warm.clone();
+        let loaded = tokio::task::spawn_blocking(move || warm.try_once(|| npu_load(&dir))).await.ok()?;
+        match loaded {
+            Ok(npu) => {
+                let npu: Arc<dyn crate::session::Transcribe> = Arc::new(npu);
+                *lock(&self.npu) = Some(npu.clone());
+                Some(npu)
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "the NPU did not load; transcribing on the processor");
+                None
+            }
+        }
+    }
+
+    /// This phone's NPU, as the Voice screen shows it.
+    fn npu_view(&self) -> Option<crate::view::NpuView> {
+        use crate::view::{NpuState, NpuView};
+        let probe = crate::npu::probe()?;
+        let on_disk = stt::cache_dir().map(|root| crate::npu::state(probe.bundle, &root));
+        let state = if let Some(reason) = self.npu_warm.reason() {
+            NpuState::Unavailable { reason }
+        } else if self.downloads.lock().expect("downloads is never poisoned").contains_key(NPU_DOWNLOAD) {
+            NpuState::Downloading
+        } else {
+            match &on_disk {
+                Some(crate::npu::BundleState::Ready { .. }) => NpuState::Ready,
+                _ => NpuState::Absent,
+            }
+        };
+        let bytes = on_disk.as_ref().map_or(crate::npu::total_bytes(probe.bundle), |on_disk| {
+            crate::npu::left_to_fetch(probe.bundle, on_disk)
+        });
+        Some(NpuView { soc: probe.soc, bytes, state })
+    }
+
+    /// Download this phone's NPU bundle, every file checked against its size and SHA-256.
+    pub async fn fetch_npu(&self) -> Result<(), String> {
+        let probe = crate::npu::probe().ok_or_else(|| "this device has no NPU Zyris can use".to_string())?;
+        let root = stt::cache_dir().ok_or_else(|| crate::model::Fault::NoCacheDirectory.to_string())?;
+        let fetched = crate::npu::fetch(probe.bundle, &root, |progress| self.progressed(NPU_DOWNLOAD, progress)).await;
+        self.finished(NPU_DOWNLOAD);
+        fetched.map(|_| ()).map_err(|fault| fault.to_string())
     }
 
     /// The whisper at `path`, loaded once and kept for the next start.
@@ -1079,18 +1226,25 @@ impl Engine {
             crate::tts::VoiceState::Unreadable { detail, .. } => return Err(detail),
             crate::tts::VoiceState::Nowhere { reason } => return Err(reason),
         };
-        let gpu = speak_on_gpu(settings);
-        let cached = lock(&self.voice).clone().filter(|(on, _)| *on == gpu).map(|(_, tts)| tts);
+        let on = speak_on(settings, crate::npu::probe().is_some());
+        let cached = lock(&self.voice).clone().filter(|(was, _)| *was == on).map(|(_, tts)| tts);
         let tts = match cached {
             Some(tts) => tts,
             None => {
                 let voice = crate::tts::DEFAULT_VOICE;
-                let tts = tokio::task::spawn_blocking(move || crate::tts::Tts::load_on(&dir, voice, gpu))
-                    .await
-                    .map_err(|_| "loading the voice stopped before it finished".to_string())?
-                    .map_err(|fault| fault.to_string())?;
+                let models = dir.clone();
+                let mut tts = tokio::task::spawn_blocking(move || {
+                    crate::tts::Tts::load_on(&dir, voice, on == SpeakOn::Gpu)
+                })
+                .await
+                .map_err(|_| "loading the voice stopped before it finished".to_string())?
+                .map_err(|fault| fault.to_string())?;
+                // The processor reads until the NPU's buckets are ready; see `crate::tts_npu`.
+                if let (SpeakOn::Npu, Some(cache)) = (on, stt::cache_dir()) {
+                    tts.with_npu(crate::tts_npu::NpuVoice::start(models, cache));
+                }
                 let tts = Arc::new(std::sync::Mutex::new(tts));
-                *lock(&self.voice) = Some((gpu, tts.clone()));
+                *lock(&self.voice) = Some((on, tts.clone()));
                 tts
             }
         };
@@ -1661,7 +1815,41 @@ fn write_settings(path: &Path, settings: &Settings) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A `voice.json` saying `npu` on a machine with no NPU (every desktop, and a phone whose SoC
+    /// has no bundle) transcribes where it would have with nothing chosen.
+    #[test]
+    fn npu_in_the_settings_without_an_npu_here_is_todays_default() {
+        let settings = super::Settings { transcribe_on: Some("npu".into()), ..super::Settings::default() };
+        assert!(crate::npu::probe().is_none());
+        assert_eq!(super::transcribe_on(&settings), crate::stt::default_device());
+    }
+
     use super::*;
+
+    #[test]
+    fn answers_are_read_where_the_settings_say_and_the_phone_can() {
+        let with = |on: Option<&str>| Settings { speak_on: on.map(str::to_string), ..Settings::default() };
+        assert_eq!(speak_on(&with(Some("cpu")), true), SpeakOn::Cpu, "a choice of the processor is kept");
+        assert_eq!(speak_on(&with(Some("npu")), true), SpeakOn::Npu);
+        assert_eq!(speak_on(&with(None), true), SpeakOn::Npu, "the NPU is the default where there is one");
+        let elsewhere = if crate::tts::GPU_BUILT_IN { SpeakOn::Gpu } else { SpeakOn::Cpu };
+        assert_eq!(speak_on(&with(Some("npu")), false), elsewhere, "never the NPU on a machine without one");
+        assert_eq!(speak_on(&with(None), false), elsewhere);
+    }
+
+    #[test]
+    fn the_npu_is_offered_for_reading_answers_only_where_there_is_one() {
+        let settings = Settings::default();
+        let view = compute_view(&settings, None, None);
+        assert!(view.speak.iter().all(|o| o.id != "npu"));
+        let npu = || crate::view::NpuView { soc: "SM8550".into(), bytes: 0, state: crate::view::NpuState::Ready };
+        let view = compute_view(&settings, Some(npu()), None);
+        assert!(view.speak.iter().any(|o| o.id == "npu" && o.name == "NPU — Qualcomm SM8550"));
+        assert_eq!(view.speak_on, "npu");
+        // And why, when it was chosen and is not reading.
+        let view = compute_view(&settings, Some(npu()), Some("the DSP said no".into()));
+        assert!(view.speak.iter().any(|o| o.id == "npu" && o.name.ends_with("not in use: the DSP said no")));
+    }
 
     pub(super) fn tempdir() -> PathBuf {
         // A counter as well as the clock: Windows' clock is coarse enough that two tests
@@ -1758,16 +1946,13 @@ mod tests {
         }
     }
 
-    /// A typed message carries an interruption's note exactly as a spoken one does, and the
-    /// window is told the words without it.
+    /// A typed message goes as it was typed, trimmed, with nothing put in front of it.
     #[tokio::test]
-    async fn a_typed_message_is_sent_with_the_note_in_front_and_traced_without_it() {
+    async fn a_typed_message_is_sent_as_typed() {
         let heard = Heard::default();
         let (traces, mut seen) = broadcast::channel(4);
-        send_typed(&heard, &traces, Some("You stopped me.".into()), "  Go on.  ".into())
-            .await
-            .expect("sent");
-        assert_eq!(*heard.said.lock().unwrap(), vec!["You stopped me.\n\nGo on.".to_string()]);
+        send_typed(&heard, &traces, "  Go on.  ".into()).await.expect("sent");
+        assert_eq!(*heard.said.lock().unwrap(), vec!["Go on.".to_string()]);
         assert_eq!(seen.try_recv().unwrap(), crate::Trace::Sent { text: "Go on.".into() });
     }
 
@@ -1775,7 +1960,7 @@ mod tests {
     async fn an_empty_message_is_not_sent() {
         let heard = Heard::default();
         let (traces, mut seen) = broadcast::channel(4);
-        assert!(send_typed(&heard, &traces, None, "   ".into()).await.is_err());
+        assert!(send_typed(&heard, &traces, "   ".into()).await.is_err());
         assert!(heard.said.lock().unwrap().is_empty());
         assert!(seen.try_recv().is_err(), "nothing to trace");
     }
@@ -1784,7 +1969,7 @@ mod tests {
     async fn a_message_that_did_not_arrive_says_so() {
         let heard = Heard { refuse: Some("the connection is down".into()), ..Default::default() };
         let (traces, mut seen) = broadcast::channel(4);
-        let error = send_typed(&heard, &traces, None, "Hello".into()).await.unwrap_err();
+        let error = send_typed(&heard, &traces, "Hello".into()).await.unwrap_err();
         assert!(error.contains("the connection is down"), "{error}");
         assert_eq!(
             seen.try_recv().unwrap(),

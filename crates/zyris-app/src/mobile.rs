@@ -74,6 +74,7 @@ pub fn run() {
             set_speaking_rate,
             set_speech_model,
             fetch_speech_model,
+            fetch_npu_model,
             fetch_voice_model,
             forget_speech_model,
             record_wake_take,
@@ -157,8 +158,16 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the Zyris app ended with an error");
+        .build(tauri::generate_context!())
+        .expect("the Zyris app could not be built")
+        .run(|_app, event| {
+            // Tauri would call `std::process::exit` next, and its C++ exit handlers abort in
+            // ONNX Runtime's statics on every exit. As the desktop app does: see
+            // `zyris_voice::exit_process`.
+            if let tauri::RunEvent::Exit = event {
+                zyris_voice::exit_process(0);
+            }
+        });
     drop(runtime);
 }
 
@@ -539,6 +548,12 @@ async fn set_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_jso
 #[tauri::command]
 async fn fetch_speech_model(id: String, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
     Ok(screen(voice.fetch_model(id).await?))
+}
+
+/// Download this phone's NPU bundle (about 630 MB); the screen shows its progress.
+#[tauri::command]
+async fn fetch_npu_model(voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.fetch_npu().await?))
 }
 
 #[tauri::command]

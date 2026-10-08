@@ -57,3 +57,6 @@ scripts/npu/out/
 scripts/npu/.venv/
 scripts/npu/__pycache__/
 scripts/npu/gate/*.apk
+
+# Local phone builds (scripts/android/build-phone.sh)
+/out/

@@ -636,6 +636,44 @@ describe("Voice", () => {
     );
   });
 
+  // A phone whose SoC has an NPU bundle: the option, its download, and why it is not in use.
+  function onNpu(state: { state: "absent" } | { state: "unavailable"; reason: string } | null) {
+    return machine({
+      compute: {
+        transcribe: [
+          { id: "cpu", name: "Processor — Snapdragon" },
+          { id: "npu", name: "NPU — Qualcomm SM8550 (whisper-small)" },
+        ],
+        transcribeOn: state ? "npu" : "cpu",
+        speak: [{ id: "cpu", name: "Processor — Snapdragon" }],
+        speakOn: "cpu",
+        npu: state ? { soc: "SM8550", bytes: 634_000_000, state } : null,
+      },
+    });
+  }
+
+  it("offers the NPU's download, with its size, when the NPU is chosen and not on the phone", async () => {
+    answers(onNpu({ state: "absent" }));
+    render(<Voice />);
+    fireEvent.click(await screen.findByRole("button", { name: /download for the npu \(634 mb\)/i }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("fetch_npu_model", {}));
+  });
+
+  it("says why the NPU is not in use, and what transcribes instead", async () => {
+    answers(onNpu({ state: "unavailable", reason: "LiteRT run: status 3" }));
+    render(<Voice />);
+    expect(await screen.findByText("LiteRT run: status 3")).toBeTruthy();
+    expect(screen.getByText(/transcribing on the processor instead/i)).toBeTruthy();
+  });
+
+  it("shows nothing about an NPU on a machine without one", async () => {
+    answers(onNpu(null));
+    render(<Voice />);
+    await screen.findByRole("combobox", { name: /where speech is transcribed/i });
+    expect(screen.queryByText(/\bnpu\b/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /download for the npu/i })).toBeNull();
+  });
+
   it("sets how loud answers are read when the slider is let go", async () => {
     render(<Voice />);
 
