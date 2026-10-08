@@ -76,7 +76,11 @@ request.
 - **`zyris-app` never asks `cfg!(feature = "voice")`.** The on and off builds run the same code;
   `the_app_never_asks_whether_voice_is_compiled_in.rs` checks this.
 - **whisper.cpp is built for the AVX2 set** (`.cargo/config.toml`), never for the CPU that happens
-  to build it. A release without those settings refuses to build.
+  to build it. A release without those settings refuses to build — and **every path that calls
+  into it is behind a run-time AVX2 check** (`zyris-voice`'s `cpu` module, asked once in
+  `zyris_voice::start`). A machine without AVX2 gets a Voice screen that says so, never a
+  `SIGILL` before its first window: that compiled code carries no check of its own, so the check
+  has to be ours.
 
 ### Phones and macOS
 

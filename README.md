@@ -391,9 +391,10 @@ weights and takes that licence with them.
 
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such
-machine rather than only on the one that built it; on anything older it will not start. Nothing
-else in Zyris needs it — but the published installers are built with speech in them, so in
-practice it is a requirement of the whole application. See [Install](#install).
+machine rather than only on the one that built it. **On anything older Zyris runs with speech
+turned off, and says so**: the compiled-in AVX2 code is left uncalled, so the window, the tray
+and every tool work, and the Voice screen carries the reason. Nothing else in Zyris needs AVX2.
+See [Install](#install).
 
 ## What nobody has checked by hand
 
@@ -574,12 +575,15 @@ right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Z
 **The phone apps are a typed conversation**: enrolment, the connection and the Conversation
 screen. Speech and the tools a computer offers its agents are in the desktop apps only for now.
 
-**These need a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on anything
-older Zyris will not start at all.** Not the speech alone: the transcription engine is compiled
-into the binary, so an older machine gets a process that dies before its first window, with no
-message. Nothing else in Zyris has that requirement, and a build without `--features voice`
-would not either; the published installers carry it because an app that cannot be spoken to is
-not this one.
+**Speech needs a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on
+anything older Zyris still starts, with speech turned off.** The transcription engine is
+compiled into the binary with those instructions and checks nothing at run time, so the first
+call into it is a `SIGILL` with no message — and the first such call is on the startup path,
+before the window. Zyris asks the processor instead and does not make the call: an older machine
+gets its window, its tray and every tool, and a Voice screen that says speech is off because the
+processor has no AVX2. A build without `--features voice` loses nothing at all; the published
+installers carry the audio stack, so what an older machine gives up is speech rather than the
+program.
 
 ```bash
 sudo apt install ./Zyris_0.1.0_amd64.deb
@@ -665,6 +669,10 @@ cargo run --release --features custom-protocol,voice -p zyris-app
 workspace. `GGML_NATIVE=OFF` keeps a release from depending on the CPU that built it, and on its
 own it also turns every instruction set off, which makes transcription about ten times slower;
 the lines beside it put AVX2 back. A release with the voice refuses to build without them.
+**A machine that does not have AVX2 never runs that code**: `zyris-voice`'s `cpu` module asks the
+processor once, in `zyris_voice::start`, and gives such a machine a Voice screen that says speech
+is off and why — which is what keeps the window and the tray on a processor the compiled
+whisper.cpp would kill. See [The voice](#the-voice).
 `whisper-rs-sys` does not rebuild when these change, so after changing one run
 `cargo clean -p whisper-rs-sys` (with `--release` for that profile).
 

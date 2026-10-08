@@ -185,6 +185,22 @@ pub struct DeviceInfo {
 /// choice onto a different one; key it by name as well if that turns out to happen.
 pub fn devices() -> Vec<DeviceInfo> {
     use whisper_rs_sys as ggml;
+    // **The first `ggml_*` call in the process, and the one that has to be guarded.** ggml is
+    // compiled for the AVX2 set (`.cargo/config.toml`) and checks nothing at run time, so on a
+    // processor without it this call is a `SIGILL` — measured 2026-10-08 with `qemu-x86_64 -cpu
+    // SandyBridge`: a binary that lists one device natively dies here, exit 132, and the shipping
+    // `zyris` dies without printing a line. It is reachable from `Engine::new` (`warm_the_gpu`),
+    // from `default_device` and from the Voice screen's own `compute_view`, so the check belongs
+    // at the instruction rather than at each caller; `zyris_voice::start` refuses the whole audio
+    // stack before any of them on such a machine, and this is what stops a later caller from
+    // putting the fault back. See [`crate::cpu`].
+    if !crate::cpu::has_avx2() {
+        return vec![DeviceInfo {
+            device: Device::Cpu,
+            name: "Processor".to_string(),
+            integrated: false,
+        }];
+    }
     let text = |raw: *const std::ffi::c_char| {
         if raw.is_null() {
             String::new()

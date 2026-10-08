@@ -154,7 +154,9 @@ webrtc-audio-processing = "2.1.0"
 # Speech to text, building a vendored whisper.cpp through CMake. **`GGML_NATIVE` defaults to ON
 # and would ship a binary that SIGILLs on somebody else's CPU**; `whisper-rs-sys/build.rs`
 # forwards any `WHISPER_`/`GGML_`/`CMAKE_` environment variable to CMake, so `GGML_NATIVE=OFF`
-# is the whole fix, and it is set in CI. AVX2 is still required. No GPU feature is on: the
+# is the whole fix, and it is set in CI. AVX2 is still what this is compiled for, and a machine
+# without it gets speech turned off by `crates/zyris-voice/src/cpu.rs` rather than a SIGILL.
+# No GPU feature is on: the
 # defaults are empty and every accelerator here is opt-in.
 # `tracing_backend` rather than the default, which is no backend at all: whisper.cpp prints a
 # screenful of model parameters and timings to stderr on every load, and in `--headless` that is
