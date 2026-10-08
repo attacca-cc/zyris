@@ -51,3 +51,9 @@ GEMINI.md
 
 # Design notes and documentation drafts
 docs/
+
+# NPU model export (scripts/npu): outputs and the Python environment
+scripts/npu/out/
+scripts/npu/.venv/
+scripts/npu/__pycache__/
+scripts/npu/gate/*.apk
