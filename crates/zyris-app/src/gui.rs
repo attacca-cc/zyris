@@ -110,10 +110,19 @@ pub fn run(
     // Whether this window goes on the screen. Autostart installs `--minimized`, which builds
     // everything and shows nothing but the tray icon.
     mode: Mode,
-    // Whether `--server` pointed this run at a development server, which is the one case two
-    // Zyris windows are wanted on one machine at once. See the plugin registration below.
-    dev_server: bool,
+    // The URL `--server` named, if it named one — `None` is the shipped Attacca.
+    //
+    // The URL rather than only whether there was one, which is what this used to be: the window
+    // needs the "was it given at all" half to decide whether to register the single-instance
+    // plugin below (it keys on the bundle identifier, so a development window would be swallowed
+    // by a production one), and the console's state file needs the address itself, because
+    // `zyris status` on a development instance should say which server that instance dials.
+    server: Option<String>,
+    // The console's report on this run — `zyris status`, `down` and `login` read it. Started in
+    // `setup` below, once this process knows whether it is the one holding the instance lock.
+    watch: crate::console::state::Watcher,
 ) -> anyhow::Result<()> {
+    let dev_server = server.is_some();
     tracing::info!(hidden = !mode.shows_a_window(), "running with a window");
 
     // **Built here, on the main thread, before Tauri takes it over.** On Windows
@@ -129,7 +138,11 @@ pub fn run(
     // Never fails. A desktop with no way to register a global key gets a `Hotkey` that says so,
     // for the reason `zyris-tools`'s `announce.rs` gives about a machine with no display server:
     // a control that cannot work is worse than an absent one.
-    let trigger_file = bridge::TriggerFile(crate::data_dir(&instance).join(hotkey::TRIGGER_FILE));
+    // **Where this instance keeps everything of its own**, named once here rather than derived
+    // again wherever something needs it: the push-to-talk key is kept here, and so is the stop
+    // request `zyris down` writes. `main` derived the same directory from the same instance name.
+    let data = crate::instance::data_dir(&instance);
+    let trigger_file = bridge::TriggerFile(data.join(hotkey::TRIGGER_FILE));
     let hotkey = runtime.block_on(hotkey::start(&hotkey::Env::read(), &hotkey::saved_trigger(&trigger_file.0)));
     tracing::info!(support = ?hotkey.describe(), "push-to-talk");
 
@@ -331,6 +344,47 @@ pub fn run(
                     tracing::warn!(%error, "could not take the instance lock; continuing anyway");
                 }
             }
+
+            // **Now that the lock is settled — taken, or knowingly not.** Both of a console
+            // command's ways in and out of this process start here rather than in `main`, and the
+            // second arm above is the reason: a launch that turns out to be the second one has
+            // already left through it, and it must not have written a state file naming a pid that
+            // is on its way out or a stop request it will never answer.
+            //
+            // The state file first, so that a `zyris down` arriving a moment from now has a pid to
+            // name.
+            //
+            // **And a request nobody answered is cleared before anything watches for one.** `zyris
+            // down` against a node that came back from the dead leaves its request behind — the
+            // request is consumed by whoever acts on it, and nobody ever did — and this node would
+            // find it waiting and stop on the spot. Cleared here rather than earlier in `main`,
+            // where a second launch that the lock is about to refuse would have cleared the request
+            // the *running* node is about to act on.
+            crate::stop::clear(&data);
+            watch.start(&setup_runtime);
+
+            // And the other direction: `zyris down` asks through a file in this instance's data
+            // directory, and this is what answers it. `app.exit(0)` is the exit the tray's Quit
+            // takes — not `std::process::exit` — so the event loop's final callback below runs and
+            // stops the MCP servers and hands the push-to-talk key back, which is the whole reason
+            // the request is a file rather than a signal.
+            let mut asked = crate::stop::ask_when_requested(&data, &setup_runtime);
+            let stopper = app.handle().clone();
+            setup_runtime.spawn(async move {
+                match asked.changed().await {
+                    // Somebody asked, and asked for exactly this.
+                    Ok(()) if *asked.borrow() => {
+                        tracing::info!("`zyris down` asked this node to stop");
+                        stopper.exit(0);
+                    }
+                    // The watcher ended without a request — a task that fell over, say. Nothing
+                    // can ask this node to stop now, which is worth a line; stopping on it would
+                    // be a node dying of its own convenience.
+                    _ => tracing::warn!(
+                        "the stop-request watcher ended; `zyris down` can no longer reach this node"
+                    ),
+                }
+            });
 
             // After the `manage` calls above, which is what lets the tray reach the gate and the
             // bus: `tray::build` reads both out of Tauri's state to label its pause item and to

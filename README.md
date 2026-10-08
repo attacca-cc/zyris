@@ -395,6 +395,46 @@ machine rather than only on the one that built it; on anything older it will not
 else in Zyris needs it — but the published installers are built with speech in them, so in
 practice it is a requirement of the whole application. See [Install](#install).
 
+## Without a window
+
+The window is for settings and for watching, and neither needs a desktop. A machine you reach over
+SSH is a machine with no window at all, and everything the Settings and Voice screens do is
+reachable from its terminal. `zyris` on its own is still the app; a subcommand does one job, says
+what happened, and returns.
+
+| Command | What it does |
+|---|---|
+| `zyris up` | Start a node in the background: the tray on a machine with a desktop session, a windowless node on one without. `--headless` and `--minimized` say which |
+| `zyris down` | Ask the running node to stop, and wait for it |
+| `zyris status` | Whether a node is running, what it is doing, which server it dials — and the code, if it is waiting to be authorized |
+| `zyris login` | Authorize this machine: print the code to enter on Attacca, and wait. The window's onboarding takes the same path, so the two cannot show different codes for one machine |
+| `zyris config list` / `get <key>` / `set <key> <value>` | The voice settings. `list` prints every key it can change and what each means; `unset` clears one the file may leave out |
+| `zyris mcp list` / `enable` / `disable` / `add` / `remove` | The local MCP servers this machine starts, and the file that decides it |
+| `zyris autostart enable` / `disable` / `status` | The same switch as `--install-autostart` and the Settings screen |
+
+**Not everything is a setting in a file, and `zyris config list` says so beside the keys it does
+edit.** Which Attacca to dial is `--server URL`; the credential is `zyris login`; the pause switch
+lives in a running node's memory and is not stored; autostart is a systemd unit or a Task Scheduler
+entry rather than a value; and the MCP server list has a command of its own.
+
+**`--server URL` names an instance, and it means the same thing here as it does to the app.** A
+`--server` run keeps its own credential, settings, audit log and instance lock, so
+`zyris --server wss://… down` stops that development node and never the real one, and `config`
+edits that run's settings.
+
+**A node started from a console is a detached process rather than a service.** Autostart is what
+installs a service, and it is a separate decision a person makes once. `zyris up` writes whatever
+the node says to `node.log` in this instance's data directory and prints the path, because there is
+nobody attached to a background process to read it.
+
+**On Windows these work from `cmd.exe`, PowerShell and Windows Terminal.** A release build there is
+a window-subsystem binary with no console of its own — which is what keeps a terminal from opening
+beside the window — so Zyris attaches to the console it was started from, and allocates one when
+there was none to attach to. What no amount of that fixes, because it is the shell's decision
+rather than Zyris's: `cmd.exe` does not wait for a window-subsystem binary, so the answer can
+appear *after* the next prompt instead of under the command that asked for it. See [What nobody has
+checked by hand](#what-nobody-has-checked-by-hand).
+
 ## What nobody has checked by hand
 
 Everything on this page has tests behind it, and two kinds of claim are outside what any test on
@@ -545,6 +585,36 @@ But that echo is a delayed copy of the loudspeaker and nothing else — no room,
 second voice — and **nothing is wired to it yet**, so there is nothing on any screen to check and
 no way to try it. What it is owed is a real room, and that goes on this list the day the microphone
 actually goes through it.
+
+### A console command, on Windows
+
+Everything in [Without a window](#without-a-window) is exercised on Linux: the commands are run
+against a real node — started, asked about, stopped — and the settings they write are read back.
+What no test here reaches is **a Windows console**, and the reason is the platform rather than the
+code: a release build there is a window-subsystem binary with no console of its own, so the
+question is not whether the commands work but whether their output arrives anywhere a person can
+read it. `main`'s `attach_console` answers that with `AttachConsole(ATTACH_PARENT_PROCESS)` and,
+for a command started with no console to attach to, `AllocConsole`, rebinding `stdout` and
+`stderr` to `CONOUT$` — and CI compiles that on `windows-latest` with the rest of the crate.
+
+1. **Output from a command, from a terminal.** In `cmd.exe`, PowerShell and Windows Terminal, run
+   `zyris status`, `zyris --help` and `zyris config list`.
+   Pass: each one's output is readable, and nothing opens a second window beside it.
+   Fail: the prompt returns and nothing else ever appears — `AttachConsole` did not reach the
+   terminal, or the standard handles were not rebound before the first `println!`.
+2. **Output from a command started with no console.** Start `zyris status` from the Run box or a
+   shortcut.
+   Pass: a console window opens, prints the block, and closes when it is dismissed.
+   Fail: nothing appears at all.
+3. **Where the output lands.** Run `zyris status` from `cmd.exe` and look at whether the answer
+   appears under the command or after the next prompt. Either is expected — `cmd.exe` does not wait
+   for a window-subsystem binary — and this is what says whether the note in the README is the
+   whole of it or whether a second, console-subsystem executable is worth its cost.
+4. **A node that was started before this existed.** With an older Zyris running, run `zyris status`
+   and `zyris down`.
+   Pass: `status` says it is running and that the node wrote no state file; `down` asks it to stop,
+   times out, and says which pid to end by hand.
+   Fail: `down` reports success while the old node is still running.
 
 ## Install
 

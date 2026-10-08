@@ -24,6 +24,32 @@ impl InstanceLock {
         InstanceLock::acquire_in(default_dir(), name)
     }
 
+    /// Whether some other process holds this instance's lock right now.
+    ///
+    /// **Asked by taking it and giving it straight back**, which is the only way a file lock can
+    /// be asked: `try_lock` never waits, so this cannot disturb the node that holds it, and a lock
+    /// this call did win is released as the guard goes out of scope before it returns.
+    ///
+    /// It is the answer `zyris status`, `zyris up` and `zyris down` are built on, because it is
+    /// the one signal that cannot be stale: the lock is held for exactly as long as the node is
+    /// running and is released when the process ends for **any** reason, including being killed.
+    /// A pid in a file is not, which is why the console reads one only to name a process to a
+    /// person and never to decide anything with.
+    ///
+    /// `false` when the lock directory cannot even be reached: a machine where nothing can be
+    /// locked is a machine where no node is running, and reporting an I/O error here would make
+    /// `zyris status` fail instead of saying that. Note that this creates the (empty) lock file
+    /// if it was not there, which is what the running side does on the way past too.
+    pub fn is_held(name: &str) -> bool {
+        InstanceLock::is_held_in(default_dir(), name).unwrap_or(false)
+    }
+
+    /// [`InstanceLock::is_held`], in a directory of the caller's choosing — so a test can use one
+    /// of its own rather than the machine's real runtime directory.
+    pub fn is_held_in(dir: PathBuf, name: &str) -> Result<bool, io::Error> {
+        Ok(InstanceLock::acquire_in(dir, name)?.is_none())
+    }
+
     /// `Ok(None)` is the ordinary "someone else is already running" answer, not an error — the
     /// caller's response to it is to exit quietly, and making that an `Err` would put a normal
     /// outcome on the failure path.
@@ -87,5 +113,34 @@ mod tests {
         let b = InstanceLock::acquire_in(dir.path().to_path_buf(), "something-else").unwrap();
 
         assert!(b.is_some());
+    }
+
+    #[test]
+    fn a_lock_nobody_holds_is_reported_as_not_held() {
+        // What `zyris status` prints on a machine with nothing running, and what makes
+        // `zyris up` willing to start something.
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!InstanceLock::is_held_in(dir.path().to_path_buf(), "zyris").unwrap());
+    }
+
+    #[test]
+    fn a_held_lock_is_reported_as_held_and_asking_does_not_take_it() {
+        // **The asking must not steal the lock.** `is_held` wins the lock when it can and drops
+        // it again in the same call, so a node that holds it is undisturbed — and a node that
+        // does not must still be able to take it afterwards, which is the second assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let held = InstanceLock::acquire_in(dir.path().to_path_buf(), "zyris").unwrap().unwrap();
+
+        assert!(InstanceLock::is_held_in(dir.path().to_path_buf(), "zyris").unwrap());
+
+        // Still the same lock, and still ours: dropping it is what lets the next caller in.
+        assert!(InstanceLock::is_held_in(dir.path().to_path_buf(), "zyris").unwrap());
+        drop(held);
+        assert!(!InstanceLock::is_held_in(dir.path().to_path_buf(), "zyris").unwrap());
+        assert!(
+            InstanceLock::acquire_in(dir.path().to_path_buf(), "zyris").unwrap().is_some(),
+            "asking about the lock left it taken, so a node started afterwards would be refused"
+        );
     }
 }

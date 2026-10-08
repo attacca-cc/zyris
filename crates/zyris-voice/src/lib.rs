@@ -186,6 +186,12 @@ pub mod view;
 // How loud the microphone and the speaker are, for the Conversation screen's backdrop. Outside
 // the feature for the same reason `view` is: `zyris-app` forwards `Level` on either build.
 pub mod meter;
+
+// The keys of the settings file — what it holds, what each one is called in it. Outside the
+// feature for the same reason, and for one more: `zyris config` edits that file with no window in
+// front of it, and the crate that owns the file is the only honest place for its field names to
+// live. See the module.
+pub mod settings;
 pub use meter::{LEVELS_PER_SECOND, Level, Source};
 
 /// Why a build with no `voice` feature will never hear anything.
