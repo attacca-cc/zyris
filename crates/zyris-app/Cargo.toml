@@ -94,6 +94,23 @@ gtk = "0.18"
 ashpd = { workspace = true }
 futures-util = { workspace = true }
 
+# `setsid`, and nothing else in it: `zyris up` starts a node in a session of its own so that it
+# outlives the shell — and the SSH connection — it was started from, and `std::process` has no way
+# to ask for that. Unix rather than Linux because macOS has the same call and the same reason for
+# it; the other platforms have no equivalent to ask for.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# **AttachConsole, AllocConsole and SetStdHandle.** A release build here is a window-subsystem
+# binary — `windows_subsystem = "windows"` in `main.rs`, which is what keeps a terminal from
+# opening beside the window — and a process with no console has a `stdout` that goes nowhere, so
+# the console commands have to be given one by hand. `main`'s `attach_console` says what each of
+# the three is for and what no amount of this can fix. `Win32_System_Console` is the smallest
+# module that reaches them, and the crate is already in this workspace's tree for the Windows echo
+# canceller, so this adds a feature rather than a download.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Console"] }
+
 # One `#[ignore]`d test in `hotkey/x11.rs`, and only that. It measures how many `WM_HOTKEY` a
 # held key produces, which needs a message pump — a `#[test]` has no event loop, and without one
 # `global-hotkey`'s message-only window is never dispatched to. Nothing outside a test uses it.

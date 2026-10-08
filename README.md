@@ -391,9 +391,50 @@ weights and takes that licence with them.
 
 **Speech needs a CPU with AVX2** — Intel Haswell or AMD Excavator, 2013 and later. The
 transcription engine is compiled without `-march=native` so that the release runs on every such
-machine rather than only on the one that built it; on anything older it will not start. Nothing
-else in Zyris needs it — but the published installers are built with speech in them, so in
-practice it is a requirement of the whole application. See [Install](#install).
+machine rather than only on the one that built it. **On anything older Zyris runs with speech
+turned off, and says so**: the compiled-in AVX2 code is left uncalled, so the window, the tray
+and every tool work, and the Voice screen carries the reason. Nothing else in Zyris needs AVX2.
+See [Install](#install).
+
+## Without a window
+
+The window is for settings and for watching, and neither needs a desktop. A machine you reach over
+SSH is a machine with no window at all, and everything the Settings and Voice screens do is
+reachable from its terminal. `zyris` on its own is still the app; a subcommand does one job, says
+what happened, and returns.
+
+| Command | What it does |
+|---|---|
+| `zyris up` | Start a node in the background: the tray on a machine with a desktop session, a windowless node on one without. `--headless` and `--minimized` say which |
+| `zyris down` | Ask the running node to stop, and wait for it |
+| `zyris status` | Whether a node is running, what it is doing, which server it dials — and the code, if it is waiting to be authorized |
+| `zyris login` | Authorize this machine: print the code to enter on Attacca, and wait. The window's onboarding takes the same path, so the two cannot show different codes for one machine |
+| `zyris config list` / `get <key>` / `set <key> <value>` | The voice settings. `list` prints every key it can change and what each means; `unset` clears one the file may leave out |
+| `zyris mcp list` / `enable` / `disable` / `add` / `remove` | The local MCP servers this machine starts, and the file that decides it |
+| `zyris autostart enable` / `disable` / `status` | The same switch as `--install-autostart` and the Settings screen |
+
+**Not everything is a setting in a file, and `zyris config list` says so beside the keys it does
+edit.** Which Attacca to dial is `--server URL`; the credential is `zyris login`; the pause switch
+lives in a running node's memory and is not stored; autostart is a systemd unit or a Task Scheduler
+entry rather than a value; and the MCP server list has a command of its own.
+
+**`--server URL` names an instance, and it means the same thing here as it does to the app.** A
+`--server` run keeps its own credential, settings, audit log and instance lock, so
+`zyris --server wss://… down` stops that development node and never the real one, and `config`
+edits that run's settings.
+
+**A node started from a console is a detached process rather than a service.** Autostart is what
+installs a service, and it is a separate decision a person makes once. `zyris up` writes whatever
+the node says to `node.log` in this instance's data directory and prints the path, because there is
+nobody attached to a background process to read it.
+
+**On Windows these work from `cmd.exe`, PowerShell and Windows Terminal.** A release build there is
+a window-subsystem binary with no console of its own — which is what keeps a terminal from opening
+beside the window — so Zyris attaches to the console it was started from, and allocates one when
+there was none to attach to. What no amount of that fixes, because it is the shell's decision
+rather than Zyris's: `cmd.exe` does not wait for a window-subsystem binary, so the answer can
+appear *after* the next prompt instead of under the command that asked for it. See [What nobody has
+checked by hand](#what-nobody-has-checked-by-hand).
 
 ## What nobody has checked by hand
 
@@ -546,6 +587,36 @@ second voice — and **nothing is wired to it yet**, so there is nothing on any 
 no way to try it. What it is owed is a real room, and that goes on this list the day the microphone
 actually goes through it.
 
+### A console command, on Windows
+
+Everything in [Without a window](#without-a-window) is exercised on Linux: the commands are run
+against a real node — started, asked about, stopped — and the settings they write are read back.
+What no test here reaches is **a Windows console**, and the reason is the platform rather than the
+code: a release build there is a window-subsystem binary with no console of its own, so the
+question is not whether the commands work but whether their output arrives anywhere a person can
+read it. `main`'s `attach_console` answers that with `AttachConsole(ATTACH_PARENT_PROCESS)` and,
+for a command started with no console to attach to, `AllocConsole`, rebinding `stdout` and
+`stderr` to `CONOUT$` — and CI compiles that on `windows-latest` with the rest of the crate.
+
+1. **Output from a command, from a terminal.** In `cmd.exe`, PowerShell and Windows Terminal, run
+   `zyris status`, `zyris --help` and `zyris config list`.
+   Pass: each one's output is readable, and nothing opens a second window beside it.
+   Fail: the prompt returns and nothing else ever appears — `AttachConsole` did not reach the
+   terminal, or the standard handles were not rebound before the first `println!`.
+2. **Output from a command started with no console.** Start `zyris status` from the Run box or a
+   shortcut.
+   Pass: a console window opens, prints the block, and closes when it is dismissed.
+   Fail: nothing appears at all.
+3. **Where the output lands.** Run `zyris status` from `cmd.exe` and look at whether the answer
+   appears under the command or after the next prompt. Either is expected — `cmd.exe` does not wait
+   for a window-subsystem binary — and this is what says whether the note in the README is the
+   whole of it or whether a second, console-subsystem executable is worth its cost.
+4. **A node that was started before this existed.** With an older Zyris running, run `zyris status`
+   and `zyris down`.
+   Pass: `status` says it is running and that the node wrote no state file; `down` asks it to stop,
+   times out, and says which pid to end by hand.
+   Fail: `down` reports success while the old node is still running.
+
 ## Install
 
 Every `v*` tag builds the installers on GitHub's runners and attaches them to a release, so the
@@ -574,12 +645,15 @@ right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Z
 **The phone apps are a typed conversation**: enrolment, the connection and the Conversation
 screen. Speech and the tools a computer offers its agents are in the desktop apps only for now.
 
-**These need a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on anything
-older Zyris will not start at all.** Not the speech alone: the transcription engine is compiled
-into the binary, so an older machine gets a process that dies before its first window, with no
-message. Nothing else in Zyris has that requirement, and a build without `--features voice`
-would not either; the published installers carry it because an app that cannot be spoken to is
-not this one.
+**Speech needs a CPU with AVX2 — Intel Haswell or AMD Excavator, 2013 and later — and on
+anything older Zyris still starts, with speech turned off.** The transcription engine is
+compiled into the binary with those instructions and checks nothing at run time, so the first
+call into it is a `SIGILL` with no message — and the first such call is on the startup path,
+before the window. Zyris asks the processor instead and does not make the call: an older machine
+gets its window, its tray and every tool, and a Voice screen that says speech is off because the
+processor has no AVX2. A build without `--features voice` loses nothing at all; the published
+installers carry the audio stack, so what an older machine gives up is speech rather than the
+program.
 
 ```bash
 sudo apt install ./Zyris_0.1.0_amd64.deb
@@ -665,6 +739,10 @@ cargo run --release --features custom-protocol,voice -p zyris-app
 workspace. `GGML_NATIVE=OFF` keeps a release from depending on the CPU that built it, and on its
 own it also turns every instruction set off, which makes transcription about ten times slower;
 the lines beside it put AVX2 back. A release with the voice refuses to build without them.
+**A machine that does not have AVX2 never runs that code**: `zyris-voice`'s `cpu` module asks the
+processor once, in `zyris_voice::start`, and gives such a machine a Voice screen that says speech
+is off and why — which is what keeps the window and the tray on a processor the compiled
+whisper.cpp would kill. See [The voice](#the-voice).
 `whisper-rs-sys` does not rebuild when these change, so after changing one run
 `cargo clean -p whisper-rs-sys` (with `--release` for that profile).
 

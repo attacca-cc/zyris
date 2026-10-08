@@ -36,6 +36,12 @@
 
 use tokio::sync::broadcast;
 
+/// Whether this processor can run the speech engine this binary carries, and what to say when
+/// it cannot. **Not behind the feature**: the question is about the computer rather than about
+/// the build, and a `#[cfg(feature = "voice")]` here would make the sentence unavailable to the
+/// one build state that cannot be wrong about it.
+pub mod cpu;
+
 /// End the process, the way `std::process::exit` does — except in a voice build, where it skips
 /// the C++ exit handlers.
 ///
@@ -186,6 +192,12 @@ pub mod view;
 // How loud the microphone and the speaker are, for the Conversation screen's backdrop. Outside
 // the feature for the same reason `view` is: `zyris-app` forwards `Level` on either build.
 pub mod meter;
+
+// The keys of the settings file — what it holds, what each one is called in it. Outside the
+// feature for the same reason, and for one more: `zyris config` edits that file with no window in
+// front of it, and the crate that owns the file is the only honest place for its field names to
+// live. See the module.
+pub mod settings;
 pub use meter::{LEVELS_PER_SECOND, Level, Source};
 
 /// Why a build with no `voice` feature will never hear anything.
@@ -855,7 +867,10 @@ impl Voice {
 ///
 /// **Never fails**, on any platform, in either feature state — the same shape `hotkey::start`
 /// and `announce.rs` use. A machine that cannot listen gets a [`Voice`] that says so, because
-/// the alternative is an application that refuses to start over a microphone. **It opens
+/// the alternative is an application that refuses to start over a microphone. **A machine whose
+/// processor cannot run the speech engine at all gets the same answer**, with [`cpu::NEEDS_AVX2`]
+/// as the sentence: this is the one place that keeps a `SIGILL` out of `main`'s startup path.
+/// See [`cpu`] for what was measured. **It opens
 /// nothing**: see `run`'s module documentation for why a microphone is not opened at launch.
 ///
 /// `dir` is the instance's data directory, where the answer to "should this listen?" is kept.
@@ -882,6 +897,15 @@ pub fn start(dir: Option<&std::path::Path>) -> Voice {
     }
     #[cfg(feature = "voice")]
     {
+        // **The one gate, and it is first.** `Engine::new` asks ggml for its device registry on
+        // its first line (`stt::warm_the_gpu`), and ggml here is compiled for AVX2 with no check
+        // of its own — on a processor without it that call is a `SIGILL` with no message, several
+        // frames into `zyris-app`'s startup and before its first window. `cpu` carries the
+        // measurement. A machine that fails this gets the disabled voice, which is the same
+        // answer a build without the feature gets and one the Voice screen already renders.
+        if let Some(reason) = cpu::speech_unavailable() {
+            return Voice::disabled(reason);
+        }
         let events = broadcast::channel(EVENT_CAPACITY).0;
         let engine = std::sync::Arc::new(run::Engine::new(dir, events.clone()));
         Voice { events: None, traces: None, support: engine.support(), engine: Some(engine) }

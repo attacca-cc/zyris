@@ -293,12 +293,10 @@ fn speaking_rate(settings: &Settings) -> f32 {
 /// with this program is likely to hold, and the ones whisper has never seen.
 pub const DEFAULT_VOCABULARY: &str = "Attacca, Zyris.";
 
-/// What the settings file is called, inside the instance's data directory.
-///
-/// The **data** directory and not the cache, and scoped by instance like everything else `main`
-/// derives from the instance name: a `--server` run choosing to listen must not turn the
-/// microphone on for the production node.
-pub const SETTINGS_FILE: &str = "voice.json";
+/// What the settings file is called, inside the instance's data directory. Declared in
+/// [`crate::settings`], beside the names of the keys in it, because the console edits that file
+/// with no window in front of it.
+pub use crate::settings::SETTINGS_FILE;
 
 /// The microphone, the session over it, and the settings that say whether there should be one.
 pub struct Engine {

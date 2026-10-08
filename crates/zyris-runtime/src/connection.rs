@@ -427,7 +427,18 @@ impl Connector {
     }
 
     /// The stored credential, or a fresh one from an enrolment the person completes.
-    async fn credential(&self) -> Option<Credential> {
+    ///
+    /// **Public because `zyris login` is this path and nothing else.** The console's version of
+    /// the window's onboarding has to show the same code for the same machine, and the only way
+    /// for the two not to differ is for both to ask here: the stored credential if it is complete,
+    /// and otherwise an enrolment that reports its code on the [`EventBus`] and saves what is
+    /// granted. A second implementation in the console would be a second set of scopes, a second
+    /// enrolment request shape, and eventually a second answer to "is this machine authorized".
+    ///
+    /// `None` is a failure already reported on the bus — an unreachable enrolment endpoint, a
+    /// refusal, a credential that will not store — which is why the caller watches the bus rather
+    /// than something returned here.
+    pub async fn credential(&self) -> Option<Credential> {
         // Checked before anything else: if the identity actually lives in a backend this launch
         // cannot reach, `self.identity.load()` below will honestly report nothing stored — and
         // the rest of this method would honestly, wrongly, start a fresh enrolment over it,
