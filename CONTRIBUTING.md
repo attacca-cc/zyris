@@ -82,6 +82,12 @@ request.
   `SIGILL` before its first window: that compiled code carries no check of its own, so the check
   has to be ours.
 
+- **Lite is a config file plus the absence of a feature, never a `#[cfg]`.** The code has one
+  shape; `crates/zyris-app/tauri.lite.conf.json` is what makes a build a tray with no window in
+  it, and `the_lite_build_is_a_config.rs` checks that it declares no window, and that its product
+  name, identifier and update file are its own. If you add anything to the app that assumes a
+  window exists, ask `gui::has_a_window` about it rather than `Mode`.
+
 ### Phones and macOS
 
 Android and iOS builds are generated rather than committed (`crates/zyris-app/gen/` is ignored).
@@ -134,8 +140,9 @@ Maintainers cut releases. The version lives in two places, which must agree: `Ca
 (`[workspace.package]`) and `crates/zyris-app/tauri.conf.json`. Pushing a `v*` tag then:
 
 - builds Windows, macOS and Linux (`release.yml`), and Android and iOS (`mobile.yml`);
-- signs the update files and writes `latest.json`, which installed copies read to update
-  themselves.
+- builds the ordinary and the [Lite](README.md#lite) desktop bundles on all three platforms;
+- signs the update files and writes `latest.json` for the ordinary build and `latest-lite.json`
+  for Lite, which installed copies read to update themselves.
 
 After a release, `nix/package.nix` is bumped to the new `.deb` in a follow-up pull request.
 

@@ -90,6 +90,44 @@ jobs:
             features: voice,gpu
             config: --config crates/zyris-app/tauri.windows-gpu.conf.json
             bundles: target/release/bundle/nsis/*.exe
+            # **The one row whose bundle carries staged DLLs.** The WebGPU DLLs, the Visual C++
+            # runtime and the Vulkan SDK are for the config above and for `gpu-stt`; the two
+            # steps that stage them are gated on this rather than on `runner.os`, so a Windows
+            # row without that config has nothing to stage and does not fail on a missing file.
+            gpu: true
+          # --- Lite: the same program with no speech and no window --------------------------
+          # `crates/zyris-app/tauri.lite.conf.json` is the whole of the axis. Its `app.windows`
+          # is empty, so Tauri creates nothing to draw — the tray is what is left, and Tauri owns
+          # the tray, so this is not a build without Tauri — and `features` names no audio stack,
+          # so whisper.cpp and ONNX Runtime are neither compiled nor linked. Everything else is
+          # the same program: the five capabilities, the promoted MCP servers, the console
+          # commands, autostart, the connection, the updater.
+          #
+          # **`custom-protocol` is named although `tauri build` adds it.** These rows have no
+          # other feature and an empty `--features` argument is not one — the flag has to receive
+          # something on every row. It is the feature that decides dev-versus-production and not
+          # the cargo profile, so naming it is what makes the bundle embed the frontend rather
+          # than ask a Vite server for it.
+          #
+          # **What is not here is `voice`**, and that is the point: the artifact is the proof that
+          # the audio stack is absent, since a Lite bundle would fail to build at all if anything
+          # in the app named a `zyris-voice` item that only the feature provides.
+          - os: ubuntu-latest
+            container: debian:bookworm
+            artifact: zyris-lite-linux
+            features: custom-protocol
+            config: --config crates/zyris-app/tauri.lite.conf.json
+            bundles: target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm
+          - os: macos-latest
+            artifact: zyris-lite-macos
+            features: custom-protocol
+            config: --config crates/zyris-app/tauri.lite.conf.json
+            bundles: target/release/bundle/dmg/*.dmg
+          - os: windows-latest
+            artifact: zyris-lite-nsis
+            features: custom-protocol
+            config: --config crates/zyris-app/tauri.lite.conf.json
+            bundles: target/release/bundle/nsis/*.exe
 
     steps:
       # `zyris-input` is a git dependency and the three `[patch.crates-io]` entries point at the
@@ -206,7 +244,7 @@ jobs:
       # `gpu-stt` compiles whisper.cpp's Vulkan backend: the headers, `vulkan-1.lib` and `glslc`
       # to compile its shaders, found through `VULKAN_SDK`, which this action sets.
       - name: Install the Vulkan SDK
-        if: runner.os == 'Windows'
+        if: matrix.gpu
         uses: jakoch/install-vulkan-sdk-action@v1.6.0
         with:
           vulkan_version: latest
@@ -219,7 +257,7 @@ jobs:
       # 0.0.2's installer carried neither. Copied from the runner's System32 into target/vcruntime,
       # where tauri.windows-gpu.conf.json picks them up; Microsoft allows this app-local copy.
       - name: Put the Visual C++ runtime beside the build
-        if: runner.os == 'Windows'
+        if: matrix.gpu
         shell: bash
         run: |
           set -euo pipefail
@@ -237,7 +275,7 @@ jobs:
       # itself, which Windows refuses (os error 32). The bundle build after this finds every
       # crate built and only reruns tauri-build, which then copies from target/gpu.
       - name: Build once and stage the GPU DLLs
-        if: runner.os == 'Windows'
+        if: matrix.gpu
         shell: bash
         env:
           LIBONNXRUNTIME_NO_PKG_CONFIG: "1"
@@ -318,32 +356,59 @@ jobs:
       # What an installed Zyris reads to learn of this release: each platform's file and its
       # signature. The macOS archive is renamed with the version so two releases never share a
       # name.
-      - name: Write latest.json for the updater
+      #
+      # **Two files, because there are two builds and they are not the same program.** An
+      # installed Lite copy offered the ordinary build's installer would grow a window and a
+      # microphone on its next update, and an ordinary copy offered Lite's would lose both — see
+      # `crates/zyris-app/tests/the_lite_build_is_a_config.rs`, which is what holds the Lite
+      # config to reading `latest-lite.json`.
+      #
+      # **Every pattern here is anchored to a product name**, and that is what the two names are
+      # for: `Zyris_…` never matches `Zyris-Lite_…` and the other way round, so no glob below can
+      # pick up the other build's file. The exceptions are the two RPMs, whose names carry the
+      # version rather than an underscore: `Zyris-[0-9]*` is the ordinary one, `Zyris-Lite-[0-9]*`
+      # is Lite's.
+      - name: Write the update files for the updater
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Each artifact keeps the bundler's layout: bundles/<artifact>/<kind>/<file>.
+          # Each artifact keeps the bundler's layout: bundles/<artifact>/<kind>/<file>. The
+          # archive and its `.sig` both carry the version in their name afterwards.
           for f in $(find bundles -name 'Zyris.app.tar.gz*'); do
             mv "$f" "${f/Zyris.app/Zyris_${TAG#v}_aarch64.app}"
           done
+          for f in $(find bundles -name 'Zyris-Lite.app.tar.gz*'); do
+            mv "$f" "${f/Zyris-Lite.app/Zyris-Lite_${TAG#v}_aarch64.app}"
+          done
+
           entry() { # key file-glob
             local file sig
             file=$(find bundles -name "$2" | head -1); sig=$(cat "$file.sig")
             jq -n --arg sig "$sig" --arg url "https://github.com/$REPO/releases/download/$TAG/$(basename "$file")" \
               '{signature: $sig, url: $url}' | jq --arg k "$1" '{($k): .}'
           }
-          {
-            entry windows-x86_64-nsis '*_x64-setup.exe'
-            entry windows-x86_64 '*_x64-setup.exe'
-            entry darwin-aarch64-app '*_aarch64.app.tar.gz'
-            entry darwin-aarch64 '*_aarch64.app.tar.gz'
-            entry linux-x86_64-deb '*_amd64.deb'
-            entry linux-x86_64-rpm '*.x86_64.rpm'
-          } | jq -s --arg v "${TAG#v}" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              '{version: $v, pub_date: $d, notes: "See the release notes on GitHub.", platforms: add}' > latest.json
-          cat latest.json
+
+          write() { # out-file exe-glob deb-glob rpm-glob mac-glob
+            {
+              entry windows-x86_64-nsis "$2"
+              entry windows-x86_64 "$2"
+              entry darwin-aarch64-app "$5"
+              entry darwin-aarch64 "$5"
+              entry linux-x86_64-deb "$3"
+              entry linux-x86_64-rpm "$4"
+            } | jq -s --arg v "${TAG#v}" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                '{version: $v, pub_date: $d, notes: "See the release notes on GitHub.", platforms: add}' > "$1"
+            cat "$1"
+          }
+
+          write latest.json \
+            'Zyris_*_x64-setup.exe' 'Zyris_*_amd64.deb' 'Zyris-[0-9]*.x86_64.rpm' \
+            'Zyris_*_aarch64.app.tar.gz'
+          write latest-lite.json \
+            'Zyris-Lite_*_x64-setup.exe' 'Zyris-Lite_*_amd64.deb' 'Zyris-Lite-[0-9]*.x86_64.rpm' \
+            'Zyris-Lite_*_aarch64.app.tar.gz'
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -355,6 +420,7 @@ jobs:
             bundles/**/*.app.tar.gz
             bundles/**/*.sig
             latest.json
+            latest-lite.json
           fail_on_unmatched_files: true
           draft: false
           # The merged pull requests since the last tag, as GitHub lists them.

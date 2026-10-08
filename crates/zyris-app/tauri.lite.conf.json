@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zyris-Lite",
+  "identifier": "cc.attacca.zyris.lite",
+  "app": {
+    "windows": []
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/attacca-cc/zyris/releases/latest/download/latest-lite.json"
+      ]
+    }
+  }
+}

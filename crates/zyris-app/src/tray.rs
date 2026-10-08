@@ -3,7 +3,7 @@
 //! It carries just what cannot wait for the window to open. Anything that needs explaining, or
 //! that has more than two states, belongs in the window instead.
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 use zyris_runtime::{CoreEvent, EventBus};
@@ -31,14 +31,26 @@ fn pause_label(paused: bool) -> &'static str {
     if paused { "Resume" } else { "Pause" }
 }
 
-pub fn build(app: &AppHandle, runtime: &tokio::runtime::Handle) -> tauri::Result<()> {
+pub fn build(
+    app: &AppHandle,
+    runtime: &tokio::runtime::Handle,
+    // Whether this build has a window to open. `gui::has_a_window`, read from the config: a Lite
+    // build declares none, and an item that can only ever fail is the thing `zyris-tools`'s
+    // `announce.rs` refuses to announce — a control that cannot work is worse than an absent one.
+    windowed: bool,
+) -> tauri::Result<()> {
     // Read rather than assumed to be running: `Gate::running()` is what `main` builds today, but
     // a tray that hardcodes its starting label is a tray that lies the first time that changes.
     let gate = app.state::<Gate>();
-    let open = MenuItem::with_id(app, "open", "Open Zyris", true, None::<&str>)?;
     let pause = MenuItem::with_id(app, "pause", pause_label(gate.is_paused()), true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &quit])?;
+    let mut menu = MenuBuilder::new(app);
+    if windowed {
+        let open =
+            MenuItem::with_id(app, "open", "Open Zyris", true, None::<&str>)?;
+        menu = menu.item(&open);
+    }
+    let menu = menu.item(&pause).item(&quit).build()?;
 
     // The label follows the switch rather than the click. `set_paused` from the Tools tab moves
     // the same gate, and a tray that only relabelled itself when its own item was clicked would
@@ -87,7 +99,13 @@ pub fn build(app: &AppHandle, runtime: &tokio::runtime::Handle) -> tauri::Result
         // the window instead. Tauri documents this as unsupported on Linux, where the menu may
         // appear on any click regardless — there, "Open Zyris" in the menu is the reliable path.
         .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| {
+        // `move`, because the handler outlives this call: the one thing it carries is a `bool`.
+        .on_tray_icon_event(move |tray, event| {
+            // A left click means "open the window" wherever the desktop gives the tray one, and
+            // means nothing at all in a build that has no window to open.
+            if !windowed {
+                return;
+            }
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,

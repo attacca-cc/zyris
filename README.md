@@ -88,7 +88,8 @@ there without asking from then on, and a *different* key under the same name is 
 rather than asked about a second time. Refusing pins nothing and fails that one send; an agent can
 try again, and you will be asked again.
 
-A machine running `--headless` has no window to read that off. Every Zyris writes the same value
+A machine running `--headless`, and a machine running [Lite](#lite), have no window to read that
+off. Every Zyris writes the same value
 to its log when it starts, on the line reading `peer identity ready`, so on a headless machine
 that is where you look. It is not worth relying on anywhere else: Zyris logs to standard output,
 and a copy started by the autostart entry has no console for that output to reach.
@@ -101,8 +102,9 @@ quarters of a second a question is on the screen. The whole point of a fingerpri
 somebody read it, and a button you can be trained to click without looking is worth nothing.
 
 **Nobody at the screen is a refusal.** The question gives up after 45 seconds, because the agent's
-call is cut off at 55 and an answer after that reaches nobody. `--headless` refuses every unknown
-peer without asking at all — there is nobody to ask, and nobody being around is not consent.
+call is cut off at 55 and an answer after that reaches nobody. `--headless` and [Lite](#lite)
+refuse every unknown peer without asking at all — there is nobody to ask, and nobody being around
+is not consent.
 
 Once a name is pinned, the pin keeps working in both directions: a key that is not the one pinned
 for that name is refused, whether this machine is dialling it or it is dialling here. What that
@@ -436,6 +438,69 @@ rather than Zyris's: `cmd.exe` does not wait for a window-subsystem binary, so t
 appear *after* the next prompt instead of under the command that asked for it. See [What nobody has
 checked by hand](#what-nobody-has-checked-by-hand).
 
+## Lite
+
+**Lite is Zyris with speech and the window taken out**, published beside the ordinary installers on
+every release. It runs in the tray, dials Attacca, announces the same five capabilities and the
+same promoted MCP servers, answers the same console commands, installs the same autostart entry —
+and it has no window to open, no Voice screen, and no audio stack in the binary at all.
+
+| | Ordinary | Lite |
+|---|---|---|
+| Speech | whisper.cpp and ONNX Runtime, compiled in | not compiled in and not linked |
+| Window | one, hidden until asked for | none declared, so none is ever created |
+| Tray | yes | yes — the only thing on the screen |
+| `terminal` `file_io` `input` `screen_capture` `file_transfer`, MCP | yes | yes |
+| `zyris login` / `up` / `down` / `status` / `config` / `mcp` / `autostart` | yes | yes |
+| Settings | the screens, or `zyris config` | `zyris config` |
+
+**What is gone, and what is not.** Gone: the audio stack, so no microphone is ever opened and no
+model is ever downloaded; the Voice screen; and the window. Not gone: Tauri, and with it the
+webview library the tray is built on. Lite is an empty `app.windows` in the config it is built
+with, which means nothing is ever drawn — not a build without the toolkit. It is a lighter install
+and a smaller binary, and it is deliberately **not** a `--headless` node, which has no tray for
+anybody to reach and nothing to open.
+
+**Two things behave differently, both because there is no window to ask on:**
+
+- **Sending a file to a machine this one has not pinned is refused, not asked about.** The
+  fingerprint would have to be read on a screen, so the answer is the immediate no a `--headless`
+  node gives, rather than a question parked for 45 seconds with nothing able to answer it.
+  *Receiving* is unchanged: a node of your account still sends here without asking, exactly as it
+  does to an ordinary build. To pin a machine, send to it once from an ordinary build, or from a
+  `zyris` there.
+- **The enrolment code is read from a console.** `zyris login` prints it and waits for it, and
+  `zyris status` prints it while a node is waiting to be authorized. The tray menu has no Open
+  item in this build, because there is nothing to open.
+
+**Both are published, and which one a machine holds is a decision rather than an accident.** On
+Windows and on macOS they are separate applications — their own install directory, Start Menu
+entry and bundle name, from the product name and identifier — and on Linux the packages are `zyris`
+and `zyris-lite`. But **both `.deb`s and both `.rpm`s install the same `/usr/bin/zyris`**, so a
+Linux machine has one of them: `dpkg` and `rpm` refuse to overwrite a file another package owns,
+which means removing Zyris before installing Lite rather than a silent replacement. Separate
+everywhere is the update file — `latest-lite.json` against `latest.json` — so no update can turn
+one of them into the other.
+
+**There is no speech in a Lite binary to be switched off, and that is measurable rather than
+argued.** The installed binary of the 0.2.1 Linux build is 65 MB against the ordinary build's
+121 MB, and `strings` over it finds no `whisper`, no `ggml`, no `onnxruntime` and no `cpal` at all,
+where the ordinary one has 429, 1424, 25383 and 1112 matches. What it *does* have is everything
+else: `tauri` and `iroh` appear about as often as they do there.
+
+### Building Lite
+
+```bash
+pnpm tauri build --features custom-protocol --config crates/zyris-app/tauri.lite.conf.json
+```
+
+That is the whole difference from an ordinary build: that config — empty `app.windows`, its own
+product name, identifier and update file — and no `voice` on the command line.
+`.github/workflows/release.yml` builds it for all three platforms under the `zyris-lite-*`
+artifacts, `ci.yml` compiles it on every pull request, and
+`crates/zyris-app/tests/the_lite_build_is_a_config.rs` fails if the config stops declaring no
+window or starts sharing a name with the ordinary build.
+
 ## What nobody has checked by hand
 
 Everything on this page has tests behind it, and two kinds of claim are outside what any test on
@@ -631,6 +696,10 @@ downloads are on the [releases page](https://github.com/attacca-cc/zyris/release
 | Android (arm64) | `Zyris_<version>_arm64.apk` |
 | iPhone, iPad | `Zyris_<version>_ios-unsigned.ipa`, installed with AltStore or Sideloadly |
 
+**Every release carries a Lite build of the same program beside those**, with speech and the
+window taken out: `Zyris-Lite_<version>_x64-setup.exe`, `Zyris-Lite_<version>_amd64.deb`,
+`Zyris-Lite-<version>-1.x86_64.rpm` and `Zyris-Lite_<version>_aarch64.dmg`. See [Lite](#lite).
+
 **On NixOS**, the flake in this repository packages the released `.deb` against nixpkgs:
 
 ```bash
@@ -653,7 +722,8 @@ before the window. Zyris asks the processor instead and does not make the call: 
 gets its window, its tray and every tool, and a Voice screen that says speech is off because the
 processor has no AVX2. A build without `--features voice` loses nothing at all; the published
 installers carry the audio stack, so what an older machine gives up is speech rather than the
-program.
+program. **A [Lite](#lite) install carries no audio stack at all** — speech there is not off, it
+is not in the binary.
 
 ```bash
 sudo apt install ./Zyris_0.1.0_amd64.deb
@@ -728,7 +798,8 @@ cargo run --release --features custom-protocol -p zyris-app   # the same, withou
 ```
 
 **Speech is a feature of its own, `voice`**, and a build without it has no microphone and no
-voice. It compiles whisper.cpp through CMake, generates bindings with `bindgen` (so `libclang`
+voice. Building without it, and with a config that declares no window too, is [Lite](#lite) —
+the same command with one more argument. It compiles whisper.cpp through CMake, generates bindings with `bindgen` (so `libclang`
 has to be findable) and links ONNX Runtime, which `ort` downloads once per machine:
 
 ```bash
