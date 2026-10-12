@@ -93,6 +93,12 @@ webpki-root-certs = "1"
 gtk = "0.18"
 ashpd = { workspace = true }
 futures-util = { workspace = true }
+# **`libei`, so GNOME and KDE Wayland get `input`.** Both drop XTEST silently, so the only input
+# path a Wayland session there has is the RemoteDesktop portal; without this feature
+# `zyris-tools`'s `announce.rs` announces `screen_capture` alone on those desktops, deliberately
+# but not usefully. Linux only, which is why the feature is turned on from this table rather than
+# from the `zyris-tools` entry above it — that one also covers macOS, where there is no portal.
+zyris-tools = { path = "../zyris-tools", features = ["libei"] }
 
 # `setsid`, and nothing else in it: `zyris up` starts a node in a session of its own so that it
 # outlives the shell — and the SSH connection — it was started from, and `std::process` has no way

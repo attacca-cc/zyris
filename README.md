@@ -40,18 +40,19 @@ your home directory. That is where relative paths start rather than a fence arou
 absolute path goes where it says, and a command can work anywhere you can. What bounds this is the
 pause switch, the audit log, and what Attacca lets an agent call in the first place.
 
-`input` and `screen_capture` are announced together or not at all — an agent that can see the
-screen but not act on it is half useful, and one that can act but not see is guessing
-coordinates. On Linux, neither appears when no display server answers. The one exception is a
-Wayland session on a compositor that is not wlroots-based — GNOME, KDE — where `screen_capture`
-is announced and `input` is not: the only input path there is XTEST into Xwayland, which reports
-success while the pointer on screen does not move. On Hyprland, Sway and other wlroots
-compositors `input` drives `wlr-virtual-pointer` and is announced as usual. On Windows they are
-always announced: the layer underneath reports success without checking, so there is nothing
-to detect, and on a Windows session with no interactive desktop the pointer calls will look
-like they worked. Positions are in the pixels a screenshot actually returned, which on a scaled
-display is not what your settings panel says; a coordinate read off a capture goes straight
-into `move_to` with nothing applied to it.
+`input` is never announced without `screen_capture` — an agent that can act but not see is
+guessing coordinates. On Linux, neither appears when no display server answers. On Hyprland, Sway
+and other wlroots compositors `input` drives `wlr-virtual-pointer`. On GNOME and KDE Wayland it
+goes through **libei**, the compositor's own remote-input interface: starting the node asks you to
+approve remote input, and that is the only input path those two sessions honour — the alternative
+there is XTEST into Xwayland, which reports success while the pointer on screen does not move, so
+a build without libei announces `screen_capture` alone rather than a tool that lies. A session
+whose portal you refuse, or a compositor that will not serve a pointer at all, gets the screen on
+its own for the same reason. On Windows both are always announced: the layer underneath reports
+success without checking, so there is nothing to detect, and on a Windows session with no
+interactive desktop the pointer calls will look like they worked. Positions are in the pixels a
+screenshot actually returned, which on a scaled display is not what your settings panel says; a
+coordinate read off a capture goes straight into `move_to` with nothing applied to it.
 
 The audit log records which display and where the pointer went. It does not record what was
 typed: `type_text` is how a password reaches an application, and a run of single-key presses
@@ -700,13 +701,20 @@ downloads are on the [releases page](https://github.com/attacca-cc/zyris/release
 window taken out: `Zyris-Lite_<version>_x64-setup.exe`, `Zyris-Lite_<version>_amd64.deb`,
 `Zyris-Lite-<version>-1.x86_64.rpm` and `Zyris-Lite_<version>_aarch64.dmg`. See [Lite](#lite).
 
-**On NixOS**, the flake in this repository packages the released `.deb` against nixpkgs:
+**On NixOS**, the flake in this repository packages the released `.deb` against nixpkgs, both
+builds of it — the ordinary one as `zyris`, and [Lite](#lite) as `zyris-lite`:
 
 ```bash
-nix run github:attacca-cc/zyris
+nix run github:attacca-cc/zyris                 # the ordinary build: window, speech, tray
+nix run github:attacca-cc/zyris#zyris-lite      # Lite: no window, no audio stack, tray only
 # or, in a NixOS configuration: nixpkgs.overlays = [ zyris.overlays.default ];
-#                                environment.systemPackages = [ pkgs.zyris ];
+#                                environment.systemPackages = [ pkgs.zyris pkgs.zyris-lite ];
 ```
+
+**Lite is the one to reach for on a machine whose window will not draw** — a server, a machine
+with no GPU to speak of, or one where the graphics stack and the webview disagree. It is the same
+node: the same five capabilities, the same promoted MCP servers, the same console commands,
+visible as a tray icon and addressable with `zyris status`.
 
 **The macOS app is not signed or notarised yet**, so the first launch is refused: open it with
 right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zyris.app` once.
@@ -728,6 +736,17 @@ is not in the binary.
 ```bash
 sudo apt install ./Zyris_0.1.0_amd64.deb
 ```
+
+**On Linux, a window that will not come up is the graphics stack rather than Zyris.** WebKit's web
+process builds an EGL display of its own for accelerated compositing, and a machine that cannot
+give it one — no GPU at all, a driver and an EGL stack that disagree, a `.deb` repackaged against
+another distribution's libraries — gets `Could not create default EGL display: EGL_BAD_PARAMETER.
+Aborting...` in the log and a web process that dies before drawing anything: an empty window,
+while the node, the tray and every tool behind it keep working. **Zyris starts with compositing
+off for exactly that reason.** A machine that wants it back sets `WEBKIT_DISABLE_COMPOSITING_MODE=0`
+and gets it. If a window is still empty, `LIBGL_ALWAYS_SOFTWARE=1` is the next thing to try, and
+after that the machine to blame is the driver rather than this program; `zyris --headless` and
+[Lite](#lite) are complete nodes with no window to draw at all.
 
 **The Windows installer is not signed, and Windows will say so.** SmartScreen shows "Windows
 protected your PC" and puts the install button behind **More info → Run anyway**; Defender

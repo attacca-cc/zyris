@@ -39,6 +39,21 @@ zyris-transfer = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 zyris-input = { workspace = true, features = ["wayland"] }
 
+[features]
+default = []
+# `libei` — the RemoteDesktop portal — is the other backend the GNOME and KDE Wayland sessions
+# need, and this feature only forwards it: the whole implementation is `zyris-input`'s, its
+# `settings_for_session` turns X11 off on a Wayland session once this is on, and `announce.rs`
+# reads back whether it was.
+#
+# **A feature of this crate rather than one more entry on the target dependency above**, because
+# the announcement has to *know*: `cfg!(feature = "libei")` is what decides whether a Wayland
+# session that is not wlroots is offered `input`, and a feature belonging to a dependency is not
+# visible to this crate's own `cfg`. `zyris-app` turns it on for Linux desktop builds — which is
+# what the published `.deb` is — and `cargo test -p zyris-tools` runs without it, so both branches
+# of that decision are compiled by one CI job or the other.
+libei = ["zyris-input/libei"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # `rt-multi-thread` on top of the two the other tests need: binding an iroh endpoint starts

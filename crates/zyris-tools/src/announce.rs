@@ -225,10 +225,17 @@ impl Tools {
     /// is guessing coordinates. So this is one decision, made once, and it is `EnigoInput::new`.
     /// No separate probe: a second way of asking produces a second answer.
     ///
-    /// **Except where `input` would lie.** A Wayland session on a non-wlroots compositor connects
-    /// `EnigoInput::new` through Xwayland, whose XTEST moves nothing on screen; there the screen is
-    /// announced alone (see [`input_reaches_the_screen`]). Half useful is better than a tool that
-    /// reports every click as done.
+    /// **Except where `input` would lie.** A Wayland session on a non-wlroots compositor without
+    /// `libei` connects `EnigoInput::new` through Xwayland, whose XTEST moves nothing on screen;
+    /// there the screen is announced alone (see [`input_reaches_the_screen`]). Half useful is
+    /// better than a tool that reports every click as done.
+    ///
+    /// **And where the input backend will not connect at all.** With `libei` built, a Wayland
+    /// session has its X11 backend turned off — see `zyris_input::settings_for_session` — so an
+    /// `Err` here is no longer "no display server": it is the RemoteDesktop portal not answering.
+    /// The screen is still capturable there, through the compositor's own screenshot portal, and
+    /// it is announced alone rather than dropped along with the pointer. Everywhere else an `Err`
+    /// still means what it always did.
     ///
     /// **That probe only detects absence on Linux, and the difference is worth knowing before
     /// trusting it.** There, `Enigo::new` tries each backend and returns
@@ -261,12 +268,12 @@ impl Tools {
     fn screen_pair(&self) -> Vec<Arc<dyn ServeCapability>> {
         let capture = zyris_screen::HostScreenCapture::default();
         let backend = capture.backend();
-        let reaches =
-            input_reaches_the_screen(std::env::var_os("WAYLAND_DISPLAY").is_some(), backend);
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let reaches = input_reaches_the_screen(wayland, backend);
         match zyris_input::EnigoInput::new(zyris_screen::HostDisplays(backend)) {
             Ok(_) if !reaches => {
                 tracing::info!(
-                    "input is not announced: this Wayland compositor offers no wlr-virtual-pointer, and XTEST into Xwayland reports success without moving anything a person can see; serving input here needs libei"
+                    "input is not announced: this Wayland compositor offers no wlr-virtual-pointer and this build has no libei, so XTEST into Xwayland is all that is left, and it reports success without moving anything a person can see"
                 );
                 vec![self.guard(ScreenCaptureServer(capture))]
             }
@@ -274,6 +281,19 @@ impl Tools {
                 self.guard(ScreenCaptureServer(capture)),
                 self.guard(InputServer(input)),
             ],
+            // **A Wayland session with no input backend is still a session with a screen.** With
+            // `libei` built, the X11 backend is switched off on a Wayland session, so this arm is
+            // the RemoteDesktop portal not answering rather than a machine with no display server
+            // at all; the screen is capturable through the compositor's own screenshot portal,
+            // and it is announced alone because a pointer that reports every click as done is
+            // worse than an absent one.
+            Err(error) if wayland && LIBEI => {
+                tracing::info!(
+                    %error,
+                    "input is not announced: the RemoteDesktop portal did not answer, so this build has no input backend on this Wayland session; screen_capture is announced alone, and an agent on this node can see the screen but not touch it"
+                );
+                vec![self.guard(ScreenCaptureServer(capture))]
+            }
             // `info!`, not `warn!`. A machine with no display server is an ordinary headless
             // server, not a fault, and a warning on every launch of a machine that will never
             // have a screen teaches people to ignore warnings. The error is named so a machine
@@ -368,6 +388,16 @@ fn describe(descriptors: &[CapabilityDescriptor]) -> Vec<Announced> {
         .collect()
 }
 
+/// Whether this build carries the `libei` backend.
+///
+/// **A constant, so that the two places that have to agree read the same fact.** One is
+/// [`input_reaches_the_screen`] below, which decides whether a Wayland session is offered
+/// `input`; the other is `zyris_input::settings_for_session`, which turns the X11 backend off on
+/// a Wayland session once this is on. The feature is declared by this crate and turned on by
+/// `zyris-app` for Linux desktop builds. Asking the session instead — "is there a portal?" —
+/// would be a second probe, which is what this module's own rule forbids.
+const LIBEI: bool = cfg!(feature = "libei");
+
 /// Whether `input` would move the pointer a person sees, rather than report success for events
 /// that go nowhere.
 ///
@@ -377,10 +407,19 @@ fn describe(descriptors: &[CapabilityDescriptor]) -> Vec<Announced> {
 /// point back, while the cursor on screen stays put. The screen backend stands in for "the
 /// compositor is wlroots", because `ScreenBackend::Wayland` is chosen exactly when `zwlr_screencopy`
 /// answers, and every mainstream wlroots compositor that offers it offers the virtual pointer too.
-/// The one path that would serve those other sessions is libei, which this build does not enable.
+///
+/// **With `libei` built, every Wayland session is one of these**, and the proof is the `Ok` this
+/// is asked about rather than a second look at the machine: `settings_for_session` turns the X11
+/// backend off on a Wayland session there, so what connected is either wlroots' virtual pointer
+/// or the RemoteDesktop portal — mutter and kwin honour nothing else — and neither of them can be
+/// XTEST. Without it, the only backend a non-wlroots Wayland session has left is XTEST into
+/// Xwayland, which is the lie this returns `false` for.
 fn input_reaches_the_screen(wayland_session: bool, backend: zyris_screen::ScreenBackend) -> bool {
     #[cfg(target_os = "linux")]
     {
+        if LIBEI && wayland_session {
+            return true;
+        }
         !wayland_session || matches!(backend, zyris_screen::ScreenBackend::Wayland)
     }
     #[cfg(not(target_os = "linux"))]
@@ -397,7 +436,7 @@ mod tests {
     /// An X11 session drives the real pointer through XTEST, and a wlroots session through
     /// `wlr-virtual-pointer`. A Wayland session the screen reaches some other way — GNOME, KDE —
     /// would be left with XTEST into Xwayland, which moves nothing a person can see.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(feature = "libei")))]
     #[test]
     fn input_is_announced_only_where_it_reaches_the_screen() {
         use zyris_screen::ScreenBackend;
@@ -407,6 +446,23 @@ mod tests {
             !input_reaches_the_screen(true, ScreenBackend::Xcap),
             "GNOME or KDE: XTEST into Xwayland reports success and moves nothing"
         );
+    }
+
+    /// **The other half, and the reason the test above is gated rather than rewritten.** With
+    /// `libei` built — which is what a Linux desktop build ships — a Wayland session reaches the
+    /// screen through the RemoteDesktop portal whatever the compositor is, because
+    /// `settings_for_session` has already turned X11 off and something other than XTEST is what
+    /// answered. GNOME and KDE go from "no `input`" to "`input`", and nothing else moves.
+    #[cfg(all(target_os = "linux", feature = "libei"))]
+    #[test]
+    fn libei_reaches_the_screen_on_any_wayland_session() {
+        use zyris_screen::ScreenBackend;
+        assert!(input_reaches_the_screen(false, ScreenBackend::Xcap), "an X11 session");
+        assert!(
+            input_reaches_the_screen(true, ScreenBackend::Xcap),
+            "GNOME or KDE, through the RemoteDesktop portal"
+        );
+        assert!(input_reaches_the_screen(true, ScreenBackend::Wayland), "a wlroots session");
     }
 
     /// How many tools each of this machine's own capabilities announces.
@@ -498,11 +554,15 @@ mod tests {
         assert!(json["auditLog"].as_str().unwrap().ends_with("audit.jsonl"));
     }
 
+    /// **The one shape that must not happen, and the one that may.** An agent that can act but not
+    /// see is guessing coordinates, so `input` without `screen_capture` is a bug wherever it comes
+    /// from. `screen_capture` alone is not a bug: a Wayland session whose compositor serves no
+    /// pointer (see [`input_reaches_the_screen`]) or whose RemoteDesktop portal did not answer
+    /// announces the screen by itself, and half useful beats a tool that reports every click as
+    /// done.
     #[tokio::test]
-    async fn the_screen_and_the_pointer_are_announced_together_or_not_at_all() {
+    async fn the_pointer_is_never_announced_without_the_screen() {
         // Not a display test: it asserts the shape of the answer on whatever host runs it.
-        // An agent that can see the screen but not act on it is half useful, and one that can
-        // act but not see is guessing coordinates.
         let dir = tempfile::tempdir().unwrap();
 
         let names: Vec<String> =
@@ -510,10 +570,11 @@ mod tests {
 
         assert!(names.contains(&"terminal".to_string()));
         assert!(names.contains(&"file_io".to_string()));
-        assert_eq!(
-            names.contains(&"input".to_string()),
-            names.contains(&"screen_capture".to_string()),
-            "one of the pair was announced without the other: {names:?}"
+        assert!(
+            !names.contains(&"input".to_string())
+                || names.contains(&"screen_capture".to_string()),
+            "input was announced without the screen, which is an agent guessing coordinates: \
+             {names:?}"
         );
     }
 

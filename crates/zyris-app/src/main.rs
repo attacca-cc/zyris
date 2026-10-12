@@ -32,17 +32,43 @@ const EVENT_CAPACITY: usize = 64;
 /// The record of what an agent asked of this machine, inside the instance's data directory.
 const AUDIT_FILE: &str = "audit.jsonl";
 
-/// WebKitGTK's DMABUF renderer can take the whole process down on a Wayland session: on Hyprland
-/// with an NVIDIA GPU the window died the instant it opened, with `Gdk-Message: Error 71
-/// (Protocol error) dispatching to Wayland display` and nothing else. What this window draws is
-/// a settings page and a transcript, which the non-DMABUF path renders without a difference
-/// anybody can see. A value somebody set themselves is left alone.
+/// Keep WebKitGTK off this machine's graphics card. What this window draws is a settings page and
+/// a transcript, and neither needs one — while the paths that reach for one are what decides
+/// whether the window opens at all.
+///
+/// **Two switches, and each is set only when nobody set it themselves.** A value a person has put
+/// there is left exactly as it is, which is what makes either one an escape hatch rather than a
+/// policy.
+///
+/// - **`WEBKIT_DISABLE_DMABUF_RENDERER`.** The DMABUF renderer can take the whole process down on
+///   a Wayland session: on Hyprland with an NVIDIA GPU the window died the instant it opened, with
+///   `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` and nothing else. The
+///   non-DMABUF path renders this window without a difference anybody can see.
+/// - **`WEBKIT_DISABLE_COMPOSITING_MODE`.** Accelerated compositing is what makes the *web
+///   process* build an EGL display of its own, and a machine where none can be built — no GPU at
+///   all, a driver and an EGL stack that disagree, a repackaged `libEGL` that does not match the
+///   card underneath — gets `Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...`
+///   out of WebKit and a web process that dies before it draws a pixel. The window then comes up
+///   empty while the node, the tray and every tool behind it keep running, which reads as a broken
+///   program rather than as a window that could not use a card it did not need. With compositing
+///   off the web process never asks for that display, and which card is in the machine stops being
+///   a question this program has to survive. The one cost is composited drawing this window never
+///   asked for: the conversation backdrop already paints its canvas in software, for the same
+///   reason.
+///
+/// A machine that wants compositing back sets `WEBKIT_DISABLE_COMPOSITING_MODE=0` and gets it, with
+/// whatever that machine's driver does.
 #[cfg(target_os = "linux")]
-fn keep_webkit_off_dmabuf() {
-    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
-    if std::env::var_os(VAR).is_none() {
-        // SAFETY: called first thing in `main`, before any thread exists to read the environment.
-        unsafe { std::env::set_var(VAR, "1") };
+fn keep_webkit_off_the_gpu() {
+    for var in [
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+    ] {
+        if std::env::var_os(var).is_none() {
+            // SAFETY: called first thing in `main`, before any thread exists to read the
+            // environment.
+            unsafe { std::env::set_var(var, "1") };
+        }
     }
 }
 
@@ -115,7 +141,7 @@ fn attach_console(allocate: bool) {
 fn main() -> anyhow::Result<()> {
     // First, while this is the only thread there is: see its documentation.
     #[cfg(target_os = "linux")]
-    keep_webkit_off_dmabuf();
+    keep_webkit_off_the_gpu();
 
     // Parsed before anything else touches the system. `clap` prints help or version text and
     // exits the process on `--help`/`--version`, and that has to work even while another instance
@@ -833,6 +859,31 @@ mod tests {
         assert!(
             lock < servers,
             "the instance lock has to be taken before anything this run owns is started"
+        );
+    }
+
+    #[test]
+    fn the_webview_is_kept_off_the_gpu_before_anything_else_runs() {
+        // **The second ordering this file arranges, and the harder one to notice.** The env
+        // switches `keep_webkit_off_the_gpu` sets are only sound to set while this process has one
+        // thread, so a run that reached the runtime — or the window — before setting them would be
+        // both unsound and, on a machine whose graphics stack WebKit cannot use, an empty window
+        // with a crash in the log. Nothing else in this file is load-bearing in that way, which is
+        // why this is the assertion rather than a comment saying so.
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .expect("main.rs is readable from its own crate");
+
+        // `rfind`, because the name appears once as the definition above and once as this call.
+        let kept_off = source
+            .rfind("keep_webkit_off_the_gpu()")
+            .expect("the webview is kept off the GPU");
+        let parsed = source.find("cli::Cli::try_parse()").expect("the CLI is parsed");
+        assert!(
+            kept_off < parsed,
+            "the webview has to be kept off the GPU first, while this is still one thread: see \
+             `keep_webkit_off_the_gpu`"
         );
     }
 }
