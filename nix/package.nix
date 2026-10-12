@@ -5,12 +5,19 @@
 # `wrapGAppsHook3` is what makes it render: without the GSettings schemas on XDG_DATA_DIRS,
 # WebKitGTK on Wayland lays the page out at a zoom of -1/96.
 #
-# **`lite ? false` picks which release asset is repackaged**, and it is the only difference: Lite
-# is the same program built without the audio stack and without a window. A parameter rather than
-# a second file because everything else here is what a Lite install needs too — the wrapping, the
-# patched libraries, the tray's runtime dependency — since Lite is not a build without the toolkit
-# (`README.md`), and the tray it does have is GTK. `flake.nix` publishes both as `zyris` and
-# `zyris-lite`.
+# **`liteBuild ? false` picks which release asset is repackaged**, and it is the only difference:
+# Lite is the same program built without the audio stack and without a window. A parameter rather
+# than a second file because everything else here is what a Lite install needs too — the wrapping,
+# the patched libraries, the tray's runtime dependency — since Lite is not a build without the
+# toolkit (`README.md`), and the tray it does have is GTK. `flake.nix` publishes both as `zyris`
+# and `zyris-lite`.
+#
+# **Not spelled `lite`, and that is not a style choice.** `callPackage` fills every formal argument
+# it can find in nixpkgs before it falls back to the default, and nixpkgs has a package called
+# `lite` (a text editor). `pkgs.callPackage ./nix/package.nix { }` therefore handed this file a
+# *derivation* where the boolean was expected, and `nix eval .#zyris` failed with `expected a
+# Boolean but found a set` pointing at the line below — measured 2026-10-12, and invisible to a
+# parse check. Any name here has to be one nixpkgs will never have.
 {
   lib,
   stdenv,
@@ -39,7 +46,7 @@
   wayland,
   libGL,
   vulkan-loader,
-  lite ? false,
+  liteBuild ? false,
 }:
 
 let
@@ -48,18 +55,18 @@ let
   # anything this derivation checks — `fetchurl` checks the hash below, which is the whole of what
   # a repackage needs, and it is what makes a Lite asset whose bytes changed fail here instead of
   # at run time.
-  asset = if lite then "Zyris-Lite" else "Zyris";
-  hash = if lite then
+  asset = if liteBuild then "Zyris-Lite" else "Zyris";
+  hash = if liteBuild then
     "sha256-j+9scjMJEdfRoPPev8r4YIc7LJeM0Rt4lvQsdRS5Tbk="
   else
     "sha256-EUQcfdVaknBRTofNdmsdsr72UNZbdI8KH+P6LmZ9WP4=";
-  description = if lite then
+  description = if liteBuild then
     "A desktop node for Attacca with no window and no audio stack: the tray, the tools and the console commands"
   else
     "A desktop node for Attacca: talk to your agent, and let it use this computer";
 in
 stdenv.mkDerivation (finalAttrs: {
-  pname = if lite then "zyris-lite" else "zyris";
+  pname = if liteBuild then "zyris-lite" else "zyris";
   version = "0.3.0";
 
   src = fetchurl {

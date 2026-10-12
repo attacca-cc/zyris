@@ -16,7 +16,7 @@
         # is a tray icon and a node, and it announces the same five capabilities. No web process
         # ever draws anything, which on a machine whose graphics stack WebKit cannot use is the
         # difference between a node with an empty window and a node that simply runs.
-        zyris-lite = pkgs.callPackage ./nix/package.nix { lite = true; };
+        zyris-lite = pkgs.callPackage ./nix/package.nix { liteBuild = true; };
         default = zyris;
       };
 
@@ -26,7 +26,7 @@
       # `environment.systemPackages = [ pkgs.zyris pkgs.zyris-lite ];`.
       overlays.default = final: prev: {
         zyris = final.callPackage ./nix/package.nix { };
-        zyris-lite = final.callPackage ./nix/package.nix { lite = true; };
+        zyris-lite = final.callPackage ./nix/package.nix { liteBuild = true; };
       };
     };
 }
