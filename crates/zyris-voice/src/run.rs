@@ -111,7 +111,7 @@ pub struct Settings {
     /// How many seconds the microphone stays open for an answer after a spoken question, without
     /// the wake phrase. `None` is [`DEFAULT_FOLLOW_UP_SECONDS`]; 0 is off.
     #[serde(default)]
-    pub follow_up_seconds: Option<u32>,
+    pub follow_up_seconds: Option<f32>,
     /// Whether Base and the voice have been fetched once without anyone asking. Set after the
     /// first launch that got them, so a model somebody deletes later is not brought back.
     #[serde(default)]
@@ -285,9 +285,11 @@ fn input_gain(settings: &Settings) -> f32 {
 
 const DEFAULT_FOLLOW_UP_SECONDS: u32 = 8;
 
-/// The follow-up window `settings` asks for, in whole seconds: 0 to 30, 8 when unset.
+/// The follow-up window `settings` asks for, in whole seconds: 0 to 30, 8 when unset. Stored as
+/// a float because the console writes every number key as one.
 fn follow_up_seconds(settings: &Settings) -> u32 {
-    settings.follow_up_seconds.unwrap_or(DEFAULT_FOLLOW_UP_SECONDS).min(30)
+    let seconds = settings.follow_up_seconds.filter(|s| s.is_finite());
+    seconds.unwrap_or(DEFAULT_FOLLOW_UP_SECONDS as f32).clamp(0.0, 30.0).round() as u32
 }
 
 /// The volume `settings` asks for, clamped the way the voice will clamp it.
@@ -828,9 +830,9 @@ impl Engine {
     /// the next question, on the session that is listening.
     pub async fn choose_follow_up_seconds(&self, seconds: u32) {
         let mut live = self.live.lock().await;
-        live.settings.follow_up_seconds = Some(seconds);
+        live.settings.follow_up_seconds = Some(seconds as f32);
         let seconds = follow_up_seconds(&live.settings);
-        live.settings.follow_up_seconds = Some(seconds);
+        live.settings.follow_up_seconds = Some(seconds as f32);
         self.store(&live.settings);
         self.follow_up.store(seconds, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1854,12 +1856,20 @@ mod tests {
 
     #[test]
     fn follow_up_seconds_default_to_eight_and_clamp_to_thirty() {
-        let with = |s: Option<u32>| Settings { follow_up_seconds: s, ..Settings::default() };
+        let with = |s: Option<f32>| Settings { follow_up_seconds: s, ..Settings::default() };
         assert_eq!(follow_up_seconds(&with(None)), 8);
-        assert_eq!(follow_up_seconds(&with(Some(0))), 0, "zero is off");
-        assert_eq!(follow_up_seconds(&with(Some(99))), 30);
+        assert_eq!(follow_up_seconds(&with(Some(0.0))), 0, "zero is off");
+        assert_eq!(follow_up_seconds(&with(Some(99.0))), 30);
+        assert_eq!(follow_up_seconds(&with(Some(f32::NAN))), 8);
         let read: Settings = serde_json::from_str(r#"{"followUpSeconds": 12}"#).unwrap();
-        assert_eq!(read.follow_up_seconds, Some(12));
+        assert_eq!(follow_up_seconds(&read), 12);
+        // What `zyris config set voice.followUpSeconds 8` writes: every number key is a float.
+        let read: Settings = serde_json::from_str(r#"{"followUpSeconds": 8.0}"#).unwrap();
+        assert_eq!(follow_up_seconds(&read), 8);
+        let read: Settings = serde_json::from_str(r#"{"followUpSeconds": -1}"#).unwrap();
+        assert_eq!(follow_up_seconds(&read), 0);
+        let read: Settings = serde_json::from_str(r#"{"followUpSeconds": 8.6}"#).unwrap();
+        assert_eq!(follow_up_seconds(&read), 9);
     }
 
     #[test]
