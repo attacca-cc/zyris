@@ -655,6 +655,10 @@ impl Session {
     /// it would take a core off the thing somebody is actually waiting for.
     fn look_again(&mut self) {
         let Some(turn) = &self.turn else { return };
+        // An open window has heard no speech yet: a look would only preview a guess at silence.
+        if self.deadline.is_some() {
+            return;
+        }
         // **Nothing is watching, so there is nothing to compute.** A partial exists only to be
         // shown: it is never sent to the agent and never becomes the turn's answer. Whisper
         // re-reads the whole recording each time, so a hold of ten seconds with no subscriber
@@ -1038,8 +1042,9 @@ impl Session {
             .follow_up
             .as_ref()
             .map_or(0, |seconds| seconds.load(std::sync::atomic::Ordering::Relaxed));
-        // A turn already open (the key held) is where the answer goes anyway.
-        if self.turn.is_some() || seconds == 0 {
+        // A turn already open (the key held) is where the answer goes anyway. Without a phrase
+        // the user opens the microphone by hand, so a question must not open it for them.
+        if self.turn.is_some() || self.watch.is_none() || seconds == 0 {
             return;
         }
         // Said before the question ended, so not part of the answer.
@@ -4004,6 +4009,15 @@ mod tests {
         scribe: Arc<Scribe>,
         seconds: u32,
     ) -> (Harness, broadcast::Receiver<crate::Trace>, Arc<Speaking>, Arc<Conversation>) {
+        following_up_with(scribe, seconds, true)
+    }
+
+    /// [`following_up`], with or without a phrase to listen for.
+    fn following_up_with(
+        scribe: Arc<Scribe>,
+        seconds: u32,
+        phrase: bool,
+    ) -> (Harness, broadcast::Receiver<crate::Trace>, Arc<Speaking>, Arc<Conversation>) {
         let (audio, audio_rx) = mpsc::unbounded_channel();
         let (keys, keys_rx) = broadcast::channel(32);
         let (events, events_rx) = broadcast::channel(64);
@@ -4016,9 +4030,12 @@ mod tests {
             attacca.clone(),
             events.clone(),
         );
-        let session = Session::new(audio_rx, keys_rx, apm, scribe.clone(), events)
-            .tracing(traces)
-            .listening_for(the_phrase())
+        let mut session =
+            Session::new(audio_rx, keys_rx, apm, scribe.clone(), events).tracing(traces);
+        if phrase {
+            session = session.listening_for(the_phrase());
+        }
+        let session = session
             .speaking(speaking.clone())
             .conversation(attacca.clone())
             .following_up_for(Arc::new(std::sync::atomic::AtomicU32::new(seconds)));
@@ -4057,6 +4074,68 @@ mod tests {
 
         assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
         assert_eq!(zyris.scribe.calls(), 0);
+        zyris.stops().await;
+    }
+
+    /// **Silence is not previewed.** With a window watched, as the app always watches, no
+    /// partial runs before speech starts: it would publish whisper's guess at nothing, and one
+    /// still running at expiry would hold up the phrase check.
+    #[tokio::test(start_paused = true)]
+    async fn a_watched_window_nobody_speaks_in_runs_no_partials() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("thank you"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&quiet(8.5)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        assert_eq!(zyris.scribe.calls(), 0);
+        zyris.stops().await;
+    }
+
+    /// Once somebody answers, the answer is previewed like any other turn.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_in_a_watched_window_is_previewed() {
+        let (mut zyris, mut traces, speaking, _) = following_up(Scribe::always("and so my"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&utterance(3.0)).await;
+
+        let seen =
+            step_where(&mut traces, |step| matches!(step, crate::Trace::Hearing { .. })).await;
+        assert!(matches!(seen, crate::Trace::Hearing { text, .. } if text == "and so my"));
+        zyris.stops().await;
+    }
+
+    /// **Push-to-talk only opens nothing.** Somebody who never set a phrase opens the microphone
+    /// by hand, and a question must not start recording them on its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_opens_nothing_without_a_phrase() {
+        let (mut zyris, _traces, speaking, _) = following_up_with(Scribe::always("yes"), 8, false);
+
+        speaking.ask_for_test();
+
+        zyris.says_nothing().await;
+        zyris.stops().await;
+    }
+
+    /// A key pressed in the window takes the turn over, and only letting go ends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_key_pressed_in_the_window_outlasts_it() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("yes"), 2);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.press().await;
+        zyris.feed(&quiet(1.0)).await;
+        // Well past the window, still holding the key down in silence.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        zyris.says_nothing().await;
+        zyris.release().await;
+        zyris.feed(&quiet(0.5)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
         zyris.stops().await;
     }
 
