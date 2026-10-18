@@ -408,6 +408,19 @@ pub fn is_path(word: &str) -> bool {
     rooted || last.contains('.')
 }
 
+/// Closing quotes and brackets that may sit after a question mark: `(really?)`, `"why?"`.
+const CLOSERS: &str = "\"'”’)]」』";
+
+/// Whether the spoken answer ends with a question, so the mic should open without the wake word.
+///
+/// Only the end counts: a question in the middle of an answer is still a statement once the
+/// answer goes on. Trailing whitespace and closing quotes or brackets are skipped first, so
+/// `He asked "why?"` is still a question.
+pub fn ends_with_question(text: &str) -> bool {
+    text.trim_end_matches(|c: char| c.is_whitespace() || CLOSERS.contains(c))
+        .ends_with(['?', '？'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,5 +693,16 @@ mod tests {
         let aloud = filter.read(Kind::Assistant, "hello").aloud;
         assert_eq!(std::mem::size_of_val(&aloud), std::mem::size_of::<String>());
         assert_eq!(Aloud::default().text(), "");
+    }
+
+    #[test]
+    fn a_question_is_text_ending_in_a_question_mark() {
+        assert!(ends_with_question("Shall I open it?"));
+        assert!(ends_with_question("열어 드릴까요？"));
+        assert!(ends_with_question("He asked \"why?\"  "));
+        assert!(ends_with_question("(really?)"));
+        assert!(!ends_with_question("Done."));
+        assert!(!ends_with_question("Why? Because it was."));
+        assert!(!ends_with_question(""));
     }
 }
