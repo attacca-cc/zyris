@@ -149,6 +149,13 @@ pub const KEYS: &[Key] = &[
         help: "how much the microphone is amplified before anything reads it",
     },
     Key {
+        name: "voice.followUpSeconds",
+        json: "followUpSeconds",
+        kind: Kind::Number,
+        optional: true,
+        help: "how long the microphone stays open for an answer after a question; 0 is off",
+    },
+    Key {
         name: "voice.transcribeOn",
         json: "transcribeOn",
         kind: Kind::Text,

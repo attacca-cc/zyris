@@ -422,6 +422,8 @@ pub struct VoiceView {
     pub volume: f32,
     /// How much the microphone is amplified, 1.0 as delivered.
     pub input_gain: f32,
+    /// Seconds the microphone stays open for an answer to a question; 0 is off.
+    pub follow_up_seconds: u32,
     /// Where speech is transcribed and answers are read.
     pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
@@ -482,6 +484,7 @@ impl VoiceView {
             read_aloud: false,
             volume: 1.0,
             input_gain: 1.0,
+            follow_up_seconds: 8,
             compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),

@@ -108,6 +108,10 @@ pub struct Settings {
     /// with the system volume at 47% heard Base hallucinate, 2026-09-28).
     #[serde(default)]
     pub input_gain: Option<f32>,
+    /// How many seconds the microphone stays open for an answer after a spoken question, without
+    /// the wake phrase. `None` is [`DEFAULT_FOLLOW_UP_SECONDS`]; 0 is off.
+    #[serde(default)]
+    pub follow_up_seconds: Option<u32>,
     /// Whether Base and the voice have been fetched once without anyone asking. Set after the
     /// first launch that got them, so a model somebody deletes later is not brought back.
     #[serde(default)]
@@ -279,6 +283,13 @@ fn input_gain(settings: &Settings) -> f32 {
     settings.input_gain.filter(|g| g.is_finite()).unwrap_or(1.0).clamp(0.25, 8.0)
 }
 
+const DEFAULT_FOLLOW_UP_SECONDS: u32 = 8;
+
+/// The follow-up window `settings` asks for, in whole seconds: 0 to 30, 8 when unset.
+fn follow_up_seconds(settings: &Settings) -> u32 {
+    settings.follow_up_seconds.unwrap_or(DEFAULT_FOLLOW_UP_SECONDS).min(30)
+}
+
 /// The volume `settings` asks for, clamped the way the voice will clamp it.
 fn volume(settings: &Settings) -> f32 {
     settings.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.1, 2.0)
@@ -345,6 +356,8 @@ pub struct Engine {
     /// The microphone gain every session multiplies by, shared so a change reaches the one
     /// listening now. An `f32`'s bits.
     input_gain: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The follow-up window in whole seconds, shared like `input_gain`.
+    follow_up: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 struct Live {
@@ -391,6 +404,7 @@ impl Engine {
         let traces = broadcast::channel(TRACE_CAPACITY).0;
         let answers = Answers::new(traces.clone(), events.clone(), read_aloud(&settings));
         let gain = input_gain(&settings);
+        let follow_up = follow_up_seconds(&settings);
         Engine {
             settings_path,
             events,
@@ -406,6 +420,7 @@ impl Engine {
             voice: std::sync::Mutex::new(None),
             takes_checked: std::sync::atomic::AtomicBool::new(false),
             input_gain: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(gain.to_bits())),
+            follow_up: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(follow_up)),
             answers,
             levels: broadcast::channel(LEVEL_CAPACITY).0,
             answers_started: std::sync::atomic::AtomicBool::new(false),
@@ -618,6 +633,7 @@ impl Engine {
             read_aloud: read_aloud(settings),
             volume: volume(settings),
             input_gain: input_gain(settings),
+            follow_up_seconds: follow_up_seconds(settings),
             compute: compute_view(
                 settings,
                 self.npu_view(),
@@ -806,6 +822,17 @@ impl Engine {
         live.settings.input_gain = Some(gain);
         self.store(&live.settings);
         self.input_gain.store(gain.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Choose how long the microphone stays open for an answer to a question. Takes effect at
+    /// the next question, on the session that is listening.
+    pub async fn choose_follow_up_seconds(&self, seconds: u32) {
+        let mut live = self.live.lock().await;
+        live.settings.follow_up_seconds = Some(seconds);
+        let seconds = follow_up_seconds(&live.settings);
+        live.settings.follow_up_seconds = Some(seconds);
+        self.store(&live.settings);
+        self.follow_up.store(seconds, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Choose how loud answers are read. Takes effect from the next sentence, like the rate.
@@ -1093,6 +1120,7 @@ impl Engine {
         session = session.tracing(self.traces.clone());
         session = session.metering(self.levels.clone());
         session = session.amplified_by(self.input_gain.clone());
+        session = session.following_up_for(self.follow_up.clone());
         session = session.expecting(settings.vocabulary.as_deref().unwrap_or(DEFAULT_VOCABULARY));
         if let Some(phrase) = phrase {
             session = session.listening_for(phrase);
@@ -1823,6 +1851,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn follow_up_seconds_default_to_eight_and_clamp_to_thirty() {
+        let with = |s: Option<u32>| Settings { follow_up_seconds: s, ..Settings::default() };
+        assert_eq!(follow_up_seconds(&with(None)), 8);
+        assert_eq!(follow_up_seconds(&with(Some(0))), 0, "zero is off");
+        assert_eq!(follow_up_seconds(&with(Some(99))), 30);
+        let read: Settings = serde_json::from_str(r#"{"followUpSeconds": 12}"#).unwrap();
+        assert_eq!(read.follow_up_seconds, Some(12));
+    }
 
     #[test]
     fn answers_are_read_where_the_settings_say_and_the_phone_can() {
