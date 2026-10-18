@@ -76,6 +76,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       },
       speaker: over.speaker ?? { kind: "default" },
       speakingRate: over.speakingRate ?? 1.25,
+      followUpSeconds: over.followUpSeconds ?? 8,
       readAloud: over.readAloud ?? true,
       volume: over.volume ?? 1,
       inputGain: over.inputGain ?? 1,
@@ -738,6 +739,15 @@ describe("Voice", () => {
     expect(shown(/how fast/i)).toBe("1.25×");
     choose(/how fast/i, "1.4×");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speaking_rate", { rate: 1.4 }));
+  });
+
+  it("sets how long it listens after a question", async () => {
+    render(<Voice />);
+
+    await screen.findByRole("combobox", { name: /listen after a question/i });
+    expect(shown(/listen after a question/i)).toBe("8 s");
+    choose(/listen after a question/i, "Off");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_follow_up_seconds", { seconds: 0 }));
   });
 
   it("says how big the download is before anybody agrees to it", async () => {
