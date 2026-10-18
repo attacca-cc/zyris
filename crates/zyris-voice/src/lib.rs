@@ -755,6 +755,17 @@ impl Voice {
         self.look().await
     }
 
+    /// Choose how long the microphone stays open for an answer to a question, now and at the
+    /// next launch. 0 is off.
+    pub async fn choose_follow_up_seconds(&self, seconds: u32) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_follow_up_seconds(seconds).await;
+        }
+        let _ = seconds;
+        self.look().await
+    }
+
     /// Choose how loud answers are read, now and at the next launch.
     pub async fn choose_volume(&self, gain: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

@@ -174,6 +174,8 @@ export type VoiceScreen = {
     speaker: Choice;
     // A multiple of the voice's own pace, already clamped by the Rust side.
     speakingRate: number;
+    // Seconds the mic stays open after a spoken question, without the wake phrase. 0 is off.
+    followUpSeconds: number;
     // Whether answers are read aloud while listening is on. The Conversation screen's switch.
     readAloud: boolean;
     // A gain on the voice: 1 is as the model writes it.
@@ -325,6 +327,12 @@ function rateChoices(current: number): number[] {
   const offered = [1, 1.1, 1.25, 1.4];
   const rate = roundRate(current);
   return offered.includes(rate) ? offered : [...offered, rate].sort((a, b) => a - b);
+}
+
+// A value the backend reports outside the list is still shown, not blanked.
+function followUpChoices(current: number): number[] {
+  const all = [0, 5, 8, 10, 15, 20, 30];
+  return all.includes(current) ? all : [...all, current].sort((a, b) => a - b);
 }
 
 function roundRate(rate: number): number {
@@ -1012,9 +1020,28 @@ export function Voice() {
                     </SelectContent>
                   </Select>
                 </Field>
+                <Field label="Listen after a question">
+                  <Select
+                    value={String(voice.followUpSeconds)}
+                    disabled={isBusy("followUp")}
+                    onValueChange={(value) => act("followUp", "set_follow_up_seconds", { seconds: Number(value) })}
+                  >
+                    <SelectTrigger aria-label="Listen after a question">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {followUpChoices(voice.followUpSeconds).map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n === 0 ? "Off" : `${n} s`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
               </div>
             )}
             {refused.rate && <Problem>{refused.rate}</Problem>}
+            {refused.followUp && <Problem>{refused.followUp}</Problem>}
           </>
         )}
       </Section>

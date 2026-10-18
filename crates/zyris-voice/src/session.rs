@@ -105,7 +105,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::VoiceEvent;
 use crate::apm::Apm;
@@ -242,6 +242,10 @@ enum Woke {
     Hearing(Result<Result<String, stt::Fault>, tokio::task::JoinError>, usize),
     /// What whisper heard in something said while no turn was open: is it the phrase?
     Checked(Result<Result<String, stt::Fault>, tokio::task::JoinError>),
+    /// A question has been read aloud to the end.
+    Asked,
+    /// The window a question opened ran out.
+    Expired,
 }
 
 /// Listening for the enrolled phrase while no turn is open.
@@ -398,6 +402,14 @@ pub struct Session {
     /// would make a machine with no voice models deaf to the agent *and* silent to it, which is
     /// two failures out of one missing download.
     conversation: Option<Arc<dyn Says>>,
+
+    /// Bumped by the speaker when a question has been read to the end. `None` with no speaker.
+    asked: Option<watch::Receiver<u64>>,
+    /// How long the microphone stays open for an answer after a question, in whole seconds.
+    /// Read on each question, so a change applies to the next one. `None` and `0` are both off.
+    follow_up: Option<Arc<std::sync::atomic::AtomicU32>>,
+    /// When the window opened by a question closes if nobody has started speaking.
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl Session {
@@ -452,6 +464,9 @@ impl Session {
             watch: None,
             speaking: None,
             conversation: None,
+            asked: None,
+            follow_up: None,
+            deadline: None,
         }
     }
 
@@ -462,6 +477,7 @@ impl Session {
     /// models have not been downloaded, listens exactly as well without one. Every ending this
     /// module already had is unchanged by its absence.
     pub fn speaking(mut self, speaking: Arc<Speaking>) -> Session {
+        self.asked = Some(speaking.asked());
         self.speaking = Some(speaking);
         self
     }
@@ -509,6 +525,13 @@ impl Session {
         self
     }
 
+    /// After a question is read to the end, listen this many seconds for the answer without
+    /// the phrase. **A builder, and off without it**, like the phrase itself.
+    pub fn following_up_for(mut self, seconds: Arc<std::sync::atomic::AtomicU32>) -> Session {
+        self.follow_up = Some(seconds);
+        self
+    }
+
     /// Publish every step onto this stream as well.
     pub fn tracing(mut self, traces: broadcast::Sender<crate::Trace>) -> Session {
         self.traces = traces;
@@ -535,6 +558,8 @@ impl Session {
                 let pending = &mut self.pending;
                 let partial = &mut self.partial;
                 let checking = &mut self.checking;
+                let asked = &mut self.asked;
+                let deadline = self.deadline;
                 let from = self.partial_from;
                 tokio::select! {
                     // The key first, deliberately: what audio already in the channel belongs to
@@ -560,6 +585,22 @@ impl Session {
                             None => std::future::pending().await,
                         }
                     } => Woke::Checked(heard),
+                    // A speaker that has gone away asks nothing more; an error here would spin.
+                    () = async {
+                        let ok = match asked {
+                            Some(asked) => asked.changed().await.is_ok(),
+                            None => false,
+                        };
+                        if !ok {
+                            std::future::pending::<()>().await;
+                        }
+                    } => Woke::Asked,
+                    () = async {
+                        match deadline {
+                            Some(deadline) => tokio::time::sleep_until(deadline).await,
+                            None => std::future::pending().await,
+                        }
+                    } => Woke::Expired,
                 }
             };
 
@@ -577,6 +618,8 @@ impl Session {
                     // key opens must not end on silence, or somebody pausing to think mid-
                     // sentence is cut into two turns while still holding the key down.
                     self.endpointer.use_rule(push_to_talk_rule());
+                    // The key owns the turn now, and only letting go may end it.
+                    self.deadline = None;
                     self.pressed();
                 }
                 Woke::Key(Ok(Push::Released)) => self.released(),
@@ -591,6 +634,15 @@ impl Session {
                 Woke::Transcribed(done) => self.transcribed(done),
                 Woke::Hearing(seen, from) => self.hearing(seen, from),
                 Woke::Checked(heard) => self.checked(heard),
+                Woke::Asked => self.asked(),
+                // Nobody started speaking. Ended as a release would end it: with no speech the
+                // endpointer calls it too short, which is `HeardNothing`.
+                Woke::Expired => {
+                    self.deadline = None;
+                    if self.turn.is_some() {
+                        self.released();
+                    }
+                }
             }
         }
     }
@@ -603,6 +655,10 @@ impl Session {
     /// it would take a core off the thing somebody is actually waiting for.
     fn look_again(&mut self) {
         let Some(turn) = &self.turn else { return };
+        // An open window has heard no speech yet: a look would only preview a guess at silence.
+        if self.deadline.is_some() {
+            return;
+        }
         // **Nothing is watching, so there is nothing to compute.** A partial exists only to be
         // shown: it is never sent to the agent and never becomes the turn's answer. Whisper
         // re-reads the whole recording each time, so a hold of ten seconds with no subscriber
@@ -912,22 +968,11 @@ impl Session {
         match watch.phrase.in_(&text) {
             crate::wake::Heard::Phrase => {
                 self.trace(crate::Trace::Woke { heard: text });
-                // **The ordinary rule, not the key.s.** Nothing is going to let go of anything:
-                // a turn opened by the phrase has to end when the person stops talking, and
-                // `push_to_talk_rule` deliberately makes that impossible.
-                self.endpointer.use_rule(Rule::default());
-                self.pressed();
-                // After the press, which silences the speaker.
-                self.cue(Cue::Listening);
                 // **What was said while whisper was reading belongs to this turn.** The phrase
                 // ended on a pause and the request began before the check came back; the watch
                 // kept listening, and that audio is the start of the request, not a gap to lose.
-                let carried = self.watch.as_mut().map(|watch| {
-                    let heard = std::mem::take(&mut watch.heard);
-                    watch.forget();
-                    heard
-                });
-                for frame in carried.unwrap_or_default().chunks_exact(VAD_FRAME) {
+                let carried = self.open_by_voice();
+                for frame in carried.chunks_exact(VAD_FRAME) {
                     if self.turn.is_none() {
                         break;
                     }
@@ -973,10 +1018,48 @@ impl Session {
         }
     }
 
+    /// Open a turn that silence ends, as the phrase does, and hand back what the watch was
+    /// holding: the phrase's caller replays it into the turn, a question's drops it.
+    fn open_by_voice(&mut self) -> Vec<f32> {
+        // **The ordinary rule, not the key's.** Nothing is going to let go of anything: a turn
+        // opened by voice has to end when the person stops talking, and `push_to_talk_rule`
+        // deliberately makes that impossible.
+        self.endpointer.use_rule(Rule::default());
+        self.pressed();
+        // After the press, which silences the speaker.
+        self.cue(Cue::Listening);
+        // Taken after the press, whose drain may have added to it.
+        self.watch.as_mut().map_or_else(Vec::new, |watch| {
+            let heard = std::mem::take(&mut watch.heard);
+            watch.forget();
+            heard
+        })
+    }
+
+    /// A question was read to the end: listen for the answer without waiting for the phrase.
+    fn asked(&mut self) {
+        let seconds = self
+            .follow_up
+            .as_ref()
+            .map_or(0, |seconds| seconds.load(std::sync::atomic::Ordering::Relaxed));
+        // A turn already open (the key held) is where the answer goes anyway. Without a phrase
+        // the user opens the microphone by hand, so a question must not open it for them.
+        if self.turn.is_some() || self.watch.is_none() || seconds == 0 {
+            return;
+        }
+        // Said before the question ended, so not part of the answer.
+        let _ = self.open_by_voice();
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(seconds.into()));
+    }
+
     /// One detector frame: keep it, score it, and stop if the turn has run too long.
     fn frame(&mut self, frame: &[f32]) {
         match self.endpointer.push(frame) {
             Ok(listening) => {
+                // Somebody started answering; the window no longer decides when this ends.
+                if listening == Listening::Speech {
+                    self.deadline = None;
+                }
                 if let Some(turn) = &mut self.turn {
                     turn.buffer.extend_from_slice(frame);
                 }
@@ -1118,6 +1201,7 @@ impl Session {
 
     /// Finish the turn the endpointer has just ended.
     fn end(&mut self, ended: Ended) {
+        self.deadline = None;
         let Some(turn) = self.turn.take() else { return };
         match ended {
             // Not enough was said for it to be a turn. Nothing is sent to whisper: the floor
@@ -1173,6 +1257,7 @@ impl Session {
     fn abort(&mut self, reason: String) {
         // The endpointer's turn state goes with it, so the next press starts clean.
         let _ = self.endpointer.finish();
+        self.deadline = None;
         if self.turn.take().is_some() {
             self.publish(VoiceEvent::Failed { reason });
         }
@@ -1663,6 +1748,10 @@ pub struct Speaking {
     /// [`crate::answers::Answers`], which reads the feed whether or not anything is speaking.
     traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
+    /// Bumped each time an answer whose last fragment is a question has been **read to the end**.
+    /// A counter rather than a flag so a listener sees every bump and never has to reset it; the
+    /// session listens to it to open the mic without the wake phrase.
+    asked: watch::Sender<u64>,
     /// The runtime this was made on, which [`Speaking::interrupt`] spawns the cancel onto. **Not
     /// the caller's**: the Stop button is a synchronous app command, run on a thread with no
     /// runtime, and spawning there aborted the phone app.
@@ -1683,6 +1772,9 @@ struct SpeakingState {
     /// cancelled turn ends, still arrive afterwards, and each would be read over the person who
     /// just cut it off. The generation cannot catch them — they start after the key went down.
     muted: bool,
+    /// Whether the last fragment queued ends in a question. Only the last one counts, so a
+    /// question followed by a statement is a statement.
+    asked: bool,
 }
 
 impl Speaking {
@@ -1701,8 +1793,20 @@ impl Speaking {
             events,
             traces: broadcast::channel(1).0,
             state: std::sync::Mutex::new(Default::default()),
+            asked: watch::channel(0).0,
             runtime: tokio::runtime::Handle::current(),
         })
+    }
+
+    /// A receiver that changes whenever a question has been read aloud to the end.
+    pub fn asked(&self) -> watch::Receiver<u64> {
+        self.asked.subscribe()
+    }
+
+    /// Announce a question as [`Speaking::drained`] does, without reading one.
+    #[cfg(test)]
+    fn ask_for_test(&self) {
+        self.asked.send_modify(|n| *n += 1);
     }
 
     /// Publish every step onto this stream as well. [`Session::tracing`]'s opposite number.
@@ -1717,6 +1821,8 @@ impl Speaking {
             events: self.events.clone(),
             traces,
             state: std::sync::Mutex::new(Default::default()),
+            // The same sender, so a listener subscribed before tracing was added still hears.
+            asked: self.asked.clone(),
             runtime: self.runtime.clone(),
         })
     }
@@ -1822,6 +1928,7 @@ impl Speaking {
         match self.out.speak(samples) {
             Some(at) => {
                 state.ledger.add(text, at, length);
+                state.asked = crate::speak::ends_with_question(text);
                 self.trace(crate::Trace::Queued {
                     text: text.to_string(),
                     at_sample: at,
@@ -1859,9 +1966,14 @@ impl Speaking {
             return;
         }
         state.ledger.clear();
+        let asked = std::mem::take(&mut state.asked);
         drop(state);
         self.trace(crate::Trace::Spoke);
         self.publish(VoiceEvent::Spoke);
+        if asked {
+            // `send_modify` works with no receiver subscribed, which `send` does not.
+            self.asked.send_modify(|n| *n += 1);
+        }
     }
 
     /// Publish where the speaker has actually got to, until it has nothing left.
@@ -1909,6 +2021,7 @@ impl Speaking {
         self.out.silence();
         let interruption = state.ledger.at(self.out.played());
         state.ledger.clear();
+        state.asked = false;
         if !state.running && !interruption.anything_missed() {
             return None;
         }
@@ -1928,6 +2041,7 @@ impl Speaking {
         self.out.silence();
         let was_reading = !state.ledger.is_empty();
         state.ledger.clear();
+        state.asked = false;
         drop(state);
         if was_reading {
             self.trace(crate::Trace::Spoke);
@@ -3884,6 +3998,232 @@ mod tests {
         assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "said".into() });
         zyris.stops().await;
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Listening after a question
+    // -----------------------------------------------------------------------------------------
+
+    /// Listening for the phrase, with a speaker that is never busy, somewhere to send what is
+    /// heard, and a window of `seconds` after each question.
+    fn following_up(
+        scribe: Arc<Scribe>,
+        seconds: u32,
+    ) -> (Harness, broadcast::Receiver<crate::Trace>, Arc<Speaking>, Arc<Conversation>) {
+        following_up_with(scribe, seconds, true)
+    }
+
+    /// [`following_up`], with or without a phrase to listen for.
+    fn following_up_with(
+        scribe: Arc<Scribe>,
+        seconds: u32,
+        phrase: bool,
+    ) -> (Harness, broadcast::Receiver<crate::Trace>, Arc<Speaking>, Arc<Conversation>) {
+        let (audio, audio_rx) = mpsc::unbounded_channel();
+        let (keys, keys_rx) = broadcast::channel(32);
+        let (events, events_rx) = broadcast::channel(64);
+        let (traces, traces_rx) = broadcast::channel(512);
+        let apm = Arc::new(Apm::new().expect("a processor this machine can build"));
+        let attacca = Arc::new(Conversation::default());
+        let speaking = Speaking::new(
+            Arc::new(Mute),
+            Arc::new(Heard::default()),
+            attacca.clone(),
+            events.clone(),
+        );
+        let mut session =
+            Session::new(audio_rx, keys_rx, apm, scribe.clone(), events).tracing(traces);
+        if phrase {
+            session = session.listening_for(the_phrase());
+        }
+        let session = session
+            .speaking(speaking.clone())
+            .conversation(attacca.clone())
+            .following_up_for(Arc::new(std::sync::atomic::AtomicU32::new(seconds)));
+        let harness = Harness {
+            audio: Some(audio),
+            keys,
+            events: events_rx,
+            scribe,
+            session: tokio::spawn(session.run()),
+        };
+        (harness, traces_rx, speaking, attacca)
+    }
+
+    /// **A question read to the end opens the microphone**, with no phrase and no key — and no
+    /// `Interrupted`, because the answer it opens over has already finished.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_opens_the_microphone_without_the_phrase() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("yes"), 8);
+
+        speaking.ask_for_test();
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.stops().await;
+    }
+
+    /// Nobody answered. The window closes the way an empty key press does, so the screen leaves
+    /// Listening, and whisper is never woken for silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_window_nobody_speaks_in_closes_quietly() {
+        // No trace receiver, so no live looks: the count is of answers only.
+        let (mut zyris, _, speaking, _) = following_up(Scribe::always("yes"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&quiet(8.5)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        assert_eq!(zyris.scribe.calls(), 0);
+        zyris.stops().await;
+    }
+
+    /// **Silence is not previewed.** With a window watched, as the app always watches, no
+    /// partial runs before speech starts: it would publish whisper's guess at nothing, and one
+    /// still running at expiry would hold up the phrase check.
+    #[tokio::test(start_paused = true)]
+    async fn a_watched_window_nobody_speaks_in_runs_no_partials() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("thank you"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&quiet(8.5)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        assert_eq!(zyris.scribe.calls(), 0);
+        zyris.stops().await;
+    }
+
+    /// Once somebody answers, the answer is previewed like any other turn.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_in_a_watched_window_is_previewed() {
+        let (mut zyris, mut traces, speaking, _) = following_up(Scribe::always("and so my"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&utterance(3.0)).await;
+
+        let seen =
+            step_where(&mut traces, |step| matches!(step, crate::Trace::Hearing { .. })).await;
+        assert!(matches!(seen, crate::Trace::Hearing { text, .. } if text == "and so my"));
+        zyris.stops().await;
+    }
+
+    /// **Push-to-talk only opens nothing.** Somebody who never set a phrase opens the microphone
+    /// by hand, and a question must not start recording them on its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_opens_nothing_without_a_phrase() {
+        let (mut zyris, _traces, speaking, _) = following_up_with(Scribe::always("yes"), 8, false);
+
+        speaking.ask_for_test();
+
+        zyris.says_nothing().await;
+        zyris.stops().await;
+    }
+
+    /// A key pressed in the window takes the turn over, and only letting go ends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_key_pressed_in_the_window_outlasts_it() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("yes"), 2);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.press().await;
+        zyris.feed(&quiet(1.0)).await;
+        // Well past the window, still holding the key down in silence.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        zyris.says_nothing().await;
+        zyris.release().await;
+        zyris.feed(&quiet(0.5)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        zyris.stops().await;
+    }
+
+    /// The answer goes to the agent like any other turn.
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_said_in_the_window_is_sent() {
+        let (mut zyris, _traces, speaking, attacca) = following_up(Scribe::always("yes please"), 8);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "yes please".into() });
+        settle().await;
+        assert_eq!(attacca.told(), vec![Told::Said("yes please".into())]);
+        zyris.stops().await;
+    }
+
+    /// **The window is for starting, not for finishing.** Somebody who begins inside it and is
+    /// still talking when it runs out is heard to the end of the sentence.
+    #[tokio::test(start_paused = true)]
+    async fn speech_that_starts_in_the_window_is_not_cut_off() {
+        // No trace receiver, so no live looks: the count is of answers only.
+        let (mut zyris, _, speaking, _) = following_up(Scribe::always("yes"), 2);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        zyris.feed(&quiet(1.5)).await;
+        zyris.feed(&utterance(1.5)).await;
+        // Past the window, still mid-sentence: nothing may end the turn here.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        zyris.says_nothing().await;
+        zyris.feed(&quiet(1.6)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Thinking);
+        assert_eq!(zyris.next().await, VoiceEvent::Heard { text: "yes".into() });
+        assert_eq!(zyris.scribe.calls(), 1);
+        zyris.stops().await;
+    }
+
+    /// Zero is the setting's "off".
+    #[tokio::test(start_paused = true)]
+    async fn a_window_of_zero_seconds_is_off() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("yes"), 0);
+
+        speaking.ask_for_test();
+
+        zyris.says_nothing().await;
+        zyris.stops().await;
+    }
+
+    /// The key already has the microphone. A question landing then opens no second turn, and
+    /// no window is left armed to end the next one.
+    #[tokio::test(start_paused = true)]
+    async fn a_question_while_the_key_is_held_opens_nothing_more() {
+        let (mut zyris, _traces, speaking, _) = following_up(Scribe::always("yes"), 8);
+
+        zyris.press().await;
+        speaking.ask_for_test();
+        settle().await;
+        zyris.release().await;
+        zyris.feed(&quiet(2.0)).await;
+
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        zyris.says_nothing().await;
+        zyris.stops().await;
+    }
+
+    /// An empty window hands the microphone back to the phrase.
+    #[tokio::test(start_paused = true)]
+    async fn the_phrase_still_wakes_after_an_empty_window() {
+        let (mut zyris, mut traces, speaking, _) =
+            following_up(Scribe::saying([Ok("Hey, Zyris.".to_string())]), 1);
+
+        speaking.ask_for_test();
+        assert_eq!(zyris.next().await, VoiceEvent::Listening);
+        assert_eq!(zyris.next().await, VoiceEvent::HeardNothing);
+        zyris.feed(&utterance(1.1)).await;
+        zyris.feed(&quiet(1.6)).await;
+
+        let woke = step_where(&mut traces, |step| matches!(step, crate::Trace::Woke { .. })).await;
+        assert_eq!(woke, crate::Trace::Woke { heard: "Hey, Zyris.".to_string() });
+        zyris.stops().await;
+    }
 }
 
 #[cfg(test)]
@@ -4377,6 +4717,43 @@ mod barge_in {
             "`Spoke` would say the answer was read to the end, which is the opposite of what \
              happened"
         );
+    }
+
+    /// **A question read to the end is announced** — the one moment the mic may open without the
+    /// wake phrase, because the person is about to answer.
+    #[tokio::test]
+    async fn a_question_read_to_the_end_wakes_the_listener() {
+        let mut rig = rig(Voicebox::plain());
+        let mut asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.play(100_000);
+        rig.speaking.drained().await;
+        assert!(matches!(tokio::time::timeout(PATIENCE, asked.changed()).await, Ok(Ok(()))));
+    }
+
+    /// Only the *last* fragment decides: a question followed by a statement is a statement.
+    #[tokio::test]
+    async fn a_question_followed_by_a_statement_does_not() {
+        let mut rig = rig(Voicebox::plain());
+        let asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.say("I did.").await;
+        rig.play(100_000);
+        rig.speaking.drained().await;
+        assert!(matches!(asked.has_changed(), Ok(false)));
+    }
+
+    /// A question the person cut off was not read to the end, so nobody is waiting to answer it.
+    #[tokio::test]
+    async fn an_interrupted_question_does_not() {
+        let mut rig = rig(Voicebox::plain());
+        let asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.speaking.interrupt();
+        // The discard takes effect in the device callback, as it does for real.
+        rig.play(1);
+        rig.speaking.drained().await;
+        assert!(matches!(asked.has_changed(), Ok(false)));
     }
 
     /// Let spawned work run. `session::tests::settle`'s reason, and its shape.

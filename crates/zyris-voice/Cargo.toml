@@ -172,8 +172,9 @@ optional = true
 # `#[tokio::test]`, for the half of the stream test that awaits rather than polls. **No
 # dev-dependency here may enable `voice`**: feature unification would put the whole native
 # stack into `cargo test --workspace`, which is the one thing the flag exists to prevent.
-# `tests/nothing_turns_the_feature_on_by_itself.rs` fails if one ever does.
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# `tests/nothing_turns_the_feature_on_by_itself.rs` fails if one ever does. `test-util` lets the
+# follow-up window's tests move the clock instead of waiting it out.
+tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 # The wire shape `VoiceEvent` takes to the window, pinned by a test rather than discovered in
 # TypeScript.
 serde_json = { workspace = true }

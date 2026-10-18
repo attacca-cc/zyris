@@ -415,6 +415,16 @@ pub async fn set_input_gain(
     Ok(voice_screen(voice.choose_input_gain(gain).await, &hotkey))
 }
 
+/// How long the microphone stays open for an answer to a question; 0 is off.
+#[tauri::command]
+pub async fn set_follow_up_seconds(
+    seconds: u32,
+    voice: State<'_, Arc<zyris_voice::Voice>>,
+    hotkey: State<'_, Arc<dyn Hotkey>>,
+) -> Result<VoiceScreen, String> {
+    Ok(voice_screen(voice.choose_follow_up_seconds(seconds).await, &hotkey))
+}
+
 /// Choose how fast answers are read, now and at the next launch.
 #[tauri::command]
 pub async fn set_speaking_rate(
