@@ -105,7 +105,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::VoiceEvent;
 use crate::apm::Apm;
@@ -1663,6 +1663,10 @@ pub struct Speaking {
     /// [`crate::answers::Answers`], which reads the feed whether or not anything is speaking.
     traces: broadcast::Sender<crate::Trace>,
     state: std::sync::Mutex<SpeakingState>,
+    /// Bumped each time an answer whose last fragment is a question has been **read to the end**.
+    /// A counter rather than a flag so a listener sees every bump and never has to reset it; the
+    /// session listens to it to open the mic without the wake phrase.
+    asked: watch::Sender<u64>,
     /// The runtime this was made on, which [`Speaking::interrupt`] spawns the cancel onto. **Not
     /// the caller's**: the Stop button is a synchronous app command, run on a thread with no
     /// runtime, and spawning there aborted the phone app.
@@ -1683,6 +1687,9 @@ struct SpeakingState {
     /// cancelled turn ends, still arrive afterwards, and each would be read over the person who
     /// just cut it off. The generation cannot catch them — they start after the key went down.
     muted: bool,
+    /// Whether the last fragment queued ends in a question. Only the last one counts, so a
+    /// question followed by a statement is a statement.
+    asked: bool,
 }
 
 impl Speaking {
@@ -1701,8 +1708,14 @@ impl Speaking {
             events,
             traces: broadcast::channel(1).0,
             state: std::sync::Mutex::new(Default::default()),
+            asked: watch::channel(0).0,
             runtime: tokio::runtime::Handle::current(),
         })
+    }
+
+    /// A receiver that changes whenever a question has been read aloud to the end.
+    pub fn asked(&self) -> watch::Receiver<u64> {
+        self.asked.subscribe()
     }
 
     /// Publish every step onto this stream as well. [`Session::tracing`]'s opposite number.
@@ -1717,6 +1730,8 @@ impl Speaking {
             events: self.events.clone(),
             traces,
             state: std::sync::Mutex::new(Default::default()),
+            // The same sender, so a listener subscribed before tracing was added still hears.
+            asked: self.asked.clone(),
             runtime: self.runtime.clone(),
         })
     }
@@ -1822,6 +1837,7 @@ impl Speaking {
         match self.out.speak(samples) {
             Some(at) => {
                 state.ledger.add(text, at, length);
+                state.asked = crate::speak::ends_with_question(text);
                 self.trace(crate::Trace::Queued {
                     text: text.to_string(),
                     at_sample: at,
@@ -1859,9 +1875,14 @@ impl Speaking {
             return;
         }
         state.ledger.clear();
+        let asked = std::mem::take(&mut state.asked);
         drop(state);
         self.trace(crate::Trace::Spoke);
         self.publish(VoiceEvent::Spoke);
+        if asked {
+            // `send_modify` works with no receiver subscribed, which `send` does not.
+            self.asked.send_modify(|n| *n += 1);
+        }
     }
 
     /// Publish where the speaker has actually got to, until it has nothing left.
@@ -1909,6 +1930,7 @@ impl Speaking {
         self.out.silence();
         let interruption = state.ledger.at(self.out.played());
         state.ledger.clear();
+        state.asked = false;
         if !state.running && !interruption.anything_missed() {
             return None;
         }
@@ -1928,6 +1950,7 @@ impl Speaking {
         self.out.silence();
         let was_reading = !state.ledger.is_empty();
         state.ledger.clear();
+        state.asked = false;
         drop(state);
         if was_reading {
             self.trace(crate::Trace::Spoke);
@@ -4377,6 +4400,43 @@ mod barge_in {
             "`Spoke` would say the answer was read to the end, which is the opposite of what \
              happened"
         );
+    }
+
+    /// **A question read to the end is announced** — the one moment the mic may open without the
+    /// wake phrase, because the person is about to answer.
+    #[tokio::test]
+    async fn a_question_read_to_the_end_wakes_the_listener() {
+        let mut rig = rig(Voicebox::plain());
+        let mut asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.play(100_000);
+        rig.speaking.drained().await;
+        assert!(matches!(tokio::time::timeout(PATIENCE, asked.changed()).await, Ok(Ok(()))));
+    }
+
+    /// Only the *last* fragment decides: a question followed by a statement is a statement.
+    #[tokio::test]
+    async fn a_question_followed_by_a_statement_does_not() {
+        let mut rig = rig(Voicebox::plain());
+        let asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.say("I did.").await;
+        rig.play(100_000);
+        rig.speaking.drained().await;
+        assert!(matches!(asked.has_changed(), Ok(false)));
+    }
+
+    /// A question the person cut off was not read to the end, so nobody is waiting to answer it.
+    #[tokio::test]
+    async fn an_interrupted_question_does_not() {
+        let mut rig = rig(Voicebox::plain());
+        let asked = rig.speaking.asked();
+        rig.say("Shall I?").await;
+        rig.speaking.interrupt();
+        // The discard takes effect in the device callback, as it does for real.
+        rig.play(1);
+        rig.speaking.drained().await;
+        assert!(matches!(asked.has_changed(), Ok(false)));
     }
 
     /// Let spawned work run. `session::tests::settle`'s reason, and its shape.
