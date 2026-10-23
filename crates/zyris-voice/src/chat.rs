@@ -75,7 +75,7 @@ impl Chat {
     }
 
     pub async fn new_session(self: &Arc<Self>, project: Option<String>, agent: Option<String>) -> Result<(), String> {
-        let made = self.feed.start_new(project, agent).await.map(|_| ()).map_err(|error| error.message);
+        let made = self.feed.start_new(project, agent).await.map_err(|error| error.message);
         self.remember();
         made
     }
@@ -89,6 +89,8 @@ impl Chat {
         }
         match self.feed.say(text.clone()).await {
             Ok(()) => {
+                // The first message starts a job, and that is the session to come back to.
+                self.remember();
                 let _ = self.traces.send(Trace::Sent { text });
                 Ok(())
             }
