@@ -32,7 +32,7 @@ server to reach, because a tool that is always going to fail is worse than a too
 
 **Today `terminal`, `file_io`, `screen_capture`, `input` and `file_transfer` are live, and so is
 the promotion of local MCP servers — see [MCP servers](#mcp-servers) — though no agent on Attacca
-has yet called one of their tools end to end.** Between those five that is twenty-five tools —
+has yet called one of their tools end to end.** Between those five that is twenty-six tools —
 an MCP server adds however many its own tools come to, on top — and a capability is all or
 nothing: announcing `file_io` announces `remove`, and announcing `terminal` announces `exec` with
 whatever command an agent chooses. A path an agent sends without a leading slash starts in

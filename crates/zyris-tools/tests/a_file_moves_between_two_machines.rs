@@ -634,6 +634,7 @@ impl AttaccaApi for Rendezvous {
                 path: machine.slug.clone(),
                 endpoint_id: machine.endpoint_id.clone(),
                 online: true,
+                kind: zyris_attacca::ZPeerKind::Node,
             })
             .collect())
     }
@@ -748,6 +749,105 @@ impl AttaccaApi for Rendezvous {
         _session_id: String,
         _after: Option<i64>,
     ) -> Result<Streaming<ZTurnStatus, ZTurnFrame>> {
+        unused()
+    }
+    async fn update_session_preamble(&self, _session_id: String, _preamble: Option<String>) -> Result<zyris_attacca::ZSession> {
+        unused()
+    }
+    async fn send_chat(&self, _message: zyris_attacca::ZChatMessage) -> Result<zyris_attacca::ZTurnAck> {
+        unused()
+    }
+    async fn job_follow_up(&self, _job_id: String, _message: String, _title: Option<String>) -> Result<zyris_attacca::ZJobFollowedUp> {
+        unused()
+    }
+    async fn list_threads(&self, _filter: zyris_attacca::ZThreadFilter) -> Result<Vec<zyris_attacca::ZThreadSummary>> {
+        unused()
+    }
+    async fn get_thread(&self, _thread_id: String) -> Result<zyris_attacca::ZThreadDetail> {
+        unused()
+    }
+    async fn create_thread(&self, _thread: zyris_attacca::ZNewThread) -> Result<zyris_attacca::ZThread> {
+        unused()
+    }
+    async fn update_thread(&self, _thread_id: String, _update: zyris_attacca::ZThreadUpdate) -> Result<zyris_attacca::ZThread> {
+        unused()
+    }
+    async fn delete_thread(&self, _thread_id: String) -> Result<()> {
+        unused()
+    }
+    async fn thread_follow_up(&self, _thread_id: String, _follow_up: zyris_attacca::ZThreadFollowUp) -> Result<zyris_attacca::ZFollowedUp> {
+        unused()
+    }
+    async fn add_thread_artifact(&self, _thread_id: String, _file_id: String, _resident: bool) -> Result<zyris_attacca::ZThreadArtifact> {
+        unused()
+    }
+    async fn remove_thread_artifact(&self, _thread_id: String, _file_id: String) -> Result<()> {
+        unused()
+    }
+    async fn create_goal(&self, _thread_id: String, _goal: Option<String>) -> Result<zyris_attacca::ZGoal> {
+        unused()
+    }
+    async fn get_goal(&self, _goal_id: String) -> Result<zyris_attacca::ZGoalDetail> {
+        unused()
+    }
+    async fn update_goal(&self, _goal_id: String, _update: zyris_attacca::ZGoalUpdate) -> Result<zyris_attacca::ZGoal> {
+        unused()
+    }
+    async fn delete_goal(&self, _goal_id: String) -> Result<()> {
+        unused()
+    }
+    async fn set_goal(&self, _goal_id: String, _goal: Option<String>) -> Result<zyris_attacca::ZGoal> {
+        unused()
+    }
+    async fn approve_goal(&self, _goal_id: String) -> Result<zyris_attacca::ZGoal> {
+        unused()
+    }
+    async fn create_milestone(&self, _goal_id: String, _milestone: zyris_attacca::ZNewMilestone) -> Result<zyris_attacca::ZMilestone> {
+        unused()
+    }
+    async fn update_milestone(&self, _goal_id: String, _milestone_id: String, _update: zyris_attacca::ZMilestoneUpdate) -> Result<zyris_attacca::ZMilestone> {
+        unused()
+    }
+    async fn delete_milestone(&self, _goal_id: String, _milestone_id: String) -> Result<()> {
+        unused()
+    }
+    async fn create_next_step(&self, _goal_id: String, _step: zyris_attacca::ZNewNextStep) -> Result<zyris_attacca::ZNextStep> {
+        unused()
+    }
+    async fn update_next_step(&self, _goal_id: String, _next_step_id: String, _update: zyris_attacca::ZNextStepUpdate) -> Result<zyris_attacca::ZNextStep> {
+        unused()
+    }
+    async fn delete_next_step(&self, _goal_id: String, _next_step_id: String) -> Result<()> {
+        unused()
+    }
+    async fn hand_over_next_step(&self, _goal_id: String, _next_step_id: String, _verification: Option<bool>) -> Result<zyris_attacca::ZNextStep> {
+        unused()
+    }
+    async fn set_auto_handover(&self, _goal_id: String, _enabled: bool) -> Result<zyris_attacca::ZAutoHandover> {
+        unused()
+    }
+    async fn accept_verification(&self, _goal_id: String, _verification_id: String) -> Result<zyris_attacca::ZVerification> {
+        unused()
+    }
+    async fn dismiss_verification(&self, _goal_id: String, _verification_id: String) -> Result<zyris_attacca::ZVerification> {
+        unused()
+    }
+    async fn create_human_task(&self, _goal_id: String, _task: zyris_attacca::ZNewHumanTask) -> Result<zyris_attacca::ZHumanTask> {
+        unused()
+    }
+    async fn resolve_human_task(&self, _goal_id: String, _task_id: String, _resolution: zyris_attacca::ZHumanTaskResolution) -> Result<zyris_attacca::ZHumanTask> {
+        unused()
+    }
+    async fn recheck_human_task(&self, _goal_id: String, _task_id: String) -> Result<zyris_attacca::ZProbeReport> {
+        unused()
+    }
+    async fn set_human_task_note(&self, _goal_id: String, _task_id: String, _note: Option<String>) -> Result<zyris_attacca::ZHumanTask> {
+        unused()
+    }
+    async fn peer_relay(&self) -> Result<Option<String>> {
+        unused()
+    }
+    async fn request_file(&self, _file_id: String) -> Result<zyris_attacca::ZFileOffered> {
         unused()
     }
 }

@@ -412,7 +412,7 @@ mod tests {
     /// How many tools each of this machine's own capabilities announces.
     ///
     /// Written down here so that the sentence in `README.md` — "between them that is
-    /// twenty-five tools" — is checked by something rather than counted once by somebody. A
+    /// twenty-six tools" — is checked by something rather than counted once by somebody. A
     /// capability that grows or loses a tool when the protocol stack moves fails
     /// [`the_readme_says_how_many_tools_this_machine_offers_and_it_is_still_right`] with the new
     /// number in the message, which is the one moment anybody would think to edit the README.
@@ -423,7 +423,7 @@ mod tests {
     /// platforms CI runs on, every row is.
     const TOOLS_PER_CAPABILITY: &[(&str, usize)] = &[
         ("file_io", 8),
-        ("terminal", 8),
+        ("terminal", 9),
         ("screen_capture", 2),
         ("input", 5),
         ("file_transfer", 2),
@@ -440,7 +440,7 @@ mod tests {
     /// So the phrase names the five explicitly, and the test below checks that "five" is still
     /// how many rows [`TOOLS_PER_CAPABILITY`] has. It moves when somebody rewrites that clause,
     /// which is exactly the edit that should send them back here.
-    const README_TOTAL: (usize, &str) = (25, "those five that is twenty-five tools");
+    const README_TOTAL: (usize, &str) = (26, "those five that is twenty-six tools");
 
     fn tools(dir: &Path) -> Tools {
         Tools::new(Gate::running(), AuditLog::new(dir.join("audit.jsonl")), dir.to_path_buf())
