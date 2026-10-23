@@ -36,11 +36,11 @@
 
 stdenv.mkDerivation (finalAttrs: {
   pname = "zyris";
-  version = "0.3.0";
+  version = "0.4.0";
 
   src = fetchurl {
     url = "https://github.com/attacca-cc/zyris/releases/download/v${finalAttrs.version}/Zyris_${finalAttrs.version}_amd64.deb";
-    hash = "sha256-EUQcfdVaknBRTofNdmsdsr72UNZbdI8KH+P6LmZ9WP4=";
+    hash = "sha256-S/I9GnOyflU+h2qR1CipTWbSdzFR9mnH+eyEYnl5ffU=";
   };
 
   nativeBuildInputs = [
