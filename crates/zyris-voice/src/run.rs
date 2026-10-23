@@ -434,12 +434,24 @@ impl Engine {
     /// **Whether or not anything is listening.** The subscription belongs to the connection, not
     /// to the microphone switch: `turn_events` with `after: None` replays nothing, so a feed that
     /// waited for somebody to turn listening on would miss every delta written before they did.
-    pub async fn on_connect(&self, connection: zyris::Connection) {
+    pub async fn on_connect(self: &std::sync::Arc<Self>, connection: zyris::Connection) {
         let Some(feed) = &self.feed else { return };
         // Subscribed before the feed connects, so that nothing it publishes on this connection
         // is sent to a channel with nobody reading it yet.
         if !self.answers_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
             tokio::spawn(self.answers.clone().run(feed.events()));
+            // A job's session exists only once something has been said, spoken or typed, and
+            // every subscription opens with a `Running`: that is when to write it down.
+            let (engine, feed, mut events) = (self.clone(), feed.clone(), feed.events());
+            tokio::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(crate::turn::TurnEvent::Running(_)) => engine.remember_the_session(&feed).await,
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            });
         }
         feed.on_connect(connection).await;
         self.remember_the_session(feed).await;
@@ -467,12 +479,12 @@ impl Engine {
         switched
     }
 
-    /// Start a session in `project` against `agent`, talk to it, and remember it.
+    /// Start a new conversation in `project` against `agent` with the next thing said.
     pub async fn new_session(
         &self,
         project: Option<String>,
         agent: Option<String>,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let Some(feed) = &self.feed else { return Err("there is no turn feed".to_string()) };
         let made = feed.start_new(project, agent).await.map_err(|error| error.message);
         self.remember_the_session(feed).await;

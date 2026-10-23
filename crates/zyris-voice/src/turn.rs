@@ -116,13 +116,15 @@ pub trait TurnApi: Send + Sync + 'static {
     /// the first would be relying on an order nobody offered. See [`Feed::choose_agent`].
     async fn list_agents(&self) -> zyris::Result<Vec<(String, String)>>;
 
-    /// Create a session against an agent, and answer its id.
+    /// Start a job with its first message, answered by `agent_id`, and answer the id of the
+    /// session it runs on.
     ///
-    /// No title: Attacca names a session from its first message, and a title given at creation
-    /// is permanent and suppresses that. `project: None` files it under the account's default
-    /// project, which is made on demand.
-    async fn create_session(
+    /// **A job, not a bare session**: Attacca's web app no longer shows sessions that belong to
+    /// no job, so a conversation made any other way could not be read there. Attacca titles the
+    /// job from this message. `project: None` files it under the account's default project.
+    async fn create_job(
         &self,
+        message: String,
         agent_id: String,
         project: Option<String>,
     ) -> zyris::Result<String>;
@@ -200,22 +202,29 @@ impl TurnApi for AttaccaApiClient {
             .collect())
     }
 
-    async fn create_session(
+    async fn create_job(
         &self,
+        message: String,
         agent_id: String,
         project: Option<String>,
     ) -> zyris::Result<String> {
-        let session = AttaccaApi::create_session_with(
+        let job = AttaccaApi::create_job(
             self,
-            zyris_attacca::ZNewSession {
-                agent_id,
-                title: None,
+            zyris_attacca::ZNewJob {
+                message,
+                agent_id: Some(agent_id),
                 project_id: project,
-                preamble: None,
+                timezone: None,
+                planning: false,
+                plan_mode: false,
+                factcheck: false,
+                data: Vec::new(),
             },
         )
         .await?;
-        Ok(session.id)
+        job.session_id.ok_or_else(|| {
+            WireError::new(ErrorCode::Internal, "Attacca started the job without a session to follow")
+        })
     }
 
     async fn list_projects(&self) -> zyris::Result<Vec<ProjectEntry>> {
@@ -343,8 +352,12 @@ fn voice_agent(agents: &[(String, String)]) -> Option<&(String, String)> {
 /// given at construction and never changes.
 pub struct Feed {
     /// The session this feed is for. **`None` until one exists**, which is the ordinary state of
-    /// a fresh install: the spec's loop begins *get a session*, and nothing had ever done that.
+    /// a fresh install: the first thing said starts a job, and the job's session is this one.
     session_id: Mutex<Option<String>>,
+    /// The agent and project the Conversation screen chose for the next job, until it starts.
+    next_job: Mutex<Option<(String, Option<String>)>>,
+    /// This feed, for the `say` that starts a job and must then attach to it.
+    me: std::sync::Weak<Feed>,
     /// Which agent to create against, when the account has more than one. Read from settings.
     agent: Option<String>,
     events: broadcast::Sender<TurnEvent>,
@@ -403,7 +416,7 @@ impl Feed {
         Feed::build(Some(session_id.into()), None)
     }
 
-    /// A feed with no session yet: it makes one on the first connection that offers an agent.
+    /// A feed with no session yet: the first thing said starts a job, whose session it then is.
     ///
     /// `agent` names which, for an account with more than one.
     ///
@@ -423,8 +436,10 @@ impl Feed {
     }
 
     fn build(session_id: Option<String>, agent: Option<String>) -> Arc<Feed> {
-        Arc::new(Feed {
+        Arc::new_cyclic(|me| Feed {
+            me: me.clone(),
             session_id: Mutex::new(session_id),
+            next_job: Mutex::new(None),
             agent,
             events: broadcast::channel(EVENT_CAPACITY).0,
             state: Mutex::new(State { api: None, generation: 0, live: false, cursor: None }),
@@ -509,31 +524,24 @@ impl Feed {
             state.generation
         };
 
-        // **In front of the subscription, and only once.** The ordering rule this module is
-        // built on is that sending is only reachable through a feed that is already listening;
-        // a session that does not exist yet has to be made before there is anything to listen
-        // to, so it goes here rather than beside the first message.
-        if self.session_id().is_none() && !self.make_a_session(api.as_ref()).await {
+        // A conversation starts as a job, and a job starts with its first message, so there is
+        // nothing to listen to yet: `say` starts one. The agent is checked now all the same, so
+        // the Voice screen can say what is wrong before anybody speaks.
+        if self.session_id().is_none() {
+            let _ = self.job_agent(api.as_ref()).await;
             return;
         }
         let items = match self.open(api.as_ref(), generation).await {
             Opened::Items(items) => items,
             Opened::Failed => return,
-            // **Once per connection.** The session this machine wrote down was deleted, or was
-            // never this account's; retrying it on every reconnect would be a voice that never
-            // comes back, with nothing on any screen to clear it. A new one is written down by
-            // `Engine::remember_the_session` like the first.
+            // The session this machine wrote down was deleted, or was never this account's;
+            // retrying it on every reconnect would be a voice that never comes back, with
+            // nothing on any screen to clear it. The next thing said starts a new job.
             Opened::Gone => {
-                tracing::warn!("the voice's session is gone from Attacca; making a new one");
+                tracing::warn!("the voice's session is gone from Attacca; the next message starts a new job");
                 *self.session_id.lock().expect("the session id is not poisoned") = None;
                 self.state.lock().expect("the feed state is not poisoned").cursor = None;
-                if !self.make_a_session(api.as_ref()).await {
-                    return;
-                }
-                match self.open(api.as_ref(), generation).await {
-                    Opened::Items(items) => items,
-                    Opened::Failed | Opened::Gone => return,
-                }
+                return;
             }
         };
         let feed = self.clone();
@@ -646,16 +654,17 @@ impl Feed {
         }
     }
 
-    /// Create a session in `project` against `agent`, and talk to it from now on.
+    /// Leave the session in use, so that the next thing said starts a job in `project` against
+    /// `agent`.
     ///
-    /// `agent: None` is the same rule a first session is made by — one agent is taken, several
+    /// `agent: None` is the same rule a first job is started by — one agent is taken, several
     /// is a choice this does not make — so a screen that offers no agent picker on an account
     /// with one agent gets the obvious answer and one with several is told to pick.
     pub async fn start_new(
         self: &Arc<Self>,
         project: Option<String>,
         agent: Option<String>,
-    ) -> zyris::Result<String> {
+    ) -> zyris::Result<()> {
         let api = self.api()?;
         let agent = match agent {
             Some(agent) => agent,
@@ -673,10 +682,14 @@ impl Feed {
                 })?
             }
         };
-        let id = api.create_session(agent, project).await?;
-        tracing::info!(session = %id, "created a session from the Conversation screen");
-        self.switch_to(id.clone()).await?;
-        Ok(id)
+        *self.next_job.lock().expect("not poisoned") = Some((agent, project));
+        *self.session_id.lock().expect("the session id is not poisoned") = None;
+        let mut state = self.state.lock().expect("the feed state is not poisoned");
+        // The old session's pump stops at its next frame, as on a switch.
+        state.generation += 1;
+        state.live = false;
+        state.cursor = None;
+        Ok(())
     }
 
     /// Say something, starting a turn.
@@ -684,7 +697,16 @@ impl Feed {
     /// **Refuses while no subscription is open**, which is the ordering rule made unavoidable
     /// rather than remembered: a message sent now would be answered by deltas that arrive before
     /// anything is listening for them, and `after: None` does not replay them.
+    ///
+    /// With no session yet, the message starts a job and the feed then listens to the job's
+    /// session.
     pub async fn say(&self, message: impl Into<String>) -> zyris::Result<()> {
+        if self.session_id().is_none() {
+            let api = self.state.lock().expect("the feed state is not poisoned").api.clone();
+            if let Some(api) = api {
+                return self.start_a_job(api, message.into()).await;
+            }
+        }
         let api = {
             let state = self.state.lock().expect("the feed state is not poisoned");
             if !state.live {
@@ -753,36 +775,53 @@ impl Feed {
         api.cancel_turn(session).await
     }
 
-    /// Make a session on this connection. `false` means there is still none.
+    /// The agent a job is started against, or `None` when the account leaves it a choice.
     ///
-    /// Whatever goes wrong here is logged and not published: a feed with no session publishes
-    /// nothing either way, and the Voice screen is where a person is told — it reads the same
-    /// settings and asks the same question, before anybody has spoken.
-    async fn make_a_session(self: &Arc<Self>, api: &dyn TurnApi) -> bool {
+    /// Whatever goes wrong here is logged and not published; the Voice screen is where a person
+    /// is told, from [`Feed::agent_trouble`].
+    async fn job_agent(&self, api: &dyn TurnApi) -> Option<String> {
         let agents = match api.list_agents().await {
             Ok(agents) => agents,
             Err(error) => {
-                tracing::warn!(%error, "could not read this account's agents, so no session \
-                     was created; the next connection tries again");
-                return false;
+                tracing::warn!(%error, "could not read this account's agents");
+                return None;
             }
         };
-        let Some(agent) = Feed::choose_agent(&agents, self.agent.as_deref()) else {
-            *self.agent_trouble.lock().expect("not poisoned") =
-                Some(agents.into_iter().map(|(_, name)| name).collect());
-            return false;
+        let chosen = Feed::choose_agent(&agents, self.agent.as_deref());
+        *self.agent_trouble.lock().expect("not poisoned") =
+            chosen.is_none().then(|| agents.into_iter().map(|(_, name)| name).collect());
+        chosen
+    }
+
+    /// Start a job with `message`, then listen to its session from now on.
+    async fn start_a_job(&self, api: Arc<dyn TurnApi>, message: String) -> zyris::Result<()> {
+        let chosen = self.next_job.lock().expect("not poisoned").clone();
+        let (agent, project) = match chosen {
+            Some(chosen) => chosen,
+            None => match self.job_agent(api.as_ref()).await {
+                Some(agent) => (agent, None),
+                None => {
+                    return Err(WireError::new(
+                        ErrorCode::InvalidParams,
+                        "there is no agent to answer: this account has none, or several and \
+                         none named in the voice settings",
+                    ))
+                }
+            },
         };
-        *self.agent_trouble.lock().expect("not poisoned") = None;
-        let id = match api.create_session(agent, None).await {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::warn!(%error, "could not create a session");
-                return false;
-            }
-        };
-        tracing::info!(session = %id, "created a session for the voice");
-        *self.session_id.lock().expect("the session id is not poisoned") = Some(id);
-        true
+        let session = api.create_job(message, agent, project).await?;
+        tracing::info!(%session, "started a job for the conversation");
+        *self.next_job.lock().expect("not poisoned") = None;
+        *self.session_id.lock().expect("the session id is not poisoned") = Some(session);
+        self.state.lock().expect("the feed state is not poisoned").cursor = None;
+        // shortcut: the job's first turn is queued before `create_job` returns, so a delta
+        // written in the round trip before this subscription opens is not read aloud. Agents
+        // take far longer than that to start writing; subscribe first once Attacca can create
+        // a job without starting it.
+        if let Some(me) = self.me.upgrade() {
+            me.attach(api).await;
+        }
+        Ok(())
     }
 
     /// Which agent to create against.
@@ -1153,7 +1192,7 @@ mod tests {
         Send { message: String, agent: Option<String> },
         Cancel,
         Agents,
-        Create { agent: String, project: Option<String> },
+        Job { message: String, agent: String, project: Option<String> },
     }
 
     #[derive(Default)]
@@ -1172,7 +1211,7 @@ mod tests {
         session_gone: bool,
         /// What `list_agents` answers. Empty by default, which is an account with none.
         agents: Vec<(String, String)>,
-        /// What `create_session` answers with.
+        /// The session `create_job` answers with.
         made: Option<String>,
         /// Which session each `turn_events` was for, in order.
         subscribed_to: Vec<String>,
@@ -1257,13 +1296,14 @@ mod tests {
             Ok(script.agents.clone())
         }
 
-        async fn create_session(
+        async fn create_job(
             &self,
+            message: String,
             agent_id: String,
             project: Option<String>,
         ) -> zyris::Result<String> {
             let mut script = self.script.lock().unwrap();
-            script.calls.push(Call::Create { agent: agent_id, project });
+            script.calls.push(Call::Job { message, agent: agent_id, project });
             Ok(script.made.clone().unwrap_or_else(|| "made-1".to_string()))
         }
 
@@ -1830,29 +1870,34 @@ mod tests {
         feed.sessions().await.expect_err("nothing to list without a connection");
     }
 
-    /// A new session goes in the project somebody picked, and becomes the one this machine
-    /// talks to — made first, subscribed second, the order the rest of this module keeps.
+    /// A new conversation goes in the project somebody picked: the next thing said starts a job
+    /// there, and its session becomes the one this machine listens to.
     #[tokio::test]
-    async fn a_new_session_is_made_in_the_chosen_project_and_listened_to() {
+    async fn a_new_session_is_a_job_in_the_chosen_project_and_listened_to() {
         let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
         let feed = Feed::new("session-1");
         feed.attach(api.clone()).await;
 
-        let id = within("the new session", feed.start_new(Some("p-2".into()), None))
-            .await
-            .expect("made");
+        within("the new session", feed.start_new(Some("p-2".into()), None)).await.expect("chosen");
+        assert_eq!(feed.session_id(), None, "nothing is made until something is said");
+        within("the first message", feed.say("hello")).await.expect("started");
 
-        assert_eq!(id, "made-1");
         assert_eq!(feed.session_id(), Some("made-1".to_string()));
         assert_eq!(
             api.calls()[1..],
             [
                 Call::Agents,
-                Call::Create { agent: "agent-1".into(), project: Some("p-2".into()) },
+                Call::Job {
+                    message: "hello".into(),
+                    agent: "agent-1".into(),
+                    project: Some("p-2".into())
+                },
                 Call::Subscribe { after: None },
-            ]
+            ],
+            "the first message starts the job; it is not sent a second time"
         );
         assert_eq!(api.subscribed_to(), vec!["session-1", "made-1"]);
+        assert!(feed.is_live());
     }
 
     /// An agent named by the screen is used as given, without reading the list.
@@ -1862,11 +1907,12 @@ mod tests {
         let feed = Feed::new("session-1");
         feed.attach(api.clone()).await;
 
-        feed.start_new(None, Some("b".into())).await.expect("made");
+        feed.start_new(None, Some("b".into())).await.expect("chosen");
+        feed.say("hi").await.expect("started");
 
         assert_eq!(
             api.calls()[1..2],
-            [Call::Create { agent: "b".into(), project: None }],
+            [Call::Job { message: "hi".into(), agent: "b".into(), project: None }],
             "the agent was chosen for it rather than taken from the screen"
         );
     }
@@ -1881,7 +1927,7 @@ mod tests {
 
         let error = feed.start_new(None, None).await.expect_err("there is a choice to make");
         assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert!(!api.calls().iter().any(|c| matches!(c, Call::Create { .. })));
+        assert!(!api.calls().iter().any(|c| matches!(c, Call::Job { .. })));
         assert_eq!(feed.session_id(), Some("session-1".to_string()));
     }
 
@@ -1973,23 +2019,27 @@ mod stopping_a_turn {
     /// *get a session*; until this, the id had to be hand-written into `voice.json` and a
     /// person who installed Zyris had a speaking half that did nothing until they did.
     #[tokio::test]
-    async fn a_feed_with_no_session_makes_one_before_it_subscribes() {
+    async fn a_feed_with_no_session_starts_a_job_with_the_first_message() {
         let api = Fake::new().with_agents(&[("agent-1", "Ada")]);
         let feed = Feed::making_one(None);
 
         feed.attach(api.clone()).await;
+        assert_eq!(api.calls(), vec![Call::Agents], "a connection alone makes nothing");
+        assert_eq!(feed.session_id(), None);
 
-        // The order is the assertion, not a timing: creating after subscribing would subscribe
-        // to nothing, and creating after the first message would lose its answer.
+        feed.say("hello").await.expect("started");
+
         assert_eq!(
             api.calls(),
             vec![
                 Call::Agents,
-                Call::Create { agent: "agent-1".into(), project: None },
+                Call::Agents,
+                Call::Job { message: "hello".into(), agent: "agent-1".into(), project: None },
                 Call::Subscribe { after: None },
             ]
         );
         assert_eq!(feed.session_id(), Some("made-1".to_string()));
+        assert!(feed.is_live());
         // The id is state on the feed rather than something announced; `Engine::on_connect`
         // reads it and writes it down.
     }
@@ -2003,9 +2053,11 @@ mod stopping_a_turn {
         let feed = Feed::making_one(None);
 
         feed.attach(api.clone()).await;
+        feed.say("hello").await.expect("started");
         feed.attach(api.clone()).await;
+        feed.say("again").await.expect("sent");
 
-        let made = api.calls().iter().filter(|c| matches!(c, Call::Create { .. })).count();
+        let made = api.calls().iter().filter(|c| matches!(c, Call::Job { .. })).count();
         assert_eq!(made, 1, "a reconnection made another session: {:?}", api.calls());
     }
 
@@ -2022,21 +2074,24 @@ mod stopping_a_turn {
         assert_eq!(feed.session_id(), Some("session-1".to_string()));
     }
 
-    /// **A session deleted in the web app is replaced, once.** Retrying the dead id on every
-    /// reconnect was a voice that never came back, with nothing on any screen to clear it.
+    /// **A session deleted in the web app is dropped, once**, and the next thing said starts a
+    /// new job. Retrying the dead id on every reconnect was a voice that never came back, with
+    /// nothing on any screen to clear it.
     #[tokio::test]
     async fn a_session_that_is_gone_is_replaced_with_a_new_one() {
         let api = Fake::new().with_agents(&[("agent-1", "Ada")]).lose_the_session();
         let feed = Feed::continuing("deleted", None);
 
         feed.attach(api.clone()).await;
+        assert_eq!(feed.session_id(), None);
+        feed.say("hello").await.expect("started");
 
         assert_eq!(
             api.calls(),
             vec![
                 Call::Subscribe { after: None },
                 Call::Agents,
-                Call::Create { agent: "agent-1".to_string(), project: None },
+                Call::Job { message: "hello".into(), agent: "agent-1".to_string(), project: None },
                 Call::Subscribe { after: None },
             ]
         );
@@ -2066,8 +2121,10 @@ mod stopping_a_turn {
         let feed = Feed::making_one(None);
 
         feed.attach(api.clone()).await;
+        assert_eq!(feed.agent_trouble(), Some(Vec::new()));
+        feed.say("hello").await.expect_err("there is no agent to answer");
 
-        assert_eq!(api.calls(), vec![Call::Agents]);
+        assert_eq!(api.calls(), vec![Call::Agents, Call::Agents]);
         assert_eq!(feed.session_id(), None);
     }
 
@@ -2094,9 +2151,10 @@ mod stopping_a_turn {
             let feed = Feed::making_one(Some(named.to_string()));
 
             feed.attach(api.clone()).await;
+            feed.say("hi").await.expect("started");
 
             assert!(
-                api.calls().contains(&Call::Create { agent: "b".into(), project: None }),
+                api.calls().contains(&Call::Job { message: "hi".into(), agent: "b".into(), project: None }),
                 "{named} did not settle it: {:?}",
                 api.calls()
             );
