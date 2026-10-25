@@ -72,7 +72,7 @@ export function Onboarding({ state }: { state: State }) {
           {code ? (
             <>
               <Step number={1} title="Open the approval page">
-                <Button size="lg" onClick={() => openVerificationUrl(code.verificationUri)}>
+                <Button size="lg" onClick={() => openVerificationUrl(withCode(code))}>
                   Open {code.verificationUri.replace(/^https?:\/\//, "")}
                   <ExternalLinkIcon />
                 </Button>
@@ -129,4 +129,11 @@ function Step({ number, title, children }: { number: number; title: string; chil
       </div>
     </div>
   );
+}
+
+/** The approval page with this machine's code filled in, so the person only has to check it. */
+function withCode(code: { userCode: string; verificationUri: string }): string {
+  const url = new URL(code.verificationUri);
+  url.searchParams.set("code", code.userCode);
+  return url.toString();
 }
