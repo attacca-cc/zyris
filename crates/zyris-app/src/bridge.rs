@@ -23,6 +23,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use tauri::{AppHandle, Emitter, State};
 use zyris_autostart::{Autostart, State as AutostartState};
+use zyris_runtime::identity::Identity;
 use zyris_runtime::{CoreEvent, EventBus, LiveCapabilities};
 use zyris_tools::{
     Announcement, AuditLog, Entry, Gate, InboxEntry, ServerList, ServerView, Servers, Tools,
@@ -600,6 +601,19 @@ pub fn open_verification_url(url: String) -> Result<(), String> {
         return Err("refusing to open a non-https url".to_string());
     }
     open::that(url).map_err(|error| error.to_string())
+}
+
+/// Discards this machine's credential and starts Zyris again, which puts the onboarding screen up.
+///
+/// **Local only.** No call lets a `zc_` revoke itself, so the credential stays valid on Attacca
+/// until somebody revokes it there; the Settings screen says so and links to the page that does.
+/// A restart rather than a re-enrolment in place, because the connector holds the link for the
+/// life of `run()` and nothing else can tell it to let go — the updater restarts the same way.
+#[tauri::command]
+pub fn forget_credential(app: AppHandle, identity: State<Identity>) -> Result<(), String> {
+    identity.forget().map_err(|error| error.to_string())?;
+    tracing::info!("forgot this machine's credential at the person's request; restarting");
+    app.restart()
 }
 
 /// Moves the switch and tells everything watching, in that order.

@@ -105,6 +105,9 @@ pub fn run(
     bus: EventBus,
     runtime: tokio::runtime::Handle,
     connector: Connector,
+    // The credential the connector dials with, for the one thing the window does with it:
+    // forgetting it. A clone of the same store, not a second identity.
+    identity: zyris_runtime::identity::Identity,
     tools: Tools,
     // What this node announces, and the only authority on it. The window's Tools screen reads it
     // through this handle rather than through a list `main` wrote down once, so a promoted MCP
@@ -300,8 +303,10 @@ pub fn run(
         // through it — the device list, the model on disk, whether a microphone is open — and
         // moves the one switch that opens one.
         .manage(voice)
+        .manage(identity)
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
+            bridge::forget_credential,
             bridge::latest_event,
             bridge::set_paused,
             bridge::is_paused,

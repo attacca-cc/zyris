@@ -14,7 +14,7 @@ const SECOND: PeerQuestion = {
 };
 
 function showing(question: PeerQuestion): State {
-  return { ...initialState, screen: "status", question };
+  return { ...initialState, screen: "settings", question };
 }
 
 describe("peerQuestionEnded", () => {
@@ -40,7 +40,7 @@ describe("peerQuestionEnded", () => {
   });
 
   it("does nothing when no question is showing", () => {
-    const state = { ...initialState, screen: "status" as const };
+    const state = { ...initialState, screen: "settings" as const };
 
     expect(reduce(state, { kind: "peerQuestionEnded", id: FIRST.id })).toBe(state);
   });

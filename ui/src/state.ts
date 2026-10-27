@@ -83,20 +83,19 @@ export const TABS = [
   { id: "voice", label: "Voice" },
   { id: "tools", label: "Tools" },
   { id: "mcp", label: "MCP servers" },
-  { id: "status", label: "Status" },
   { id: "settings", label: "Settings" },
 ] as const;
 
 export type Tab = (typeof TABS)[number]["id"];
 
-// **The phone app shows what a phone can do**: the conversation and the connection. The rest —
-// speech settings, the tools and MCP servers a computer announces, autostart — belongs to the
-// desktop app, and its commands are not in the phone build at all.
+// **The phone app shows what a phone can do**: the conversation and the connection, which is the
+// top of Settings. The rest — speech settings, the tools and MCP servers a computer announces,
+// autostart — belongs to the desktop app, and Settings leaves those parts out on a phone.
 export const PHONE = typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 // Android hears and speaks on the phone itself, so it gets the Voice screen too; iOS does not yet.
 export const ANDROID = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
 export const SHOWN_TABS = PHONE
-  ? TABS.filter((tab) => tab.id === "conversation" || tab.id === "status" || (ANDROID && tab.id === "voice"))
+  ? TABS.filter((tab) => tab.id === "conversation" || tab.id === "settings" || (ANDROID && tab.id === "voice"))
   : TABS;
 
 export type Screen = "starting" | "onboarding" | Tab;
@@ -128,7 +127,7 @@ export type State = {
   node: { nodeId: string; nodeName: string } | null;
   connected: boolean;
   problem: string | null;
-  // Only meaningful alongside `problem` on the status screen: whether the link is redialling on
+  // Only meaningful alongside `problem` on the Settings screen: whether the link is redialling on
   // its own (true) or this is a dead end that needs a restart (false). See `disconnected` below.
   retrying: boolean;
   // Whether the machine is refusing new tool calls. "No new calls" is the whole of it — a call

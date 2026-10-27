@@ -403,6 +403,9 @@ fn main() -> anyhow::Result<()> {
     // node has withdrawn.
     let window_live = live.clone();
 
+    // The window's handle on the credential, so Settings can forget it.
+    let window_identity = identity.clone();
+
     let mut connector = zyris_runtime::connection::Connector::new(identity, bus.clone())
         .with_capabilities(live);
 
@@ -486,6 +489,7 @@ fn main() -> anyhow::Result<()> {
             bus,
             runtime.handle().clone(),
             connector,
+            window_identity,
             tools,
             // What that `Tools` describes when the window asks. The same handle the supervisor
             // and the connector hold, so the screen and the node cannot disagree.

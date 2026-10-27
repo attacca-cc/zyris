@@ -38,7 +38,7 @@ describe("App", () => {
     expect(names).toEqual(["core-event", "core-resync"]);
   });
 
-  it("offers the six screens once enrolled, opens on the conversation, and has no debug screen", async () => {
+  it("offers the five screens once enrolled, opens on the conversation, and has no debug screen", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "latest_event") return Promise.resolve({ kind: "connected", nodeId: "n1", nodeName: "desk-linux" });
       if (command === "conversation_sessions") return Promise.reject("not connected yet");
@@ -50,7 +50,7 @@ describe("App", () => {
     const names = within(nav)
       .getAllByRole("button")
       .map((button) => button.textContent);
-    expect(names).toEqual(["Conversation", "Voice", "Tools", "MCP servers", "Status", "Settings"]);
+    expect(names).toEqual(["Conversation", "Voice", "Tools", "MCP servers", "Settings"]);
     expect(within(nav).getByRole("button", { name: "Conversation" }).getAttribute("aria-current")).toBe("page");
     expect(nav.textContent).toMatch(/desk-linux/);
   });

@@ -86,6 +86,15 @@ stdenv.mkDerivation (finalAttrs: {
     runHook postUnpack
   '';
 
+  # A white window over a node that runs fine, seen on NixOS with KDE Plasma: WebKitGTK's
+  # accelerated compositing goes through the system's GL driver, which need not be the Mesa this
+  # package was built against, and when the two disagree the page is never drawn. The window is a
+  # settings page and a transcript, which the software path draws the same. A value somebody set
+  # themselves is left alone, as `main.rs` does for the DMABUF renderer.
+  preFixup = ''
+    gappsWrapperArgs+=(--set-default WEBKIT_DISABLE_COMPOSITING_MODE 1)
+  '';
+
   installPhase = ''
     runHook preInstall
     mkdir -p $out
