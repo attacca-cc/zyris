@@ -26,11 +26,18 @@ use crate::identity::Identity;
 /// `projects:read` is the Conversation tab choosing which project a session lives in. It was
 /// missing until 2026-09-27, so every machine enrolled before then lacks it; see
 /// [`missing_scopes`] for how such a machine is brought up to date.
+///
+/// `jobs:write` is the Conversation tab's first message. A line that is not a follow-up of a
+/// running exchange starts a job (`AttaccaApi::create_job`), and a credential granted without it
+/// refuses every send with `ForbiddenScope: this credential was not granted the jobs:write scope`,
+/// which the thread shows as "Not sent", for as long as the machine lives. Nothing here lists or
+/// reads a job, so `jobs:read` is deliberately not asked for.
 pub const SCOPES: &[&str] = &[
     "agents:read",
     "projects:read",
     "sessions:read",
     "sessions:write",
+    "jobs:write",
     "events:read",
     "peers:write",
 ];
@@ -848,7 +855,8 @@ mod tests {
 
     /// Measured on a real machine: a credential from before `projects:read` was asked for left
     /// the Conversation tab with nothing but "this credential was not granted the projects:read
-    /// scope", for good, because nothing ever enrolled it again.
+    /// scope", for good, because nothing ever enrolled it again. The same was measured again for
+    /// `jobs:write`, which is the thread's "Not sent".
     #[test]
     fn a_credential_missing_a_scope_this_build_uses_is_noticed() {
         let old = credential_with(&[
@@ -858,12 +866,21 @@ mod tests {
             "events:read",
             "peers:write",
         ]);
-        assert_eq!(missing_scopes(&old), vec!["projects:read"]);
+        assert_eq!(missing_scopes(&old), vec!["projects:read", "jobs:write"]);
         assert!(missing_scopes(&credential_with(SCOPES)).is_empty());
         // A scope granted beyond what is asked for is not a reason to enrol.
         let mut wider: Vec<&str> = SCOPES.to_vec();
         wider.push("files:read");
         assert!(missing_scopes(&credential_with(&wider)).is_empty());
+    }
+
+    /// The Conversation tab's first message is a job: `AttaccaApi::create_job` is asked for
+    /// `jobs:write` on the server, so a credential granted without it refuses every send with
+    /// `ForbiddenScope: this credential was not granted the jobs:write scope`. Asking for it here
+    /// is what turns that into a re-enrolment rather than a permanent error.
+    #[test]
+    fn the_conversation_tab_asks_for_the_job_scope() {
+        assert!(SCOPES.contains(&"jobs:write"), "{SCOPES:?}");
     }
 
     #[test]
