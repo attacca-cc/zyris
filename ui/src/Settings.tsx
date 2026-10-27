@@ -3,7 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { InfoIcon, PowerIcon, TriangleAlertIcon } from "lucide-react";
+import { InfoIcon, LogOutIcon, PowerIcon, TriangleAlertIcon } from "lucide-react";
+import { PHONE, type State } from "./state";
+import { Status } from "./Status";
+import { Button } from "@/components/ui/button";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { IconTile, Note, Problem } from "@/components/IconTile";
@@ -33,7 +36,7 @@ function unsupportedReason(state: AutostartState): string | null {
   return typeof state === "object" ? state.unsupported : null;
 }
 
-export function Settings() {
+export function Settings({ state }: { state: State }) {
   const [autostart, setAutostart] = useState<Autostart | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   // A `schtasks` call or three `systemctl` calls are not instant. Without this the button can
@@ -132,13 +135,78 @@ export function Settings() {
     };
   }, []);
 
+  // Two presses, because the first one is easy to make and the second is the one that matters:
+  // forgetting the credential restarts Zyris onto the enrolment screen, and nothing undoes it.
+  const [confirmingForget, setConfirmingForget] = useState(false);
+  const [forgetProblem, setForgetProblem] = useState<string | null>(null);
+
+  function forgetCredential() {
+    setForgetProblem(null);
+    // Success never comes back: the command restarts the process.
+    void invoke("forget_credential").catch((error: unknown) => {
+      setForgetProblem(asMessage(error, "Could not remove this computer's credential."));
+      setConfirmingForget(false);
+    });
+  }
+
   const reason = autostart ? unsupportedReason(autostart.state) : null;
   const on = autostart?.state === "enabled";
 
   return (
     <Page>
-      <PageHeader title="Settings" description="What Zyris does when nobody has it open." />
+      <PageHeader title="Settings" description={`${PHONE ? "This phone's" : "This computer's"} link to Attacca, and what Zyris does when nobody has it open.`} />
 
+      <Status state={state} />
+
+      {/* Not on a phone: autostart and the credential are the desktop app's, and their commands are
+          not in the phone build. */}
+      {!PHONE && (
+        <Card>
+          <CardHeader className="items-center">
+            <IconTile>
+              <LogOutIcon />
+            </IconTile>
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <CardTitle>Disconnect this computer</CardTitle>
+              <CardDescription>
+                {confirmingForget
+                  ? "Zyris will remove its credential and restart, asking you to approve this computer again."
+                  : "Remove this computer's credential from this machine."}
+              </CardDescription>
+            </div>
+            {confirmingForget ? (
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => setConfirmingForget(false)}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" size="sm" onClick={forgetCredential}>
+                  Disconnect
+                </Button>
+              </div>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => setConfirmingForget(true)}>
+                Disconnect
+              </Button>
+            )}
+          </CardHeader>
+          {forgetProblem && <Problem>{forgetProblem}</Problem>}
+          {/* Said plainly, because "disconnect" sounds like more than it is: no call lets a
+              credential revoke itself, so the old one stays valid until it is revoked on Attacca. */}
+          <Note className="text-xs text-subtle">
+            Attacca still accepts the old credential until you revoke it in{" "}
+            <Button
+              variant="link"
+              className="text-xs"
+              onClick={() => void invoke("open_verification_url", { url: "https://attacca.cc/settings/zyris" })}
+            >
+              Attacca's Zyris settings
+            </Button>
+            .
+          </Note>
+        </Card>
+      )}
+
+      {!PHONE && (
       <Card className="gap-0 overflow-hidden p-0">
         <CardHeader className="items-center px-5 py-5">
           <IconTile>
@@ -207,6 +275,7 @@ export function Settings() {
           </>
         )}
       </Card>
+      )}
 
       <Card>
         <CardHeader className="items-center">
@@ -215,7 +284,7 @@ export function Settings() {
           </IconTile>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <CardTitle>About Zyris</CardTitle>
-            <CardDescription>{version ? `Version ${version}` : "Zyris"}</CardDescription>
+            <CardDescription>{version ? `Version ${version} (build ${__ZYRIS_BUILD__})` : "Zyris"}</CardDescription>
           </div>
         </CardHeader>
       </Card>

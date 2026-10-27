@@ -1,17 +1,15 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
 import { KeyRoundIcon, WifiIcon, WifiOffIcon } from "lucide-react";
 import { PHONE, type State } from "./state";
 import { PhoneAccess } from "./PhoneAccess";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { CopyButton, Fingerprint } from "@/components/CopyButton";
 import { IconTile, Mono, Note, Problem } from "@/components/IconTile";
-import { Page, PageHeader } from "@/components/PageHeader";
 
 // This computer's own peer fingerprint, as the `peer_fingerprint` command answers with it — the
 // same string `Peering::fingerprint` hands the approval screen about somebody else's machine, and
-// the same one that machine's own Status screen shows about this one.
+// the same one that machine's own Settings screen shows about this one.
 //
 // Three answers, like the inbox read on the Tools screen and for the same reason. `undefined` is a
 // read still in flight, `null` is a computer with no peer identity — no key, no `file_transfer`,
@@ -19,14 +17,8 @@ import { Page, PageHeader } from "@/components/PageHeader";
 // be shown as a fingerprint made of nothing.
 type Fingerprint = string | null | undefined;
 
+// The link to Attacca and this machine's fingerprint, as the top of the Settings screen.
 export function Status({ state }: { state: State }) {
-  // Which Zyris this is, for a bug report and for knowing whether an update has landed.
-  const [version, setVersion] = useState<string | null>(null);
-  useEffect(() => {
-    getVersion()
-      .then(setVersion)
-      .catch(() => setVersion(null));
-  }, []);
   const [fingerprint, setFingerprint] = useState<Fingerprint>(undefined);
   const [fingerprintProblem, setFingerprintProblem] = useState<string | null>(null);
 
@@ -58,12 +50,7 @@ export function Status({ state }: { state: State }) {
   }, []);
 
   return (
-    <Page>
-      <PageHeader
-        title="Status"
-        description={`${PHONE ? "This phone's" : "This computer's"} link to Attacca.${version ? ` Zyris ${version} (build ${__ZYRIS_BUILD__}).` : ""}`}
-      />
-
+    <>
       <Card
         className={
           state.connected
@@ -148,6 +135,6 @@ export function Status({ state }: { state: State }) {
           )}
         </Card>
       )}
-    </Page>
+    </>
   );
 }

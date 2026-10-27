@@ -1,5 +1,4 @@
 import {
-  ActivityIcon,
   BlocksIcon,
   MessageCircleIcon,
   MicIcon,
@@ -16,7 +15,6 @@ const ICONS: Record<Tab, LucideIcon> = {
   voice: MicIcon,
   tools: WrenchIcon,
   mcp: BlocksIcon,
-  status: ActivityIcon,
   settings: SettingsIcon,
 };
 
@@ -27,7 +25,7 @@ const ICONS: Record<Tab, LucideIcon> = {
 // Below 820px it is a rail of icons with the names kept for screen readers, since 240px of a
 // narrow window is too much to spend on names. Below 640px — a window docked beside another, or a
 // phone — it is a bar of icons along the bottom, where a thumb reaches, and the connection line
-// gives way to the Status screen.
+// gives way to the Settings screen.
 export function Sidebar({
   screen,
   state,
@@ -92,7 +90,7 @@ function Item({
   );
 }
 
-// One line: whether this computer is connected, and as what. The Status screen has the rest.
+// One line: whether this computer is connected, and as what. Settings has the rest.
 function Connection({ state }: { state: State }) {
   return (
     <div

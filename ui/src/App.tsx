@@ -3,7 +3,6 @@ import { Mcp } from "./Mcp";
 import { Onboarding } from "./Onboarding";
 import { PeerConfirm } from "./PeerConfirm";
 import { Settings } from "./Settings";
-import { Status } from "./Status";
 import { Tools } from "./Tools";
 import { Voice } from "./Voice";
 import { Conversation } from "./Conversation";
@@ -110,7 +109,6 @@ export function App() {
           state={state}
           onNavigate={(to) => dispatch({ kind: "navigate", to })}
         />
-        {state.screen === "status" && <Status state={state} />}
         {state.screen === "tools" && <Tools state={state} dispatch={dispatch} />}
         {/* Only `state` in: what this screen lists is read through a command, and the one thing
             it needs from the core is the news that a server changed — a death in particular, which
@@ -123,9 +121,9 @@ export function App() {
         {/* Mounted for the life of the window and hidden when another screen is showing: the
             turns live nowhere else, and what is said while another screen is open still counts. */}
         <Conversation hidden={state.screen !== "conversation"} connected={state.connected} />
-        {/* No props: what this screen shows is read off the machine through a command, not
-            folded into core state, because nothing outside it needs the answer. */}
-        {state.screen === "settings" && <Settings />}
+        {/* Only `state` in, for the connection at its top: the rest is read off the machine
+            through a command, because nothing outside this screen needs the answer. */}
+        {state.screen === "settings" && <Settings state={state} />}
         {overlays}
       </div>
     );

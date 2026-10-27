@@ -219,7 +219,7 @@ export function PeerConfirm({
 
         <section className="flex flex-col gap-2.5" aria-label="Compare this fingerprint">
           <h3 className="m-0 text-[0.78125rem] font-normal text-muted-foreground">
-            Compare this fingerprint with the one on that machine's Status screen
+            Compare this fingerprint with the one on that machine's Settings screen
           </h3>
           {/* Exactly the characters the core was given: eight groups of four, uppercase, single
               spaces. Selecting it copies it whole. */}
