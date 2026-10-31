@@ -32,7 +32,8 @@ serde_json = { workspace = true }
 tauri = { workspace = true }
 # `time` and `sync` are `confirm.rs`: a question waits on a `oneshot` and answers itself when the
 # deadline fires. `signal` is headless's shutdown, `rt-multi-thread` the runtime `main` builds.
-tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
+# `net`, `io-std` and `io-util` are the browser bridge's socket and stdio.
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time", "net", "io-std", "io-util"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -45,6 +46,9 @@ zyris-autostart = { path = "../zyris-autostart" }
 # than in `zyris-tools` because starting one is asynchronous and can fail, and a capability list
 # is neither.
 zyris-mcp = { path = "../zyris-mcp" }
+# The browser bridge (`src/browser.rs`) is the one MCP *server* in this workspace, so the server
+# half is turned on here rather than for every crate that is only a client.
+rmcp = { workspace = true, features = ["server", "transport-io"] }
 zyris-tools = { path = "../zyris-tools" }
 clap = { workspace = true }
 # The push-to-talk key on X11 and on Windows. The crate carries a no-op backend for the ones it

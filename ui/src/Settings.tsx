@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
-import { InfoIcon, LogOutIcon, PowerIcon, TriangleAlertIcon } from "lucide-react";
+import { GlobeIcon, InfoIcon, LogOutIcon, PowerIcon, TriangleAlertIcon } from "lucide-react";
 import { PHONE, type State } from "./state";
 import { Status } from "./Status";
 import { Button } from "@/components/ui/button";
@@ -149,6 +149,31 @@ export function Settings({ state }: { state: State }) {
     });
   }
 
+  const [browserLinked, setBrowserLinked] = useState<boolean | null>(null);
+  const [linkingBrowser, setLinkingBrowser] = useState(false);
+  const [linkProblem, setLinkProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (PHONE) return;
+    let cancelled = false;
+    void invoke<boolean>("browser_linked").then((linked) => {
+      if (!cancelled) setBrowserLinked(linked);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function linkBrowser() {
+    setLinkProblem(null);
+    setLinkingBrowser(true);
+    // Success never comes back: the command restarts the process so the server list is read again.
+    void invoke("link_browser").catch((error: unknown) => {
+      setLinkProblem(asMessage(error, "Could not link the browser."));
+      setLinkingBrowser(false);
+    });
+  }
+
   const reason = autostart ? unsupportedReason(autostart.state) : null;
   const on = autostart?.state === "enabled";
 
@@ -203,6 +228,28 @@ export function Settings({ state }: { state: State }) {
             </Button>
             .
           </Note>
+        </Card>
+      )}
+
+      {!PHONE && (
+        <Card>
+          <CardHeader className="items-center">
+            <IconTile>
+              <GlobeIcon />
+            </IconTile>
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <CardTitle>Browser</CardTitle>
+              <CardDescription>
+                {browserLinked
+                  ? "Linked. Agents can use your browser through the Zyris extension."
+                  : "Let agents use Chrome or Firefox through the Zyris extension. Zyris will restart."}
+              </CardDescription>
+            </div>
+            <Button variant="outline" size="sm" disabled={linkingBrowser || browserLinked === null} onClick={linkBrowser}>
+              {browserLinked ? "Link again" : "Link browsers"}
+            </Button>
+          </CardHeader>
+          {linkProblem && <Problem>{linkProblem}</Problem>}
         </Card>
       )}
 

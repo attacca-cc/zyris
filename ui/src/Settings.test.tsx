@@ -37,4 +37,20 @@ describe("Settings", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Disconnect" }).at(-1)!);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("forget_credential"));
   });
+
+  it("links the browser and shows the error it comes back with", async () => {
+    invoke.mockImplementation((command) =>
+      command === "browser_linked"
+        ? Promise.resolve(false)
+        : command === "link_browser"
+          ? Promise.reject("found no Chrome, Chromium, Brave, Edge or Firefox for this user")
+          : Promise.resolve(null),
+    );
+    render(<Settings state={{ ...initialState, screen: "settings" }} />);
+
+    const button = await screen.findByRole("button", { name: "Link browsers" });
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(button);
+    expect(await screen.findByText(/found no Chrome/)).toBeTruthy();
+  });
 });

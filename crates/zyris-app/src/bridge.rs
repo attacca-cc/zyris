@@ -325,6 +325,24 @@ pub async fn set_voice_listening(
 /// it from any other path.
 pub struct TriggerFile(pub std::path::PathBuf);
 
+/// This instance's data directory, for the commands that edit its MCP server list.
+pub struct DataDir(pub std::path::PathBuf);
+
+/// Whether the browser bridge is in this instance's server list.
+#[tauri::command]
+pub fn browser_linked(data: State<DataDir>) -> bool {
+    crate::browser::linked(&data.0)
+}
+
+/// Register the native messaging host with every installed browser and add the bridge to the
+/// server list, then restart: the list is read once, at startup.
+#[tauri::command]
+pub fn link_browser(app: AppHandle, data: State<DataDir>) -> Result<(), String> {
+    let browsers = crate::browser::link(&data.0).map_err(|error| format!("{error:#}"))?;
+    tracing::info!(?browsers, "linked the browser extension; restarting");
+    app.restart()
+}
+
 /// Use `trigger` ("Ctrl+Shift+K") as the push-to-talk key, now and at the next launch.
 ///
 /// **On the main thread**: on Windows `RegisterHotKey` only reaches the message window when it is
