@@ -424,6 +424,8 @@ pub struct VoiceView {
     pub input_gain: f32,
     /// Seconds the microphone stays open for an answer to a question; 0 is off.
     pub follow_up_seconds: u32,
+    /// The language speech is transcribed as, by whisper code; `None` is detected per turn.
+    pub language: Option<String>,
     /// Where speech is transcribed and answers are read.
     pub compute: ComputeView,
     /// The speech model in use: [`VoiceView::models`]'s chosen row, or the file
@@ -485,6 +487,7 @@ impl VoiceView {
             volume: 1.0,
             input_gain: 1.0,
             follow_up_seconds: 8,
+            language: None,
             compute: ComputeView::default(),
             model: ModelView::NotHere { reason: reason.clone() },
             models: Vec::new(),

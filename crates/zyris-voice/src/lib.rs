@@ -766,6 +766,16 @@ impl Voice {
         self.look().await
     }
 
+    /// Choose the language speech is transcribed as, now and at the next launch. `None` detects it.
+    pub async fn choose_language(&self, language: Option<String>) -> view::VoiceView {
+        #[cfg(feature = "voice")]
+        if let Some(engine) = &self.engine {
+            engine.choose_language(language.clone()).await;
+        }
+        let _ = language;
+        self.look().await
+    }
+
     /// Choose how loud answers are read, now and at the next launch.
     pub async fn choose_volume(&self, gain: f32) -> view::VoiceView {
         #[cfg(feature = "voice")]

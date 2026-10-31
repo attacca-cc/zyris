@@ -176,6 +176,8 @@ export type VoiceScreen = {
     speakingRate: number;
     // Seconds the mic stays open after a spoken question, without the wake phrase. 0 is off.
     followUpSeconds: number;
+    // The whisper code speech is transcribed as; null is detected per turn.
+    language: string | null;
     // Whether answers are read aloud while listening is on. The Conversation screen's switch.
     readAloud: boolean;
     // A gain on the voice: 1 is as the model writes it.
@@ -327,6 +329,29 @@ function rateChoices(current: number): number[] {
   const offered = [1, 1.1, 1.25, 1.4];
   const rate = roundRate(current);
   return offered.includes(rate) ? offered : [...offered, rate].sort((a, b) => a - b);
+}
+
+// Whisper codes. "auto" stands for null, since a select item cannot have an empty value.
+const LANGUAGES: [string, string][] = [
+  ["auto", "Detect each time"],
+  ["en", "English"],
+  ["ko", "Korean"],
+  ["ja", "Japanese"],
+  ["zh", "Chinese"],
+  ["es", "Spanish"],
+  ["fr", "French"],
+  ["de", "German"],
+  ["it", "Italian"],
+  ["pt", "Portuguese"],
+  ["ru", "Russian"],
+  ["vi", "Vietnamese"],
+];
+
+// A code set from the console that is not in the list is still shown, not blanked.
+function languageChoices(current: string | null): [string, string][] {
+  return current === null || LANGUAGES.some(([code]) => code === current)
+    ? LANGUAGES
+    : [...LANGUAGES, [current, current]];
 }
 
 // A value the backend reports outside the list is still shown, not blanked.
@@ -1106,6 +1131,27 @@ export function Voice() {
         )}
         {refused.model && <Problem>{refused.model}</Problem>}
         <Note>Deleting the one in use turns listening off.</Note>
+        <Field label="Language you speak">
+          <Select
+            value={voice.language ?? "auto"}
+            disabled={isBusy("language")}
+            onValueChange={(code) =>
+              act("language", "set_speech_language", { language: code === "auto" ? null : code })}
+          >
+            <SelectTrigger aria-label="Language you speak">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {languageChoices(voice.language).map(([code, name]) => (
+                <SelectItem key={code} value={code}>
+                  {name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+        {refused.language && <Problem>{refused.language}</Problem>}
+        <Note>Detecting is right for speaking more than one language; choose one if short sentences come back in the wrong one.</Note>
       </Section>
 
       {canHear && (

@@ -202,6 +202,10 @@ pub trait Transcribe: Send + Sync + 'static {
     /// ponytail: whisper.cpp ignores it (a look there is 0.3–0.6 s); wire its abort callback if
     /// a slow processor makes the wait matter.
     fn abandon(&self) {}
+
+    /// Tell every turn from now on which language it is in (a whisper code), or `None` to detect
+    /// it. A double that has no use for it ignores it.
+    fn set_language(&self, _language: Option<&str>) {}
 }
 
 impl Transcribe for stt::Stt {
@@ -211,6 +215,10 @@ impl Transcribe for stt::Stt {
 
     fn transcribe_expecting(&self, audio: &[f32], phrase: &str) -> Result<String, stt::Fault> {
         stt::Stt::transcribe_expecting(self, audio, Some(phrase))
+    }
+
+    fn set_language(&self, language: Option<&str>) {
+        stt::Stt::set_language(self, language)
     }
 }
 

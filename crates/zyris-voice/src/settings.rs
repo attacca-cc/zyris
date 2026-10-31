@@ -128,6 +128,14 @@ pub const KEYS: &[Key] = &[
         help: "names every turn is read expecting, so they come back spelled as written",
     },
     Key {
+        name: "voice.language",
+        json: "language",
+        kind: Kind::Text,
+        optional: true,
+        help: "the language speech is transcribed as, by whisper code (`ko`, `en`, `fr`…). \
+               Absent detects it per turn",
+    },
+    Key {
         name: "voice.speakingRate",
         json: "speakingRate",
         kind: Kind::Number,

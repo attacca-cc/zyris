@@ -96,6 +96,10 @@ pub struct Settings {
     /// to it; an empty string turns it off.
     #[serde(default)]
     pub vocabulary: Option<String>,
+    /// The language speech is transcribed as, by whisper code (`ko`, `en`, `fr`…). `None` is
+    /// whisper detecting it per turn, which a short sentence sometimes gets wrong.
+    #[serde(default)]
+    pub language: Option<String>,
     /// How fast answers are read, as a multiple of the voice's own pace; `None` is
     /// [`DEFAULT_SPEAKING_RATE`]. Clamped to the range [`crate::tts::Tts::set_speed`] allows.
     #[serde(default)]
@@ -648,6 +652,7 @@ impl Engine {
             volume: volume(settings),
             input_gain: input_gain(settings),
             follow_up_seconds: follow_up_seconds(settings),
+            language: settings.language.clone(),
             compute: compute_view(
                 settings,
                 self.npu_view(),
@@ -875,6 +880,15 @@ impl Engine {
         self.restart_if_running(&mut live).await;
     }
 
+    /// Choose the language speech is transcribed as, `None` to detect it, and start listening
+    /// again in it if listening is on.
+    pub async fn choose_language(&self, language: Option<String>) {
+        let mut live = self.live.lock().await;
+        live.settings.language = language.map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty());
+        self.store(&live.settings);
+        self.restart_if_running(&mut live).await;
+    }
+
     /// Choose the speech model, and start listening again on it if listening is on.
     pub async fn choose_model(&self, id: String) {
         let mut live = self.live.lock().await;
@@ -1079,6 +1093,7 @@ impl Engine {
                 (stt, Some(checker))
             }
         };
+        stt.set_language(settings.language.as_deref());
         // Only what this start uses stays in memory: a model chosen away from is let go.
         let in_use = |kept: &Arc<stt::Stt>| {
             std::ptr::addr_eq(Arc::as_ptr(kept), Arc::as_ptr(&stt))
