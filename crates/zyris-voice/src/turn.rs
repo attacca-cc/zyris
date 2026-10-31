@@ -28,16 +28,18 @@
 //! reader: it would go on emitting fragments from a stream nobody can answer, and its cursor
 //! would overwrite the live one.
 //!
-//! # Two ways a stream fails, and they are not the same failure
+//! # How a subscription ends, and what each ending does
 //!
-//! | code | what happened | what this does |
+//! | ending | what happened | what this does |
 //! |---|---|---|
-//! | `StreamLagged` | a chunk-sequence gap; the protocol requires the stream to fail rather than deliver past it, and `zyris-core` sends `SCancel` back | re-subscribe **on this connection**, from `last_cursor` |
+//! | `StreamLagged` | a chunk-sequence gap; the protocol requires the stream to fail rather than deliver past it, and `zyris-core` sends `SCancel` back | re-subscribe **on this connection** at once, from `last_cursor` |
 //! | `ConnectionLost` | the socket went | nothing here; the connect hook re-attaches on the next connection |
+//! | anything else, or the stream ending without an error | the server refused or dropped the subscription, and the connection is still up | re-subscribe **on this connection** after a backoff ([`RETRY_MIN`] doubling to [`RETRY_MAX`]) |
 //!
-//! They are distinguishable — `WireError::code` — and treating them alike costs something in
-//! both directions: re-dialling a live connection for a gap it could have resumed, or sitting
-//! silent on a live connection because a gap looked like a disconnect.
+//! Only `ConnectionLost` waits for the next connection. A `Timeout`, an `Overloaded` or a
+//! stream the server closed leaves a connection that stays up for hours, and a feed that
+//! waited for that one to drop was a voice that said "did not reach Attacca" until it did
+//! (zyris#54).
 //!
 //! # What a cursor is, and when it may be taken from the head
 //!
@@ -66,6 +68,12 @@ use crate::view::{AgentEntry, HistoryLine, HistoryView, ProjectEntry, SessionEnt
 /// early when the connection closes, and it runs beside the close report rather than in front of
 /// it.
 pub const API_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The first wait before a subscription the server refused or closed is opened again.
+pub const RETRY_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The longest wait between two attempts on one connection.
+pub const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How many events the feed will hold for a consumer that is not reading.
 ///
@@ -391,7 +399,9 @@ struct State {
 /// How opening a subscription went.
 enum Opened {
     Items(zyris::ItemStream<ZTurnFrame>),
-    /// Give up on this generation; already logged and published.
+    /// Refused on a connection that is still up; already logged and published. Tried again.
+    Refused,
+    /// Give up on this generation: superseded, or its connection is gone.
     Failed,
     /// The session does not exist for this account any more. See [`session_is_gone`].
     Gone,
@@ -488,18 +498,23 @@ impl Feed {
     /// cursor and nothing else — the client, the subscription and the filter state all belong to
     /// a connection that is gone.
     ///
-    /// Nothing here returns an error. A connection that never announces `attacca_api` leaves
-    /// this machine connected and serving every other capability, and the next connection tries
-    /// again.
+    /// Nothing here returns an error. A connection that has not announced `attacca_api` yet
+    /// leaves this machine connected and serving every other capability, and this goes on
+    /// waiting for it until the connection closes: an announcement that comes late is still the
+    /// only one this connection will get.
     pub async fn on_connect(self: &Arc<Self>, connection: zyris::Connection) {
-        match connection.wait_capability::<AttaccaApiClient>(API_WAIT).await {
-            Ok(api) => self.attach(Arc::new(api)).await,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "this connection never announced attacca_api, so there is no turn to listen \
-                     to; the voice waits for the next one"
-                );
+        loop {
+            match connection.wait_capability::<AttaccaApiClient>(API_WAIT).await {
+                Ok(api) => return self.attach(Arc::new(api)).await,
+                Err(error) if error.code == ErrorCode::CapabilityNotAnnounced => {
+                    tracing::warn!(
+                        %error,
+                        "this connection has not announced attacca_api, so there is no turn to \
+                         listen to yet; still waiting"
+                    );
+                }
+                // The connection closed; the next one runs this hook again.
+                Err(_) => return,
             }
         }
     }
@@ -532,20 +547,24 @@ impl Feed {
             return;
         }
         let items = match self.open(api.as_ref(), generation).await {
-            Opened::Items(items) => items,
+            Opened::Items(items) => Some(items),
+            // Retried in the background: this hook still returns, and `say` is refused until a
+            // subscription is open.
+            Opened::Refused => None,
             Opened::Failed => return,
-            // The session this machine wrote down was deleted, or was never this account's;
-            // retrying it on every reconnect would be a voice that never comes back, with
-            // nothing on any screen to clear it. The next thing said starts a new job.
-            Opened::Gone => {
-                tracing::warn!("the voice's session is gone from Attacca; the next message starts a new job");
-                *self.session_id.lock().expect("the session id is not poisoned") = None;
-                self.state.lock().expect("the feed state is not poisoned").cursor = None;
-                return;
-            }
+            Opened::Gone => return self.forget_the_session(),
         };
         let feed = self.clone();
         tokio::spawn(async move { feed.run(api, generation, items).await });
+    }
+
+    /// The session this machine wrote down was deleted, or was never this account's; retrying
+    /// it would be a voice that never comes back, with nothing on any screen to clear it. The
+    /// next thing said starts a new job.
+    fn forget_the_session(&self) {
+        tracing::warn!("the voice's session is gone from Attacca; the next message starts a new job");
+        *self.session_id.lock().expect("the session id is not poisoned") = None;
+        self.state.lock().expect("the feed state is not poisoned").cursor = None;
     }
 
     /// The client of the connection that is current, or a sentence saying there is none.
@@ -876,12 +895,13 @@ impl Feed {
             Ok(streaming) => streaming,
             Err(error) if session_is_gone(&error) => return Opened::Gone,
             Err(error) => {
-                tracing::warn!(%error, "could not subscribe to this session's turns");
+                let retrying = error.code != ErrorCode::ConnectionLost;
+                tracing::warn!(%error, retrying, "could not subscribe to this session's turns");
                 self.publish(
-                    TurnEvent::Lost { reason: error.to_string(), resubscribing: false },
+                    TurnEvent::Lost { reason: error.to_string(), resubscribing: retrying },
                     generation,
                 );
-                return Opened::Failed;
+                return if retrying { Opened::Refused } else { Opened::Failed };
             }
         };
 
@@ -907,23 +927,46 @@ impl Feed {
     ///
     /// A loop rather than `pump` calling `open` again, because an `async fn` that awaits itself
     /// through a spawn is a future whose type contains itself and does not compile.
+    ///
+    /// `items: None` is a subscription that was refused before this started, so the first thing
+    /// it does is wait and try again.
     async fn run(
         self: Arc<Self>,
         api: Arc<dyn TurnApi>,
         generation: u64,
-        mut items: zyris::ItemStream<ZTurnFrame>,
+        mut items: Option<zyris::ItemStream<ZTurnFrame>>,
     ) {
+        let mut delay = RETRY_MIN;
         loop {
-            match self.pump(&mut items, generation).await {
+            let next = match items.as_mut() {
+                Some(stream) => self.pump(stream, generation).await,
+                None => Next::Retry,
+            };
+            match next {
                 Next::Stop => return,
-                // A session gone in the middle of a connection is left for the next one's
-                // `attach`, which is where one is made.
-                Next::Resubscribe => match self.open(api.as_ref(), generation).await {
-                    Opened::Items(next) => items = next,
-                    Opened::Failed | Opened::Gone => return,
-                },
+                Next::Resubscribe => {}
+                Next::Retry => {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(RETRY_MAX);
+                }
             }
+            if !self.is_current(generation) {
+                return;
+            }
+            items = match self.open(api.as_ref(), generation).await {
+                Opened::Items(next) => {
+                    delay = RETRY_MIN;
+                    Some(next)
+                }
+                Opened::Refused => None,
+                Opened::Failed => return,
+                Opened::Gone => return self.forget_the_session(),
+            };
         }
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.state.lock().expect("the feed state is not poisoned").generation == generation
     }
 
     /// One subscription, from its first frame to whatever ends it.
@@ -954,16 +997,10 @@ impl Feed {
                     }
                     Some(Err(error)) => return self.on_stream_error(error, generation),
                     None => {
-                        // The server ended the stream without failing it. Nothing is coming, and
-                        // nothing here can ask for more on this connection.
-                        self.publish(
-                            TurnEvent::Lost {
-                                reason: "the turn stream ended".to_string(),
-                                resubscribing: false,
-                            },
-                            generation,
-                        );
-                        return Next::Stop;
+                        // The server ended the stream without failing it, on a connection that
+                        // may well stay up. Not live from here: a message sent now would be
+                        // answered into a stream nobody reads.
+                        return self.went_quiet("the turn stream ended".to_string(), Next::Retry, generation);
                     }
                 },
                 // A stream that stalls mid-sentence. Guarded on something actually being held —
@@ -1088,7 +1125,16 @@ impl Feed {
 
     /// A stream that failed. The two codes mean different things; see the module documentation.
     fn on_stream_error(&self, error: WireError, generation: u64) -> Next {
-        let lagged = error.code == ErrorCode::StreamLagged;
+        let next = match error.code {
+            ErrorCode::StreamLagged => Next::Resubscribe,
+            ErrorCode::ConnectionLost => Next::Stop,
+            _ => Next::Retry,
+        };
+        self.went_quiet(error.to_string(), next, generation)
+    }
+
+    /// A subscription that is over: not live, say why, and do `next`.
+    fn went_quiet(&self, reason: String, next: Next, generation: u64) -> Next {
         {
             let mut state = self.state.lock().expect("the feed state is not poisoned");
             if state.generation != generation {
@@ -1096,15 +1142,10 @@ impl Feed {
             }
             state.live = false;
         }
-        self.publish(
-            TurnEvent::Lost { reason: error.to_string(), resubscribing: lagged },
-            generation,
-        );
-        if lagged {
-            Next::Resubscribe
-        } else {
-            Next::Stop
-        }
+        tracing::warn!(%reason, ?next, "the turn subscription ended");
+        let resubscribing = next != Next::Stop;
+        self.publish(TurnEvent::Lost { reason, resubscribing }, generation);
+        next
     }
 
     /// Publish, unless this pump belongs to a connection that is no longer the current one.
@@ -1130,6 +1171,9 @@ enum Next {
     Stop,
     /// The connection is still good; open another subscription on it from the cursor.
     Resubscribe,
+    /// The connection is still good but the server refused or closed the subscription; open
+    /// another after a backoff.
+    Retry,
 }
 
 #[cfg(test)]
@@ -1796,6 +1840,69 @@ mod tests {
         assert_eq!(api.subscriptions(), 1, "a dead connection cannot be re-subscribed on");
         assert!(!feed.is_live(), "and nothing may be sent into it either");
         feed.say("hello").await.expect_err("the connection is gone");
+    }
+
+    /// zyris#54: a stream the server closed on a connection that stays up. The feed used to
+    /// stay `live` with nothing reading, so the next message was posted and its answer lost.
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_the_server_ended_is_not_live_and_is_opened_again_from_the_cursor() {
+        let api = Fake::new();
+        let feed = Feed::new("session-1");
+        feed.attach(api.clone()).await;
+        let stream = within("the subscription", api.stream(0)).await;
+        stream.send(durable(4)).unwrap();
+        tokio::task::yield_now().await;
+
+        drop(stream);
+        api.end(0);
+        while feed.is_live() {
+            tokio::task::yield_now().await;
+        }
+        feed.say("hello").await.expect_err("nothing is reading the session");
+
+        within("the second subscription", api.stream(1)).await;
+        assert_eq!(
+            api.calls(),
+            vec![Call::Subscribe { after: None }, Call::Subscribe { after: Some(4) }],
+        );
+        assert!(feed.is_live());
+        feed.say("hello").await.expect("listening again, on the same connection");
+    }
+
+    /// zyris#54: a failure that is not the connection's leaves the connection up, so the feed
+    /// opens another subscription on it rather than waiting for a reconnect that never comes.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_stream_on_a_live_connection_is_opened_again() {
+        let api = Fake::new();
+        let feed = Feed::new("session-1");
+        let mut events = feed.events();
+        feed.attach(api.clone()).await;
+        let stream = within("the subscription", api.stream(0)).await;
+
+        stream.send(Err(WireError::new(ErrorCode::Timeout, "the server timed out"))).unwrap();
+        let resubscribing = loop {
+            if let TurnEvent::Lost { resubscribing, .. } = next_event(&mut events).await {
+                break resubscribing;
+            }
+        };
+        assert!(resubscribing);
+
+        within("the second subscription", api.stream(1)).await;
+        assert!(feed.is_live());
+    }
+
+    /// zyris#54: a subscription refused when the connection came up is tried again on it.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_subscription_is_tried_again_on_the_same_connection() {
+        let api = Fake::new().refuse_next_subscribe();
+        let feed = Feed::new("session-1");
+
+        feed.attach(api.clone()).await;
+        assert!(!feed.is_live());
+
+        within("the retried subscription", api.stream(0)).await;
+        assert_eq!(api.calls(), vec![Call::Subscribe { after: None }, Call::Subscribe { after: None }]);
+        assert!(feed.is_live());
     }
 
     /// What a turn's running flag does, both at subscription time and mid-stream. The head
