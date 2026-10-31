@@ -11,6 +11,7 @@
 //! to run since Tauri owns the main thread synchronously.
 
 mod bridge;
+mod browser;
 mod cli;
 mod confirm;
 mod console;
@@ -113,6 +114,16 @@ fn attach_console(allocate: bool) {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Started by a browser or by the node as the browser bridge: neither speaks this CLI, and both
+    // talk over stdio, which `attach_console` below would take away. See `browser.rs`.
+    if let Some(role) = browser::role(
+        // Lossy, not `args()`: Firefox passes its manifest's path, and `args()` panics on a path
+        // that is not UTF-8.
+        &std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+    ) {
+        return browser::run(role);
+    }
+
     // First, while this is the only thread there is: see its documentation.
     #[cfg(target_os = "linux")]
     keep_webkit_off_dmabuf();

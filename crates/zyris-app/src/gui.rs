@@ -299,6 +299,7 @@ pub fn run(
         .manage(hotkey)
         // Where a key chosen on the Voice screen is kept for the next launch.
         .manage(trigger_file)
+        .manage(bridge::DataDir(data.clone()))
         // Speech, as a handle on the one this process built. The Voice screen reads everything
         // through it — the device list, the model on disk, whether a microphone is open — and
         // moves the one switch that opens one.
@@ -307,6 +308,8 @@ pub fn run(
         .invoke_handler(tauri::generate_handler![
             bridge::open_verification_url,
             bridge::forget_credential,
+            bridge::browser_linked,
+            bridge::link_browser,
             bridge::latest_event,
             bridge::set_paused,
             bridge::is_paused,

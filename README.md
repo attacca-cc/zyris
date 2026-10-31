@@ -191,7 +191,8 @@ bare `npx` is right and the extension would be wrong. When it is wrong, the MCP 
 server as not started, with the operating system's own "cannot find the file" as the reason, and
 nothing else on the machine is affected.
 
-Zyris reads this file when it starts and **never writes to it**. The MCP tab lists what is in it
+Zyris reads this file when it starts. Only `zyris mcp add`/`remove`/`enable`/`disable` and the
+**Link browsers** button in Settings ever write to it. The MCP tab lists what is in it
 and what each server is doing; the switches there stop and start a server for as long as Zyris is
 running, and the file is what decides which servers come back after a restart.
 
@@ -224,6 +225,26 @@ never reaches it. Choosing a limit here would mean Zyris putting a clock on some
 and a build or a fetch that was working would be the thing it cut off. This is not special to MCP:
 `terminal`'s `exec` with no `timeout_ms` has the same property, and so does any call an agent
 abandons.
+
+## Browser
+
+With the [Zyris browser extension](https://github.com/attacca-cc/zyris-browser-extension)
+installed in Chrome or Firefox, an agent can list tabs, open and navigate pages, read a page's
+text, and take a screenshot. The extension's README lists the tools and explains how they work.
+
+Pressing **Link browsers** in Settings does two things, then restarts Zyris:
+
+- It registers Zyris as the native messaging host `cc.attacca.zyris` with every Chrome,
+  Chromium, Brave, Edge and Firefox it finds for your user. On Windows it registers through
+  `HKCU`.
+- It adds a `browser` entry to `mcp-servers.json` that runs `zyris browser-mcp`, so the tools
+  arrive as the `mcp_browser` capability.
+
+Some limits for now:
+
+- Only the default instance can be linked. A `--server` run cannot be.
+- On Nix, the registered path is a store path. Press **Link browsers** again after an upgrade.
+- Flatpak and Snap browsers have not been tried. Their sandbox may stop them from starting the host.
 
 ## Voice
 
