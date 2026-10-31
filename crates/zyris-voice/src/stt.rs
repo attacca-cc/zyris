@@ -504,8 +504,9 @@ pub fn threads() -> usize {
 /// otherwise only assert on them by reading this file as text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// `None`, which is whisper detecting it; see [`WARM_LANGUAGE`] for why a turn is not told.
-    pub language: Option<&'static str>,
+    /// `None`, which is whisper detecting it; see [`WARM_LANGUAGE`] for why a turn is not told
+    /// unless somebody chose a language in the settings.
+    pub language: Option<String>,
     /// See [`threads`].
     pub threads: usize,
     /// See [`audio_ctx`]. The whole reason this module exists.
@@ -523,10 +524,10 @@ pub struct Settings {
 
 impl Settings {
     /// Whisper's parameters for these settings.
-    fn params(&self) -> whisper_rs::FullParams<'static, 'static> {
+    fn params(&self) -> whisper_rs::FullParams<'_, '_> {
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(self.language);
+        params.set_language(self.language.as_deref());
         params.set_n_threads(self.threads as std::ffi::c_int);
         params.set_audio_ctx(self.audio_ctx as std::ffi::c_int);
         params.set_translate(self.translate);
@@ -577,9 +578,22 @@ pub struct Stt {
     /// the GPU the full window costs 0.85 s a sentence for Large, 0.25 s for Small,
     /// 0.1 s for Base.
     short_window: bool,
+    /// The language every turn is told, or `None` to detect it per turn. See [`Stt::set_language`].
+    language: std::sync::Mutex<Option<String>>,
 }
 
 impl Stt {
+    /// Tell every turn from now on that it is `language` (a whisper code: `ko`, `en`, `fr`…), or
+    /// go back to detecting it with `None`. For somebody who speaks one language and finds a short
+    /// sentence detected as another. A code whisper does not know is detection, not a failure.
+    pub fn set_language(&self, language: Option<&str>) {
+        let known = language.filter(|code| !code.contains('\0') && whisper_rs::get_lang_id(code).is_some());
+        if known.is_none() && language.is_some() {
+            tracing::warn!(?language, "whisper does not know this language; detecting it instead");
+        }
+        *self.language.lock().unwrap_or_else(|p| p.into_inner()) = known.map(str::to_string);
+    }
+
     /// Load a model from disk.
     ///
     /// Installs whisper.cpp's logging hooks first, once per process. Without them the library
@@ -613,7 +627,12 @@ impl Stt {
             .map_err(|e| Fault::Whisper { detail: format!("{path:?} did not load: {e}") })?;
         // Base has six encoder layers; Small twelve, Large v3 Turbo thirty-two.
         let short_window = !device.is_gpu() && context.model_n_audio_layer() <= 6;
-        let stt = Stt { context, idle: std::sync::Mutex::new(Vec::new()), short_window };
+        let stt = Stt {
+            context,
+            idle: std::sync::Mutex::new(Vec::new()),
+            short_window,
+            language: std::sync::Mutex::new(None),
+        };
         // Warmed here, while the switch is being turned on, so the first turn is not the slow one.
         let first = stt.warm_state()?;
         stt.idle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(first);
@@ -633,7 +652,7 @@ impl Stt {
             .map_err(|e| Fault::Whisper { detail: format!("no decoder state: {e}") })?;
         let silence = vec![0.0f32; SAMPLE_RATE as usize];
         let mut settings = Settings::for_audio(silence.len());
-        settings.language = Some(WARM_LANGUAGE);
+        settings.language = Some(WARM_LANGUAGE.to_string());
         state
             .full(settings.params(), &silence)
             .map_err(|e| Fault::Whisper { detail: format!("the warm-up decode failed: {e}") })?;
@@ -676,6 +695,7 @@ impl Stt {
             return Ok(String::new());
         }
         let mut settings = Settings::for_audio(audio.len());
+        settings.language = self.language.lock().unwrap_or_else(|p| p.into_inner()).clone();
         if !self.short_window {
             settings.audio_ctx = FULL_CTX;
         }

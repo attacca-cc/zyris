@@ -71,6 +71,7 @@ pub fn run() {
             set_voice_volume,
             set_input_gain,
             set_follow_up_seconds,
+            set_speech_language,
             set_wake_phrase,
             set_speaking_rate,
             set_speech_model,
@@ -534,6 +535,11 @@ async fn set_wake_phrase(phrase: String, voice: VoiceState<'_>) -> Result<serde_
 #[tauri::command]
 async fn set_follow_up_seconds(seconds: u32, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
     Ok(screen(voice.choose_follow_up_seconds(seconds).await))
+}
+
+#[tauri::command]
+async fn set_speech_language(language: Option<String>, voice: VoiceState<'_>) -> Result<serde_json::Value, String> {
+    Ok(screen(voice.choose_language(language).await))
 }
 
 #[tauri::command]

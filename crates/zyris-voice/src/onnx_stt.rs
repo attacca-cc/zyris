@@ -251,6 +251,8 @@ pub struct OnnxStt {
     bins: usize,
     /// Set by [`crate::session::Transcribe::abandon`]; cleared as each window starts.
     stop: std::sync::atomic::AtomicBool,
+    /// The language token every window is told, or `None` to detect it per window.
+    language: Mutex<Option<u32>>,
 }
 
 impl OnnxStt {
@@ -289,6 +291,7 @@ impl OnnxStt {
             tokenizer,
             bins,
             stop: Default::default(),
+            language: Mutex::new(None),
         }
     }
 
@@ -316,7 +319,11 @@ impl OnnxStt {
         self.stop.store(false, std::sync::atomic::Ordering::Relaxed);
         let hop = crate::mel::SAMPLES / crate::mel::FRAMES;
         runtime.encode(&mel, audio.len().div_ceil(hop).min(crate::mel::FRAMES))?;
-        let language = detect_language(&mut **runtime, &self.specials)?;
+        let told = *self.language.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let language = match told {
+            Some(language) => language,
+            None => detect_language(&mut **runtime, &self.specials)?,
+        };
         if let Some((code, _)) = self
             .specials
             .languages
@@ -349,6 +356,17 @@ impl crate::session::Transcribe for OnnxStt {
 
     fn abandon(&self) {
         self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_language(&self, language: Option<&str>) {
+        let id = language.and_then(|code| {
+            let id = self.specials.languages.iter().find(|(c, _)| c == code).map(|(_, id)| *id);
+            if id.is_none() {
+                tracing::warn!(%code, "the model does not know this language; detecting it instead");
+            }
+            id
+        });
+        *self.language.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = id;
     }
 }
 
@@ -554,6 +572,24 @@ pub(crate) mod tests {
             stt.transcribe(&vec![0.1; 16_000]).expect("transcribes"),
             "hello"
         );
+    }
+
+    /// A chosen language skips detection: the script has no detection step, so running one would
+    /// read "hello" as the language and decode nothing. An unknown code goes back to detecting.
+    #[test]
+    fn a_chosen_language_is_told_rather_than_detected() {
+        use crate::session::Transcribe;
+        let stt = OnnxStt::with(
+            Box::new(Scripted::saying(vec![vec![(1911, 5.0)]])),
+            specials(),
+            tiny_tokenizer(),
+            80,
+        );
+        stt.set_language(Some("ko"));
+        assert_eq!(stt.transcribe(&vec![0.1; 16_000]).expect("transcribes"), "hello");
+
+        stt.set_language(Some("xx"));
+        assert_eq!(*stt.language.lock().unwrap(), None);
     }
 
     /// The wake-word check hands over up to `watch_cap()`, 35 s: the phrase and a whole request

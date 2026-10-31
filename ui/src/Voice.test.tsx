@@ -77,6 +77,7 @@ function machine(over: Partial<VoiceScreen["voice"]> & { hotkey?: VoiceScreen["h
       speaker: over.speaker ?? { kind: "default" },
       speakingRate: over.speakingRate ?? 1.25,
       followUpSeconds: over.followUpSeconds ?? 8,
+      language: over.language ?? null,
       readAloud: over.readAloud ?? true,
       volume: over.volume ?? 1,
       inputGain: over.inputGain ?? 1,
@@ -748,6 +749,15 @@ describe("Voice", () => {
     expect(shown(/listen after a question/i)).toBe("8 s");
     choose(/listen after a question/i, "Off");
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_follow_up_seconds", { seconds: 0 }));
+  });
+
+  it("sets the language speech is transcribed as", async () => {
+    render(<Voice />);
+
+    await screen.findByRole("combobox", { name: /language you speak/i });
+    expect(shown(/language you speak/i)).toBe("Detect each time");
+    choose(/language you speak/i, "Korean");
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_speech_language", { language: "ko" }));
   });
 
   it("says how big the download is before anybody agrees to it", async () => {
